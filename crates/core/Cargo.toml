@@ -1,0 +1,28 @@
+[package]
+name = "kiroscribe-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kiroscribe のUI非依存ロジック（保存・音声処理・文字起こし・Claude API）"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+rusqlite = { version = "0.43", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "charset", "http2", "system-proxy", "json", "multipart", "stream"] }
+futures-util = "0.3"
+cpal = "0.18"
+keyring-core = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-native-keyring-store = "1"
+winreg = "0.56"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"

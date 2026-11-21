@@ -1,0 +1,271 @@
+# Kiroscribe のリリース
+# 署名付きのインストーラをビルドして GitHub Release を作る。始め方は 2 通り:
+#   1. `v0.2.0` のようなタグを push する
+#   2. Actions の画面でこのワークフローを選び、「Run workflow」でバージョン（例: 0.2.0）を入力する
+#      （main ブランチでだけ実行できる。タグ `v<バージョン>` は、公開のときにそのコミットへ自動で付く）
+# 利用者のアプリは、Release に添付した latest.json を見て更新に気づく。
+#
+# 承認制にするには:
+#   このワークフローのジョブは Environment「release」で動く（Environment は最初の実行で自動的に作られる）。
+#   Settings → Environments → release で「Required reviewers」に自分を入れると、タグを push しても
+#   Actions の画面で承認するまでビルドも公開も始まらない。「Deployment branches and tags」で `v*` のタグだけを
+#   許可し、署名鍵の Secret をリポジトリからこの Environment に移すと、その条件を通ったジョブだけが鍵を読める。
+#
+# アクションは、タグではなくコミットのハッシュで固定している（タグは後から付け替えられるため）。
+# 行末のコメントがそのバージョンで、Dependabot がハッシュとコメントをまとめて更新する。
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "リリースするバージョン（例: 0.2.0）。package.json と同じ値"
+        required: true
+        type: string
+
+# 同じタグのリリースを同時に 2 つ走らせない（実行中のものは止めない）
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && format('refs/tags/v{0}', inputs.version) || github.ref }}
+  cancel-in-progress: false
+
+# 既定は読み取りだけ。書き込みの要る権限は、下のジョブにだけ与える
+permissions:
+  contents: read
+
+env:
+  NOTES_FILE: release-assets/release-notes.md
+  LATEST_JSON: release-assets/latest.json
+  SUMS_FILE: release-assets/SHA256SUMS.txt
+
+jobs:
+  release:
+    name: Windows（署名付きインストーラ・リリース）
+    runs-on: windows-latest
+    # 署名鍵を使い、Release を公開するジョブ。Environment に承認者を設定すると、承認されるまで始まらない
+    environment: release
+    permissions:
+      contents: write # Release の作成と、ファイルの添付
+      id-token: write # ビルドの来歴の証明（attestation）に署名するための、短時間だけ有効な証明書の取得
+      attestations: write # 証明をこのリポジトリに登録する
+    steps:
+      # persist-credentials: false … トークンを .git/config に残さない（後のステップで動く依存関係のコードから読めないようにする）
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      # ---- ビルドは時間がかかるので、すぐ分かる間違いは先に止める ----
+
+      # タグの push ならそのタグ、手動の実行なら入力したバージョンから「v0.2.0」の形のタグ名を決める
+      - name: リリースするタグの決定
+        id: tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            if [[ ! "$INPUT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+              echo "::error title=バージョンの形が違います::「0.2.0」のように、先頭の v を付けずに入力してください（入力: 「$INPUT_VERSION」）。"
+              exit 1
+            fi
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "::error title=main ブランチで実行してください::手動のリリースは main ブランチからだけ行えます（実行したのは $GITHUB_REF）。"
+              exit 1
+            fi
+            tag="v$INPUT_VERSION"
+            # 同じ名前のタグが別のコミットに付いていたら、取り違えを防ぐために止める
+            # タグがまだなければ gh は失敗し、エラーの本文を標準出力に出す。成功して、
+            # コミットのハッシュ（40 桁）が返ったときだけ「既にある」と判断する
+            existing=""
+            if found="$(gh api "repos/$GH_REPO/commits/$tag" --jq .sha 2> /dev/null)"; then
+              if [[ "$found" =~ ^[0-9a-f]{40}$ ]]; then
+                existing="$found"
+              fi
+            fi
+            if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "::error title=タグが別のコミットに付いています::タグ $tag は既に $existing に付いています（いまの main は $GITHUB_SHA）。バージョンを上げてから実行してください。"
+              exit 1
+            fi
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "リリースするタグ: $tag"
+
+      # タグ（v0.2.0）と package.json・Cargo.toml・tauri.conf.json のバージョンがそろっているか
+      - name: タグとバージョンの確認
+        id: version
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          version="$(node scripts/check-version.mjs --tag "$TAG")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # CHANGELOG.md に「## バージョン (日付)」の節がなければ、ここで失敗する
+      - name: リリースノートを CHANGELOG.md から取り出す
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          node scripts/release-notes.mjs --version "$VERSION" --output "$NOTES_FILE"
+          cat "$NOTES_FILE" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 署名鍵の Secret の確認
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error title=署名鍵が未設定です::Secret「TAURI_SIGNING_PRIVATE_KEY」が設定されていません。リポジトリの Settings → Secrets and variables → Actions（または Settings → Environments → release）で、アプリ内更新の署名に使う秘密鍵を登録してから、このワークフローを再実行してください。"
+            exit 1
+          fi
+
+      # ---- テスト（ci.yml と同じ内容） ----
+
+      # このアクションにはバージョンのタグがないので、master ブランチのコミットで固定し、
+      # ツールチェーンは入力で指定する（@stable と書くのと同じ動き）
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: 依存関係のインストール
+        run: npm ci
+
+      - name: リリース用スクリプトのテスト
+        working-directory: scripts
+        run: node --test
+
+      - name: 型チェック
+        run: npm run typecheck
+
+      - name: フロントエンドのテスト
+        run: npm run test:web
+
+      - name: Rust のテスト
+        run: cargo test --workspace --locked
+
+      # ---- ビルドと公開 ----
+
+      # tauri.conf.json の createUpdaterArtifacts により、インストーラの隣に署名（.exe.sig）ができる。
+      # 秘密鍵にパスワードがなければ、TAURI_SIGNING_PRIVATE_KEY_PASSWORD の Secret は未設定のままでよい
+      - name: インストーラのビルド（更新用の署名付き）
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build
+
+      - name: 署名の確認と latest.json の作成
+        id: assets
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # ファイル名は「<tauri.conf.json の productName>_<バージョン>_x64-setup.exe」
+          name="Kiroscribe_${VERSION}_x64-setup.exe"
+          installer="target/release/bundle/nsis/$name"
+          if [ ! -f "$installer" ]; then
+            echo "::error title=インストーラがありません::$installer ができていません。tauri.conf.json の productName と bundle.targets（nsis）を確かめてください。"
+            exit 1
+          fi
+          if [ ! -f "$installer.sig" ]; then
+            echo "::error title=署名がありません::$installer.sig ができていません。tauri.conf.json の bundle.createUpdaterArtifacts が true になっているか確かめてください。"
+            exit 1
+          fi
+
+          # 秘密鍵と、アプリに埋め込む公開鍵が対になっているか（違っていると、利用者は更新に失敗する）
+          node scripts/verify-update-signature.mjs \
+            --file "$installer" --signature "$installer.sig" --config src-tauri/tauri.conf.json
+
+          node scripts/make-latest-json.mjs \
+            --version "$VERSION" \
+            --installer "$name" \
+            --signature "$installer.sig" \
+            --notes "$NOTES_FILE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --output "$LATEST_JSON"
+          cat "$LATEST_JSON"
+
+          echo "installer=$installer" >> "$GITHUB_OUTPUT"
+
+      # ダウンロードしたインストーラが、ここでビルドしたものと同じかを利用者が確かめられるようにする。
+      # リリース本文はアプリの「リリースノート」にも表示されるので、本文には書かず、添付ファイルにする。
+      # 形式は「<SHA-256>  <ファイル名>」（sha256sum -c で照合できる）
+      - name: SHA256SUMS.txt の作成
+        shell: bash
+        env:
+          INSTALLER: ${{ steps.assets.outputs.installer }}
+        run: |
+          hash="$(sha256sum "$INSTALLER" | cut -d ' ' -f 1)"
+          if [[ ! "$hash" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error title=SHA-256 を計算できません::$INSTALLER の SHA-256 が 64 桁の 16 進数になりませんでした（「$hash」）。"
+            exit 1
+          fi
+          mkdir -p "$(dirname "$SUMS_FILE")"
+          printf '%s  %s\n' "$hash" "$(basename "$INSTALLER")" > "$SUMS_FILE"
+          cat "$SUMS_FILE"
+          printf '\n---\nSHA-256:\n\n```text\n%s\n```\n' "$(cat "$SUMS_FILE")" >> "$GITHUB_STEP_SUMMARY"
+
+      # 「このインストーラは、このリポジトリのこのワークフローが、このコミットからビルドした」という証明を
+      # GitHub に登録する（`gh attestation verify <ファイル> --repo <owner/name>` で確かめられる）。
+      # 公開の前に行い、証明を付けられなかったときは Release を作らない
+      - name: ビルドの来歴の証明（attestation）
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.assets.outputs.installer }}
+
+      # 同じタグで実行し直しても壊れないよう、Release が既にあれば添付ファイルと本文を上書きする
+      - name: GitHub Release の作成
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }} # checkout でトークンを残していないので、対象のリポジトリを明示する
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          INSTALLER: ${{ steps.assets.outputs.installer }}
+        run: |
+          tag="$TAG"
+          title="Kiroscribe $VERSION"
+
+          # 0.3.0-beta.1 のようにハイフンの付くバージョンは「プレリリース」にする。
+          # プレリリースは「最新のリリース」にならないので、利用者のアプリには配られない
+          prerelease=false
+          case "$VERSION" in
+            *-*) prerelease=true ;;
+          esac
+
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "Release $tag は既にあるので、添付ファイルと本文を上書きします"
+            # latest.json は、指している先のインストーラを置き換えたあとで置き換える
+            gh release upload "$tag" "$INSTALLER" "$INSTALLER.sig" "$SUMS_FILE" --clobber
+            gh release upload "$tag" "$LATEST_JSON" --clobber
+            gh release edit "$tag" --title "$title" --notes-file "$NOTES_FILE" \
+              --draft=false --prerelease="$prerelease"
+          else
+            # タグの push で始まったときは、そのタグがあることを確かめる。
+            # 手動の実行では、いまビルドしたコミットにタグを付けて公開する
+            if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+              tag_option=(--target "$GITHUB_SHA")
+            else
+              tag_option=(--verify-tag)
+            fi
+            # gh は下書きを作ってファイルを添付し、すべて添付できてから公開する
+            gh release create "$tag" "$INSTALLER" "$INSTALLER.sig" "$SUMS_FILE" "$LATEST_JSON" \
+              "${tag_option[@]}" --title "$title" --notes-file "$NOTES_FILE" \
+              --prerelease="$prerelease"
+          fi
+
+          url="$(gh release view "$tag" --json url --jq .url)"
+          echo "公開しました: $url"
+          printf '\n---\n公開したリリース: %s\n' "$url" >> "$GITHUB_STEP_SUMMARY"

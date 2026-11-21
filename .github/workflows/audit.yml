@@ -1,0 +1,113 @@
+# 依存関係の検査
+# 使っているライブラリ（Rust のクレートと npm のパッケージ）に、公表済みの脆弱性がないかを調べる。
+#
+# - ビルドやリリースを止めないよう、ci.yml・release.yml とは別のワークフローにしている。
+# - Secret は使わない（フォークからのプルリクエストでも同じ内容が動く）。
+# - 失敗にするのは「脆弱性」だけ。「メンテナンスされていない（unmaintained）」「不健全（unsound）」などの
+#   警告は、結果に表示するが失敗にはしない（理由は下の cargo audit のステップに書いた）。
+# - アクションは、タグではなくコミットのハッシュで固定している（タグは後から付け替えられるため）。
+#   行末のコメントがそのバージョンで、Dependabot がハッシュとコメントをまとめて更新する。
+name: audit
+
+on:
+  # 依存関係を変えていなくても、新しい脆弱性は後から公表されるので、週に 1 回調べる
+  schedule:
+    - cron: "30 0 * * 1" # 毎週月曜 9:30（日本時間）
+  push:
+    branches:
+      - main
+    paths:
+      - Cargo.lock
+      - package-lock.json
+      - .github/workflows/audit.yml
+  pull_request:
+    paths:
+      - Cargo.lock
+      - package-lock.json
+      - .github/workflows/audit.yml
+  workflow_dispatch:
+
+# 同じブランチで新しい実行が始まったら、古いほうは止める（すぐ終わる検査なので、最新の結果だけあればよい）
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+# このワークフローに渡すトークンは、リポジトリの読み取りだけ
+permissions:
+  contents: read
+
+jobs:
+  cargo:
+    name: Rust（cargo audit）
+    runs-on: ubuntu-latest
+    steps:
+      # persist-credentials: false … トークンを .git/config に残さない
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # このアクションにはバージョンのタグがないので、master ブランチのコミットで固定し、
+      # ツールチェーンは入力で指定する（@stable と書くのと同じ動き）
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+
+      # サードパーティ製のアクションを増やさないよう、cargo で直接入れる（数分かかる）。
+      # 新しい形式の勧告を読めるよう、バージョンは固定せず、その時点の最新を使う
+      - name: cargo-audit のインストール
+        run: cargo install cargo-audit --locked
+
+      # Cargo.lock にある全クレート（Windows 用だけでなく、開発用の Linux でだけ使うものも含む）を、
+      # RustSec の勧告データベースと照合する。
+      #
+      # 脆弱性が 1 件でもあれば失敗する。警告（unmaintained・unsound・yanked）は表示するだけにしている。
+      # 2026-11-21 の時点で警告が 6 件あり、どれもこのリポジトリの側では直せないため:
+      #   - chrono（unmaintained）: 直接使っているが、勧告に「修正版なし」とある
+      #   - zvariant・zvariant_derive・zbus_names（unmaintained）、proc-macro-error（unmaintained）、
+      #     glib 0.18（unsound）: Tauri が Linux でだけ使う。配布している Windows 版には含まれない
+      # これらを失敗にすると常に赤いままになり、本当に対処の要る脆弱性が出たときに気づけなくなる。
+      # 警告の内容は、実行結果の Summary で確かめられる。
+      - name: cargo audit
+        shell: bash
+        run: |
+          status=0
+          cargo audit --color never > "$RUNNER_TEMP/cargo-audit.txt" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/cargo-audit.txt"
+          {
+            echo "### cargo audit"
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP/cargo-audit.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+  npm:
+    name: npm（npm audit）
+    runs-on: ubuntu-latest
+    steps:
+      # persist-credentials: false … トークンを .git/config に残さない
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      # package-lock.json だけを見て調べる（パッケージのインストールはしない）。
+      # 重大度が high 以上の脆弱性があれば失敗する。それより低いものは表示するだけ
+      - name: npm audit
+        shell: bash
+        run: |
+          status=0
+          npm audit --audit-level=high > "$RUNNER_TEMP/npm-audit.txt" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/npm-audit.txt"
+          {
+            echo "### npm audit"
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP/npm-audit.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"

@@ -1,0 +1,639 @@
+//! 会議の自動検出。
+//!
+//! 「どのアプリがマイクを使っているか」を手がかりにする。Windows はタスクバーのマイク表示のために、
+//! アプリごとのマイク使用状況をレジストリ（CapabilityAccessManager）に記録しているので、それを数秒ごとに読む。
+//! - Slack（ハドル）・Zoom・Teams・Discord のデスクトップ版は、マイクを使い始めたら会議中とみなす
+//! - ブラウザがマイクを使っているときは、ウィンドウタイトル（表示中のタブ）が Google Meet などなら会議中とみなす
+//!
+//! 判定（[`detect`]）と開始・終了の確定（[`MeetingTracker`]）は OS に依存しないのでテストできる。
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MeetingApp {
+    GoogleMeet,
+    SlackHuddle,
+    Zoom,
+    Teams,
+    Discord,
+}
+
+impl MeetingApp {
+    pub fn label(self) -> &'static str {
+        match self {
+            MeetingApp::GoogleMeet => "Google Meet",
+            MeetingApp::SlackHuddle => "Slack ハドル",
+            MeetingApp::Zoom => "Zoom",
+            MeetingApp::Teams => "Teams",
+            MeetingApp::Discord => "Discord",
+        }
+    }
+}
+
+/// マイクを使った記録のあるアプリ。`id` は実行ファイルのフルパス、またはストアアプリのパッケージ名。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MicUser {
+    pub id: String,
+    pub in_use: bool,
+}
+
+/// 表示中のトップレベルウィンドウ。`exe` は実行ファイル名（小文字）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowInfo {
+    pub exe: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Observation {
+    pub mic_users: Vec<MicUser>,
+    pub windows: Vec<WindowInfo>,
+}
+
+const BROWSERS: &[&str] = &[
+    "chrome.exe",
+    "msedge.exe",
+    "firefox.exe",
+    "brave.exe",
+    "vivaldi.exe",
+    "opera.exe",
+    "arc.exe",
+];
+
+/// パスの最後の要素（実行ファイル名）を小文字で返す。
+pub fn exe_name(id: &str) -> String {
+    id.rsplit(['\\', '/']).next().unwrap_or(id).to_lowercase()
+}
+
+fn desktop_app(id: &str) -> Option<MeetingApp> {
+    let lower = id.to_lowercase();
+    // ストアアプリ（新しい Teams など）はパッケージ名で記録される
+    if lower.starts_with("msteams_") || lower.starts_with("microsoftteams_") {
+        return Some(MeetingApp::Teams);
+    }
+    match exe_name(&lower).as_str() {
+        "slack.exe" => Some(MeetingApp::SlackHuddle),
+        "zoom.exe" | "cpthost.exe" => Some(MeetingApp::Zoom),
+        "ms-teams.exe" | "teams.exe" => Some(MeetingApp::Teams),
+        // Discord はボイスチャンネル・通話に入っている間だけマイクを使う（PTB・Canary 版も対象）
+        "discord.exe" | "discordptb.exe" | "discordcanary.exe" => Some(MeetingApp::Discord),
+        _ => None,
+    }
+}
+
+/// ブラウザのウィンドウタイトル（表示中のタブ）から会議サービスを判定する。
+pub fn web_meeting(title: &str) -> Option<MeetingApp> {
+    let t = title.to_lowercase();
+    let is_meet = t.contains("google meet")
+        || t.starts_with("meet - ")
+        || t.starts_with("meet – ")
+        || t.starts_with("meet: ")
+        || t.starts_with("meet：")
+        || t.contains(" - meet - ")
+        || t.contains("meet.google.com");
+    if is_meet {
+        return Some(MeetingApp::GoogleMeet);
+    }
+    if t.contains("slack") && (t.contains("huddle") || t.contains("ハドル")) {
+        return Some(MeetingApp::SlackHuddle);
+    }
+    if t.contains("microsoft teams") && (t.contains("meeting") || t.contains("会議") || t.contains("call") || t.contains("通話")) {
+        return Some(MeetingApp::Teams);
+    }
+    if t.contains("zoom") && (t.contains("meeting") || t.contains("ミーティング")) {
+        return Some(MeetingApp::Zoom);
+    }
+    // ブラウザ版 Discord（例:「Discord | #雑談 | 開発チーム」）。ブラウザがマイクを使っていれば通話中
+    if t.contains("discord") {
+        return Some(MeetingApp::Discord);
+    }
+    None
+}
+
+/// 検出した会議。`via_browser` ならブラウザでの会議（タブのタイトルで判定した）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Detection {
+    pub app: MeetingApp,
+    pub via_browser: bool,
+}
+
+/// 自分自身（録音中の Kiroscribe）を除いた、いまマイクを使っているアプリ。
+fn active_mic_users<'a>(observation: &'a Observation, own_exe: Option<&str>) -> Vec<&'a MicUser> {
+    let own = own_exe.map(str::to_lowercase);
+    let own_name = own.as_deref().map(exe_name);
+    observation
+        .mic_users
+        .iter()
+        .filter(|u| u.in_use)
+        .filter(|u| {
+            let id = u.id.to_lowercase();
+            Some(&id) != own.as_ref() && Some(exe_name(&id)) != own_name
+        })
+        .collect()
+}
+
+fn browser_in_use(active: &[&MicUser]) -> bool {
+    active
+        .iter()
+        .any(|u| BROWSERS.contains(&exe_name(&u.id).as_str()))
+}
+
+/// いま会議が始まっているかどうか。`own_exe` は自分自身（録音中の Kiroscribe）を除外するためのパス。
+pub fn detect(observation: &Observation, own_exe: Option<&str>) -> Option<Detection> {
+    let active = active_mic_users(observation, own_exe);
+
+    // デスクトップの会議アプリが優先
+    if let Some(app) = active.iter().find_map(|u| desktop_app(&u.id)) {
+        return Some(Detection {
+            app,
+            via_browser: false,
+        });
+    }
+
+    // ブラウザがマイクを使っているなら、ブラウザのウィンドウタイトル（表示中のタブ）を見る
+    if !browser_in_use(&active) {
+        return None;
+    }
+    observation
+        .windows
+        .iter()
+        .filter(|w| BROWSERS.contains(&w.exe.as_str()))
+        .find_map(|w| web_meeting(&w.title))
+        .map(|app| Detection {
+            app,
+            via_browser: true,
+        })
+}
+
+/// 始まった会議が続いているか。ブラウザでの会議は、別のタブに切り替えてタイトルが変わっても、
+/// ブラウザがマイクを使い続けている間は続いているとみなす。
+pub fn still_active(observation: &Observation, meeting: &Detection, own_exe: Option<&str>) -> bool {
+    let active = active_mic_users(observation, own_exe);
+    if meeting.via_browser {
+        browser_in_use(&active)
+    } else {
+        active.iter().any(|u| desktop_app(&u.id) == Some(meeting.app))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeetingEvent {
+    Started(MeetingApp),
+    Ended(MeetingApp),
+}
+
+/// 検出結果の揺れを吸収して、会議の開始・終了を確定させる。
+///
+/// - 開始: 同じ会議が `start_confirm_ms` 続いたら（一瞬マイクを使っただけでは反応しない）
+/// - 終了: 会議が見えなくなってから `end_grace_ms` たったら（タブの切り替えや一時的な中断では終わらせない）
+#[derive(Debug, Clone)]
+pub struct MeetingTracker {
+    pub start_confirm_ms: i64,
+    pub end_grace_ms: i64,
+    candidate: Option<(Detection, i64)>,
+    active: Option<Detection>,
+    last_seen_ms: i64,
+}
+
+impl Default for MeetingTracker {
+    fn default() -> Self {
+        Self {
+            start_confirm_ms: 4_000,
+            end_grace_ms: 20_000,
+            candidate: None,
+            active: None,
+            last_seen_ms: 0,
+        }
+    }
+}
+
+impl MeetingTracker {
+    /// 進行中の会議。
+    pub fn active(&self) -> Option<Detection> {
+        self.active
+    }
+
+    /// `detected` はいま始まりそうな会議、`continuing` は進行中の会議がまだ続いているか（[`still_active`]）。
+    pub fn tick(&mut self, detected: Option<Detection>, continuing: bool, now_ms: i64) -> Option<MeetingEvent> {
+        if let Some(active) = self.active {
+            if continuing || detected.is_some() {
+                self.last_seen_ms = now_ms;
+                return None;
+            }
+            if now_ms - self.last_seen_ms >= self.end_grace_ms {
+                self.active = None;
+                self.candidate = None;
+                return Some(MeetingEvent::Ended(active.app));
+            }
+            return None;
+        }
+
+        match detected {
+            Some(detection) => match self.candidate {
+                Some((candidate, since)) if candidate.app == detection.app => {
+                    if now_ms - since >= self.start_confirm_ms {
+                        self.active = Some(detection);
+                        self.last_seen_ms = now_ms;
+                        self.candidate = None;
+                        return Some(MeetingEvent::Started(detection.app));
+                    }
+                    None
+                }
+                _ => {
+                    self.candidate = Some((detection, now_ms));
+                    None
+                }
+            },
+            None => {
+                self.candidate = None;
+                None
+            }
+        }
+    }
+
+    /// 観測結果から 1 回分を進める。
+    pub fn observe(&mut self, observation: &Observation, own_exe: Option<&str>, now_ms: i64) -> Option<MeetingEvent> {
+        let detected = detect(observation, own_exe);
+        let continuing = self
+            .active
+            .is_some_and(|active| still_active(observation, &active, own_exe));
+        self.tick(detected, continuing, now_ms)
+    }
+}
+
+/// 現在のマイク使用状況とウィンドウを調べる。Windows 以外では何も検出しない。
+pub fn observe() -> Observation {
+    #[cfg(windows)]
+    {
+        windows_observer::observe()
+    }
+    #[cfg(not(windows))]
+    {
+        Observation::default()
+    }
+}
+
+#[cfg(windows)]
+pub mod windows_observer {
+    use std::collections::HashMap;
+
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+
+    use super::{exe_name, MicUser, Observation, WindowInfo};
+
+    pub const CONSENT_STORE: &str =
+        r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
+
+    fn in_use(key: &RegKey) -> bool {
+        let start: u64 = key.get_value("LastUsedTimeStart").unwrap_or(0);
+        let stop: u64 = key.get_value("LastUsedTimeStop").unwrap_or(1);
+        // 使用中は終了時刻が 0 のまま
+        start > 0 && stop == 0
+    }
+
+    /// `root\path` 以下のマイク使用記録を読む（テストでは別のキーを渡す）。
+    pub fn read_mic_users(root: &RegKey, path: &str) -> Vec<MicUser> {
+        let Ok(base) = root.open_subkey(path) else {
+            return Vec::new();
+        };
+        let mut users = Vec::new();
+        for name in base.enum_keys().flatten() {
+            let Ok(key) = base.open_subkey(&name) else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case("NonPackaged") {
+                // 通常のデスクトップアプリ。キー名はパスの「\」を「#」に置き換えたもの
+                for app in key.enum_keys().flatten() {
+                    if let Ok(app_key) = key.open_subkey(&app) {
+                        users.push(MicUser {
+                            id: app.replace('#', "\\"),
+                            in_use: in_use(&app_key),
+                        });
+                    }
+                }
+            } else {
+                users.push(MicUser {
+                    in_use: in_use(&key),
+                    id: name,
+                });
+            }
+        }
+        users
+    }
+
+    fn process_exe(pid: u32, cache: &mut HashMap<u32, String>) -> String {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        if let Some(name) = cache.get(&pid) {
+            return name.clone();
+        }
+        let mut name = String::new();
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if !handle.is_null() {
+                let mut buf = [0u16; 1024];
+                let mut size = buf.len() as u32;
+                if QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut size) != 0 {
+                    name = exe_name(&String::from_utf16_lossy(&buf[..size as usize]));
+                }
+                CloseHandle(handle);
+            }
+        }
+        cache.insert(pid, name.clone());
+        name
+    }
+
+    unsafe extern "system" fn collect_window(
+        hwnd: windows_sys::Win32::Foundation::HWND,
+        lparam: windows_sys::Win32::Foundation::LPARAM,
+    ) -> windows_sys::core::BOOL {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+        };
+        let list = &mut *(lparam as *mut Vec<(u32, String)>);
+        if IsWindowVisible(hwnd) == 0 {
+            return 1;
+        }
+        let len = GetWindowTextLengthW(hwnd);
+        if len <= 0 {
+            return 1;
+        }
+        let mut buf = vec![0u16; len as usize + 1];
+        let copied = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        if copied <= 0 {
+            return 1;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        list.push((pid, String::from_utf16_lossy(&buf[..copied as usize])));
+        1
+    }
+
+    /// 表示中のトップレベルウィンドウのタイトルと実行ファイル名。
+    pub fn list_windows() -> Vec<WindowInfo> {
+        use windows_sys::Win32::UI::WindowsAndMessaging::EnumWindows;
+        let mut raw: Vec<(u32, String)> = Vec::new();
+        unsafe {
+            EnumWindows(Some(collect_window), &mut raw as *mut _ as isize);
+        }
+        let mut cache = HashMap::new();
+        raw.into_iter()
+            .map(|(pid, title)| WindowInfo {
+                exe: process_exe(pid, &mut cache),
+                title,
+            })
+            .collect()
+    }
+
+    pub fn observe() -> Observation {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let mic_users = read_mic_users(&hkcu, CONSENT_STORE);
+        // ウィンドウを列挙するのは、ブラウザがマイクを使っているときだけ
+        let windows = if mic_users.iter().any(|u| u.in_use) {
+            list_windows()
+        } else {
+            Vec::new()
+        };
+        Observation { mic_users, windows }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::RegKey;
+
+        use super::*;
+
+        /// 本物と同じ形のキーをテスト用の場所に作って読む
+        #[test]
+        fn reads_consent_store_layout() {
+            let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+            let path = format!(r"Software\Kiroscribe-test-{}\microphone", std::process::id());
+            let (base, _) = hkcu.create_subkey(&path).unwrap();
+            let (np, _) = base.create_subkey("NonPackaged").unwrap();
+            let (slack, _) = np.create_subkey(r"C:#Users#me#AppData#Local#slack#slack.exe").unwrap();
+            slack.set_value("LastUsedTimeStart", &133_000_000_000_000_000u64).unwrap();
+            slack.set_value("LastUsedTimeStop", &0u64).unwrap();
+            let (chrome, _) = np.create_subkey(r"C:#Program Files#Google#Chrome#Application#chrome.exe").unwrap();
+            chrome.set_value("LastUsedTimeStart", &133_000_000_000_000_000u64).unwrap();
+            chrome.set_value("LastUsedTimeStop", &133_000_000_000_100_000u64).unwrap();
+            let (teams, _) = base.create_subkey("MSTeams_8wekyb3d8bbwe").unwrap();
+            teams.set_value("LastUsedTimeStart", &133_000_000_000_000_000u64).unwrap();
+            teams.set_value("LastUsedTimeStop", &0u64).unwrap();
+
+            let mut users = read_mic_users(&hkcu, &path);
+            users.sort_by(|a, b| a.id.cmp(&b.id));
+            hkcu.delete_subkey_all(path.rsplit_once('\\').unwrap().0).unwrap();
+
+            assert_eq!(users.len(), 3);
+            let slack = users.iter().find(|u| u.id.ends_with("slack.exe")).unwrap();
+            assert_eq!(slack.id, r"C:\Users\me\AppData\Local\slack\slack.exe");
+            assert!(slack.in_use);
+            assert!(!users.iter().find(|u| u.id.ends_with("chrome.exe")).unwrap().in_use);
+            assert!(users.iter().find(|u| u.id.starts_with("MSTeams")).unwrap().in_use);
+        }
+
+        #[test]
+        fn observe_does_not_fail() {
+            // 実際のレジストリとウィンドウを読んでもパニックしない
+            let _ = observe();
+            let _ = list_windows();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mic(id: &str, in_use: bool) -> MicUser {
+        MicUser {
+            id: id.into(),
+            in_use,
+        }
+    }
+
+    fn win(exe: &str, title: &str) -> WindowInfo {
+        WindowInfo {
+            exe: exe.into(),
+            title: title.into(),
+        }
+    }
+
+    const CHROME: &str = r"C:\Program Files\Google\Chrome\Application\chrome.exe";
+
+    fn app(d: Option<Detection>) -> Option<MeetingApp> {
+        d.map(|d| d.app)
+    }
+
+    fn found(app: MeetingApp, via_browser: bool) -> Option<Detection> {
+        Some(Detection { app, via_browser })
+    }
+
+    #[test]
+    fn desktop_apps_using_mic_are_meetings() {
+        let obs = |id: &str| Observation {
+            mic_users: vec![mic(id, true)],
+            windows: vec![],
+        };
+        assert_eq!(detect(&obs(r"C:\Users\me\AppData\Local\slack\slack.exe"), None), found(MeetingApp::SlackHuddle, false));
+        assert_eq!(app(detect(&obs(r"C:\Users\me\AppData\Roaming\Zoom\bin\Zoom.exe"), None)), Some(MeetingApp::Zoom));
+        assert_eq!(app(detect(&obs("MSTeams_8wekyb3d8bbwe"), None)), Some(MeetingApp::Teams));
+        assert_eq!(
+            detect(&obs(r"C:\Users\me\AppData\Local\Discord\app-1.0.9187\Discord.exe"), None),
+            found(MeetingApp::Discord, false)
+        );
+        assert_eq!(
+            app(detect(&obs(r"C:\Users\me\AppData\Local\DiscordPTB\app-1.0.1100\DiscordPTB.exe"), None)),
+            Some(MeetingApp::Discord)
+        );
+        assert_eq!(detect(&obs(r"C:\Program Files\Audacity\Audacity.exe"), None), None, "会議アプリ以外は無視");
+    }
+
+    #[test]
+    fn apps_not_using_mic_now_are_ignored() {
+        let obs = Observation {
+            mic_users: vec![mic(r"C:\slack\slack.exe", false)],
+            windows: vec![],
+        };
+        assert_eq!(detect(&obs, None), None);
+    }
+
+    #[test]
+    fn browser_meetings_are_detected_by_window_title() {
+        let base = |title: &str| Observation {
+            mic_users: vec![mic(CHROME, true)],
+            windows: vec![win("explorer.exe", "エクスプローラー"), win("chrome.exe", title)],
+        };
+        assert_eq!(detect(&base("Meet - abc-defg-hij - Google Chrome"), None), found(MeetingApp::GoogleMeet, true));
+        assert_eq!(app(detect(&base("Meet – 週次定例 - Google Chrome"), None)), Some(MeetingApp::GoogleMeet));
+        assert_eq!(app(detect(&base("ハドル: #dev - Acme - Slack - Google Chrome"), None)), Some(MeetingApp::SlackHuddle));
+        assert_eq!(detect(&base("Discord | #雑談 | 開発チーム - Google Chrome"), None), found(MeetingApp::Discord, true));
+        assert_eq!(app(detect(&base("#general | Acme - Discord - Google Chrome"), None)), Some(MeetingApp::Discord));
+        assert_eq!(detect(&base("YouTube - Google Chrome"), None), None, "会議以外のサイトでのマイク使用は無視");
+    }
+
+    #[test]
+    fn browser_title_needs_browser_using_mic() {
+        let obs = Observation {
+            mic_users: vec![mic(CHROME, false)],
+            windows: vec![win("chrome.exe", "Meet - abc-defg-hij - Google Chrome")],
+        };
+        assert_eq!(detect(&obs, None), None, "Meet を開いているだけでは会議中としない");
+    }
+
+    #[test]
+    fn own_process_is_excluded() {
+        let own = r"C:\Users\me\AppData\Local\Kiroscribe\kiroscribe.exe";
+        let obs = Observation {
+            mic_users: vec![mic(own, true), mic(CHROME, true)],
+            windows: vec![win("chrome.exe", "Gmail - Google Chrome")],
+        };
+        assert_eq!(detect(&obs, Some(own)), None);
+        let obs = Observation {
+            mic_users: vec![mic(own, true), mic(r"C:\slack\slack.exe", true)],
+            windows: vec![],
+        };
+        assert_eq!(app(detect(&obs, Some(&own.to_uppercase()))), Some(MeetingApp::SlackHuddle));
+    }
+
+    #[test]
+    fn browser_meeting_continues_after_switching_tabs() {
+        let meet = Detection { app: MeetingApp::GoogleMeet, via_browser: true };
+        // 別のタブ（資料）を見ていても、ブラウザがマイクを使っていれば続いている
+        let switched = Observation {
+            mic_users: vec![mic(CHROME, true)],
+            windows: vec![win("chrome.exe", "企画書 - Google ドキュメント - Google Chrome")],
+        };
+        assert_eq!(detect(&switched, None), None);
+        assert!(still_active(&switched, &meet, None));
+        // 通話を抜けてマイクを放したら終わり
+        let left = Observation {
+            mic_users: vec![mic(CHROME, false)],
+            windows: switched.windows.clone(),
+        };
+        assert!(!still_active(&left, &meet, None));
+    }
+
+    #[test]
+    fn desktop_meeting_continues_only_while_that_app_uses_mic() {
+        let zoom = Detection { app: MeetingApp::Zoom, via_browser: false };
+        let obs = |zoom_in_use: bool| Observation {
+            mic_users: vec![mic(r"C:\Zoom\bin\Zoom.exe", zoom_in_use), mic(CHROME, true)],
+            windows: vec![],
+        };
+        assert!(still_active(&obs(true), &zoom, None));
+        assert!(!still_active(&obs(false), &zoom, None), "ブラウザがマイクを使っていても Zoom の会議は終わり");
+    }
+
+    #[test]
+    fn tracker_follows_observations_end_to_end() {
+        let mut t = MeetingTracker::default();
+        let in_meet = Observation {
+            mic_users: vec![mic(CHROME, true)],
+            windows: vec![win("chrome.exe", "Meet - abc-defg-hij - Google Chrome")],
+        };
+        let other_tab = Observation {
+            mic_users: vec![mic(CHROME, true)],
+            windows: vec![win("chrome.exe", "Slack - Google Chrome")],
+        };
+        let left = Observation::default();
+        assert_eq!(t.observe(&in_meet, None, 0), None);
+        assert_eq!(t.observe(&in_meet, None, 4_000), Some(MeetingEvent::Started(MeetingApp::GoogleMeet)));
+        // タブを切り替えて 1 分たっても終わらない
+        for s in 1..=30 {
+            assert_eq!(t.observe(&other_tab, None, 4_000 + s * 2_000), None);
+        }
+        assert_eq!(t.observe(&left, None, 70_000), None);
+        assert_eq!(t.observe(&left, None, 84_000), Some(MeetingEvent::Ended(MeetingApp::GoogleMeet)));
+    }
+
+    #[test]
+    fn tracker_confirms_start_after_a_few_seconds() {
+        let mut t = MeetingTracker::default();
+        let meet = found(MeetingApp::GoogleMeet, true);
+        assert_eq!(t.tick(meet, false, 0), None);
+        assert_eq!(t.tick(meet, false, 2_000), None);
+        assert_eq!(t.tick(meet, false, 4_000), Some(MeetingEvent::Started(MeetingApp::GoogleMeet)));
+        assert_eq!(app(t.active()), Some(MeetingApp::GoogleMeet));
+        assert_eq!(t.tick(meet, true, 6_000), None, "開始は一度だけ");
+    }
+
+    #[test]
+    fn brief_mic_use_does_not_start() {
+        let mut t = MeetingTracker::default();
+        let slack = found(MeetingApp::SlackHuddle, false);
+        assert_eq!(t.tick(slack, false, 0), None);
+        assert_eq!(t.tick(None, false, 2_000), None);
+        assert_eq!(t.tick(slack, false, 4_000), None, "途切れたら数え直す");
+        assert_eq!(t.tick(slack, false, 8_000), Some(MeetingEvent::Started(MeetingApp::SlackHuddle)));
+    }
+
+    #[test]
+    fn tracker_ends_after_grace_period() {
+        let mut t = MeetingTracker::default();
+        let zoom = found(MeetingApp::Zoom, false);
+        t.tick(zoom, false, 0);
+        t.tick(zoom, false, 4_000);
+        // 15 秒途切れても終わらない
+        assert_eq!(t.tick(None, false, 10_000), None);
+        assert_eq!(t.tick(None, false, 19_000), None);
+        assert_eq!(t.tick(None, true, 20_000), None, "戻ってきたら続き");
+        assert_eq!(t.tick(None, false, 30_000), None);
+        assert_eq!(t.tick(None, false, 40_000), Some(MeetingEvent::Ended(MeetingApp::Zoom)));
+        assert_eq!(t.active(), None);
+        assert_eq!(t.tick(None, false, 50_000), None);
+    }
+
+    #[test]
+    fn exe_name_handles_both_separators() {
+        assert_eq!(exe_name(r"C:\A\Slack.EXE"), "slack.exe");
+        assert_eq!(exe_name("/usr/bin/zoom"), "zoom");
+        assert_eq!(exe_name("MSTeams_8wekyb3d8bbwe"), "msteams_8wekyb3d8bbwe");
+    }
+}

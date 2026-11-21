@@ -1,0 +1,27 @@
+node_modules/
+dist/
+target/
+src-tauri/gen/
+*.log
+.DS_Store
+Thumbs.db
+
+# エディタ
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 一時ファイル
+*.tmp
+*.temp
+
+# リリースのワークフロー（release.yml）が作る中間ファイル
+release-assets/
+
+# アプリ内更新の署名鍵（秘密鍵は GitHub の Secret にだけ置き、コミットしない）
+*.key
+
+# MCP の設定（API キーを含むことがある）
+.mcp.json

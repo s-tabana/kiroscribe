@@ -1,0 +1,55 @@
+# Dependabot の設定。依存関係の更新を週 1 回まとめてプルリクエストにする。
+# 脆弱性の修正（セキュリティアップデート）は、リポジトリの設定で有効にしておけば
+# ここの予定とは別に、見つかりしだいプルリクエストが作られる。
+version: 2
+updates:
+  # フロントエンド（npm）
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Tokyo
+    open-pull-requests-limit: 5
+    groups:
+      # Tauri は npm 側と Rust 側のバージョンをそろえる必要があるため、まとめて上げる
+      tauri:
+        patterns:
+          - "@tauri-apps/*"
+      npm-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Rust（Cargo ワークスペース）
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Tokyo
+    open-pull-requests-limit: 5
+    groups:
+      tauri:
+        patterns:
+          - "tauri"
+          - "tauri-*"
+      cargo-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions（ワークフローで使うアクション）
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Tokyo
+    groups:
+      actions:
+        patterns:
+          - "*"
