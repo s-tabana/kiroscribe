@@ -129,6 +129,12 @@ jobs:
             echo "::error title=署名鍵が未設定です::Secret「TAURI_SIGNING_PRIVATE_KEY」が設定されていません。リポジトリの Settings → Secrets and variables → Actions（または Settings → Environments → release）で、アプリ内更新の署名に使う秘密鍵を登録してから、このワークフローを再実行してください。"
             exit 1
           fi
+          # 中身が鍵の形をしているか（鍵ファイルの中身は base64 の 1 行で、復号すると決まった書き出しになる）。
+          # 貼り間違いを、時間のかかるビルドの前に見つける。鍵そのものは表示しない
+          if ! printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | tr -d ' \r\n' | base64 -d 2> /dev/null | head -c 60 | grep -q '^untrusted comment: .*secret key'; then
+            echo "::error title=署名鍵の形が違います::Secret「TAURI_SIGNING_PRIVATE_KEY」の中身が、署名鍵の形になっていません。鍵ファイル（.key）をテキストエディタで開き、中身の 1 行をまるごと貼り付けて登録し直してください（ファイル名や Secret の名前ではなく、ファイルの中身です）。"
+            exit 1
+          fi
 
       # ---- テスト（ci.yml と同じ内容） ----
 
