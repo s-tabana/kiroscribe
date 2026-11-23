@@ -1,0 +1,61 @@
+# 本物の API（OpenAI の文字起こし・Anthropic の Messages）で、アプリの送り方がいまも受け付けられるかを確かめる
+# （crates/core/tests/live_api.rs）。設定画面で選べるすべてのモデルに、ごく短い問い合わせを送る（1 回で数円）。
+#
+# 使う API キーは、リポジトリの Secret「KIROSCRIBE_LIVE_OPENAI_KEY」「KIROSCRIBE_LIVE_ANTHROPIC_KEY」
+# （Settings → Secrets and variables → Actions）。テスト専用のキーを作り、使える金額に上限を付けて登録する。
+# 登録していないキーの分は、確かめずに終わる（その旨を Summary に出す）。
+# フォークからのプルリクエストでは動かない（手動の実行と、週に 1 回だけ）。
+name: live-api
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 毎週月曜 09:17（日本時間 18:17）。モデルの廃止などに、リリースの前に気づくため
+    - cron: "17 9 * * 1"
+
+concurrency:
+  group: live-api
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  live-api:
+    name: 本物の API
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: システムの依存関係
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev
+
+      - name: API キーの確認
+        env:
+          OPENAI_KEY: ${{ secrets.KIROSCRIBE_LIVE_OPENAI_KEY }}
+          ANTHROPIC_KEY: ${{ secrets.KIROSCRIBE_LIVE_ANTHROPIC_KEY }}
+        run: |
+          for pair in "OpenAI:$OPENAI_KEY:KIROSCRIBE_LIVE_OPENAI_KEY" "Anthropic:$ANTHROPIC_KEY:KIROSCRIBE_LIVE_ANTHROPIC_KEY"; do
+            name="${pair%%:*}"; rest="${pair#*:}"; value="${rest%:*}"; secret="${rest##*:}"
+            if [ -z "$value" ]; then
+              echo "::notice title=$name の API キーがありません::Secret「$secret」が未設定のため、$name の API は確かめません。"
+              echo "- $name: Secret「$secret」が未設定のため、確かめていません" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+      - name: 本物の API のテスト
+        env:
+          KIROSCRIBE_LIVE_OPENAI_KEY: ${{ secrets.KIROSCRIBE_LIVE_OPENAI_KEY }}
+          KIROSCRIBE_LIVE_ANTHROPIC_KEY: ${{ secrets.KIROSCRIBE_LIVE_ANTHROPIC_KEY }}
+        run: cargo test -p kiroscribe-core --test live_api --locked -- --nocapture
