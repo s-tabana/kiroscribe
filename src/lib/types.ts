@@ -38,6 +38,8 @@ export interface Settings {
   autoRecordMeetings: boolean;
   /** Windows の起動時に起動してタスクトレイに常駐する */
   launchAtLogin: boolean;
+  /** 見つけた新しいバージョンを自動でインストールする（既定はオフで、知らせるだけ） */
+  autoUpdate: boolean;
 }
 
 export type Provider = "openai" | "anthropic";
@@ -58,6 +60,7 @@ export const DEFAULT_SETTINGS: Settings = {
   myName: "",
   autoRecordMeetings: true,
   launchAtLogin: true,
+  autoUpdate: false,
 };
 
 // ---- 録音・文字起こし ----
@@ -215,6 +218,8 @@ export interface UpdateStatus {
   downloadedBytes: number;
   /** ダウンロードする大きさ（分からなければ null） */
   totalBytes: number | null;
+  /** ダウンロードが済んでいて、ウィンドウを閉じると自動でインストールする（自動更新がオンのときだけ true になる） */
+  ready: boolean;
 }
 
 export const NO_UPDATE: UpdateStatus = {
@@ -223,4 +228,5 @@ export const NO_UPDATE: UpdateStatus = {
   phase: "idle",
   downloadedBytes: 0,
   totalBytes: null,
+  ready: false,
 };

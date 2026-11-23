@@ -18,6 +18,8 @@ pub const POPUP_LABEL: &str = "meeting-popup";
 pub const EVENT_POPUP: &str = "meeting-popup";
 pub const EVENT_OPEN_NOTE: &str = "open-note";
 pub const EVENT_OPEN_SETTINGS: &str = "open-settings";
+/// メインウィンドウを表示した（閉じてトレイにいた間の知らせを、画面が出せるように）
+pub const EVENT_MAIN_SHOWN: &str = "main-shown";
 /// Windows 起動時の自動起動で付ける引数。付いていればウィンドウを出さずトレイで起動する
 pub const AUTOSTART_ARG: &str = "--autostart";
 
@@ -60,7 +62,14 @@ pub fn show_main(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+        let _ = app.emit_to(MAIN_LABEL, EVENT_MAIN_SHOWN, ());
     }
+}
+
+/// メインウィンドウを表示しているか（閉じてトレイにいる間は `false`）。分からなければ、表示しているものとして扱う。
+pub fn main_window_visible(app: &AppHandle) -> bool {
+    app.get_webview_window(MAIN_LABEL)
+        .is_some_and(|window| window.is_visible().unwrap_or(true))
 }
 
 /// ポップアップを表示する（既にあれば内容を差し替える）。会議中の画面からフォーカスを奪わないよう、作るときに focus しない。

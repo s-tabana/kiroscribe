@@ -56,13 +56,14 @@ pub fn run() {
                     eprintln!("以前の Kiroku の API キーを引き継げませんでした: {err}");
                 }
             }
-            // アプリ内更新で再起動した直後か（下で、自動起動の引数が付いていてもウィンドウを出す）
-            let restarted_after_update = update::take_restart_marker(&db, now_ms());
+            // アプリ内更新で再起動した直後か（下で、ウィンドウを出すかどうかを決める）
+            let version = app.package_info().version.to_string();
+            let restart = update::take_restart(&db, &version, now_ms());
+            app.manage(UpdateState::new(settings.auto_update, update::auto_skip_version(&db)));
             app.manage(AppState::new(db, secrets));
             app.manage(RecorderState::default());
             app.manage(AiState::default());
             app.manage(BackgroundState::default());
-            app.manage(UpdateState::default());
 
             let handle = app.handle().clone();
             // トレイが使えない環境でも起動は続ける
@@ -74,8 +75,9 @@ pub fn run() {
             update::spawn_auto_check(handle.clone());
 
             // Windows の起動時に自動で起動したときは、ウィンドウを出さずトレイに常駐する。
-            // ただし更新による再起動では、更新前と同じ引数で起動されるので、更新できたことが分かるよう出す
-            if restarted_after_update || !std::env::args().any(|a| a == AUTOSTART_ARG) {
+            // 更新による再起動では更新前と同じ引数で起動されるので、引数ではなく更新の種類で決める
+            let autostart = std::env::args().any(|a| a == AUTOSTART_ARG);
+            if update::show_window_on_launch(autostart, restart) {
                 background::show_main(&handle);
             }
             Ok(())
@@ -125,6 +127,7 @@ pub fn run() {
             update::get_update_status,
             update::check_for_update,
             update::install_update,
+            update::take_update_notice,
         ])
         .run(tauri::generate_context!())
         .expect("Kiroscribe の起動に失敗しました");

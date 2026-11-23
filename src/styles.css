@@ -314,6 +314,28 @@ kbd {
   color: var(--accent);
 }
 
+/* ダウンロード済みの知らせは文が長いので、区切りのよいところで折り返し、ボタンを文の下に置く */
+.update-banner-ready p span {
+  display: inline-block;
+}
+
+.update-banner-ready .button {
+  margin-top: 8px;
+}
+
+/* 自動で更新したあとの知らせ */
+.update-banner .icon-button {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin: -2px -4px -2px 0;
+}
+
+.update-banner .link-button {
+  margin-top: 2px;
+  font-size: 12.5px;
+}
+
 .update-banner .update-banner-error {
   margin-top: 6px;
 }
@@ -740,6 +762,11 @@ kbd {
 
 .api-key-head .badge {
   margin-left: auto;
+}
+
+.api-key .hint .link-button {
+  margin-left: 10px;
+  font-size: inherit;
 }
 
 .api-key-form {

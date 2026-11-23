@@ -42,6 +42,8 @@ interface MemoryOptions {
   version?: string;
   /** 更新のダウンロードを 10% ずつ進める間隔（ミリ秒）。テストでは 0 */
   updateStepDelayMs?: number;
+  /** 設定の初期値（指定した項目だけ既定値から変える） */
+  settings?: Partial<Settings>;
 }
 
 /** テストから文字起こしやエラーを発生させるための追加機能 */
@@ -66,8 +68,14 @@ export interface MemoryBackend extends Backend {
   /**
    * 新しい版が公開された状態にする。次の「更新を確認」で見つかる。
    * announce を付けると、自動確認が見つけたときのようにすぐ画面へ知らせる
+   * （自動更新がオンなら、続けてダウンロードも始める）
    */
   simulateUpdate(version: string, options?: { notes?: string; announce?: boolean }): void;
+  /**
+   * メインウィンドウを閉じた（トレイに隠れた）・開いた状態にする。
+   * 閉じたときにダウンロード済みの更新があれば、自動でインストールして起動し直した状態を再現する
+   */
+  setWindowVisible(visible: boolean): void;
   /** 「更新を確認」を失敗させる（null で元に戻す） */
   setUpdateCheckError(message: string | null): void;
 }
@@ -186,7 +194,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
   const now = options.now ?? (() => Date.now());
   const notes = new Map<string, Note>();
   const segments = new Map<string, Segment[]>();
-  let settings: Settings = { ...DEFAULT_SETTINGS };
+  let settings: Settings = { ...DEFAULT_SETTINGS, ...options.settings };
   const keys: Record<Provider, boolean> = { openai: false, anthropic: false };
   let counter = 0;
   let segmentId = 0;
@@ -228,6 +236,37 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
     update = next;
     updateEvents.emit({ ...next });
     return { ...next };
+  };
+  let windowVisible = true;
+  /** 自動で更新したあと、次にウィンドウを開いたときに知らせるバージョン */
+  let updatedNotice: string | null = null;
+  const mainShownEvents = new Emitter<void>();
+  const UPDATE_BYTES = 8_400_000;
+  const updateStep = () =>
+    new Promise((resolve) => setTimeout(resolve, options.updateStepDelayMs ?? (options.demo ? 220 : 0)));
+
+  /** 邪魔にならないとき（録音も AI の生成もしておらず、ウィンドウを閉じている）なら、ダウンロード済みの更新を入れる */
+  const autoInstall = () => {
+    if (!update.ready || !update.available || update.phase !== "idle") return;
+    if (windowVisible || recording.state !== "idle" || running.size > 0) return;
+    // 実物はここでアプリが終了し、ウィンドウを出さずに新しい版で起動し直される。その後の状態を再現する
+    appVersion = update.available.version;
+    updatedNotice = appVersion;
+    published = null;
+    setUpdate({ ...NO_UPDATE });
+  };
+
+  /** 自動更新がオンなら、見つけた更新をダウンロードしておく */
+  const backgroundDownload = async () => {
+    if (!settings.autoUpdate || !update.available || update.ready || update.phase !== "idle") return;
+    setUpdate({ ...update, phase: "downloading", downloadedBytes: 0, totalBytes: UPDATE_BYTES });
+    for (let step = 1; step <= 10; step += 1) {
+      await updateStep();
+      setUpdate({ ...update, downloadedBytes: (UPDATE_BYTES / 10) * step });
+    }
+    // ダウンロード中に設定がオフになっていたら、持たない
+    setUpdate({ ...update, phase: "idle", downloadedBytes: 0, totalBytes: null, ready: settings.autoUpdate });
+    autoInstall();
   };
   /** 取得できたときは時刻を覚え、取得できない状態（cache）では前回の時刻を返す */
   const helpMeta = () => {
@@ -425,6 +464,9 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
         myName: next.myName.trim(),
         inputDeviceId: next.inputDeviceId?.trim() || null,
       };
+      // 自動更新の切り替えは、すぐに効く（オフにしたら、待っている自動インストールをやめる）
+      if (!settings.autoUpdate && update.ready) setUpdate({ ...update, ready: false });
+      void backgroundDownload();
       return { ...settings };
     },
     async getApiKeyStatus() {
@@ -484,7 +526,9 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       stopDemo();
       setRecording({ ...recording, state: "finishing", runningSince: null });
       await new Promise((resolve) => setTimeout(resolve, options.demo ? 900 : 0));
-      return setRecording({ ...IDLE_STATUS });
+      const stopped = setRecording({ ...IDLE_STATUS });
+      autoInstall();
+      return stopped;
     },
     onRecordingStatus: (cb) => statusEvents.on(cb),
     onSegment: (cb) => segmentEvents.on(cb),
@@ -639,7 +683,10 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       if (update.phase !== "idle") return { ...update };
       if (updateCheckError) throw updateCheckError;
       await new Promise((resolve) => setTimeout(resolve, options.demo ? 600 : 0));
-      return setUpdate({ ...update, available: published ? { ...published } : null, checkedAt: now() });
+      const ready = update.ready && update.available?.version === published?.version;
+      const next = setUpdate({ ...update, available: published ? { ...published } : null, checkedAt: now(), ready });
+      void backgroundDownload();
+      return next;
     },
     async installUpdate() {
       if (recording.state !== "idle") throw MSG_UPDATE_WHILE_RECORDING;
@@ -648,30 +695,45 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       const target = update.available;
       if (!target) throw "新しいバージョンは見つかっていません。先に更新を確認してください";
 
-      const wait = () =>
-        new Promise((resolve) => setTimeout(resolve, options.updateStepDelayMs ?? (options.demo ? 220 : 0)));
-      const totalBytes = 8_400_000;
-      setUpdate({ ...update, phase: "downloading", downloadedBytes: 0, totalBytes });
-      for (let step = 1; step <= 10; step += 1) {
-        await wait();
-        setUpdate({ ...update, downloadedBytes: (totalBytes / 10) * step });
-        // ダウンロード中に録音が始まったら、インストールせずに中止する
-        if (recording.state !== "idle") {
-          setUpdate({ ...update, phase: "idle", downloadedBytes: 0, totalBytes: null });
-          throw MSG_UPDATE_WHILE_RECORDING;
+      // ダウンロード済み（自動更新がダウンロードしておいたもの）なら、それを使う
+      if (!update.ready) {
+        setUpdate({ ...update, phase: "downloading", downloadedBytes: 0, totalBytes: UPDATE_BYTES });
+        for (let step = 1; step <= 10; step += 1) {
+          await updateStep();
+          setUpdate({ ...update, downloadedBytes: (UPDATE_BYTES / 10) * step });
+          // ダウンロード中に録音が始まったら、インストールせずに中止する
+          if (recording.state !== "idle") {
+            setUpdate({ ...update, phase: "idle", downloadedBytes: 0, totalBytes: null });
+            throw MSG_UPDATE_WHILE_RECORDING;
+          }
         }
       }
       setUpdate({ ...update, phase: "installing" });
-      await wait();
+      await updateStep();
       // 実物はここでアプリが終了し、新しい版で起動し直される。その後の状態を再現する
       appVersion = target.version;
       published = null;
       setUpdate({ ...NO_UPDATE });
     },
     onUpdateStatus: (cb) => updateEvents.on(cb),
+    async takeUpdateNotice() {
+      if (!windowVisible) return null;
+      const version = updatedNotice;
+      updatedNotice = null;
+      return version;
+    },
+    onMainShown: (cb) => mainShownEvents.on(() => cb()),
     simulateUpdate(version, { notes, announce } = {}) {
       published = { version, notes: notes ?? null, publishedAt: now() };
-      if (announce) setUpdate({ ...update, available: { ...published }, checkedAt: now() });
+      if (!announce) return;
+      const ready = update.ready && update.available?.version === version;
+      setUpdate({ ...update, available: { ...published }, checkedAt: now(), ready });
+      void backgroundDownload();
+    },
+    setWindowVisible(visible) {
+      windowVisible = visible;
+      if (visible) mainShownEvents.emit();
+      else autoInstall();
     },
     setUpdateCheckError(message) {
       updateCheckError = message;

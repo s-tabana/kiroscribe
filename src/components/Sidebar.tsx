@@ -3,7 +3,7 @@ import type { NoteSummary } from "../lib/types";
 import { groupByDay, timeLabel } from "../lib/dates";
 import { displayTitle, matchesQuery } from "../lib/notes";
 import type { Updater } from "../hooks/useUpdater";
-import { UpdateBanner } from "./UpdateBanner";
+import { UpdateBanner, UpdatedNotice } from "./UpdateBanner";
 import { GearIcon, HelpIcon, LogoMark, PlusIcon, SearchIcon } from "./icons";
 
 interface SidebarProps {
@@ -15,6 +15,10 @@ interface SidebarProps {
   isPreview: boolean;
   /** アプリ内更新の状態（新しいバージョンがあれば下部に知らせを出す） */
   updater: Updater;
+  /** 自動で更新した直後なら、更新後のバージョン（下部に知らせを出す） */
+  updatedVersion: string | null;
+  onDismissUpdated(): void;
+  onOpenReleaseNotes(): void;
   onQueryChange(query: string): void;
   onSelect(id: string): void;
   onCreate(): void;
@@ -108,6 +112,13 @@ export function Sidebar(props: SidebarProps) {
         ))}
       </nav>
 
+      {props.updatedVersion && (
+        <UpdatedNotice
+          version={props.updatedVersion}
+          onOpenReleaseNotes={props.onOpenReleaseNotes}
+          onDismiss={props.onDismissUpdated}
+        />
+      )}
       <UpdateBanner updater={props.updater} />
 
       {props.isPreview && (

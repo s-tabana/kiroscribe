@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { errorMessage, useBackend } from "./lib/backend";
 import { toSummary } from "./lib/notes";
-import type { Note, NoteSummary, RecordingStatus } from "./lib/types";
+import type { HelpTab, Note, NoteSummary, RecordingStatus } from "./lib/types";
 import { useRecordingStatus } from "./hooks/useRecordingStatus";
-import { useUpdater } from "./hooks/useUpdater";
+import { useUpdateNotice, useUpdater } from "./hooks/useUpdater";
 import { Sidebar } from "./components/Sidebar";
 import { NoteView, type RecordingControls } from "./components/NoteView";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -30,8 +30,9 @@ export function App() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [query, setQuery] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [helpOpen, setHelpOpen] = useState(false);
+  const [helpTab, setHelpTab] = useState<HelpTab | null>(null);
   const updater = useUpdater(backend);
+  const [updatedVersion, dismissUpdated] = useUpdateNotice(backend);
   const [recordingStatus, setRecordingStatus] = useRecordingStatus(backend);
   const [recordingBusy, setRecordingBusy] = useState(false);
 
@@ -151,11 +152,17 @@ export function App() {
         query={query}
         isPreview={backend.isPreview}
         updater={updater}
+        updatedVersion={updatedVersion}
+        onDismissUpdated={dismissUpdated}
+        onOpenReleaseNotes={() => {
+          setHelpTab("releases");
+          dismissUpdated();
+        }}
         onQueryChange={setQuery}
         onSelect={setSelectedId}
         onCreate={() => void createNote()}
         onOpenSettings={() => setSettingsOpen(true)}
-        onOpenHelp={() => setHelpOpen(true)}
+        onOpenHelp={() => setHelpTab("guide")}
       />
 
       <main className="main">
@@ -217,7 +224,7 @@ export function App() {
       </main>
 
       {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
-      {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
+      {helpTab && <HelpDialog initialTab={helpTab} onClose={() => setHelpTab(null)} />}
     </div>
   );
 }

@@ -61,6 +61,7 @@ pub fn save_settings(
 ) -> CmdResult<Settings> {
     let saved = state.db().save_settings(settings)?;
     crate::background::apply_settings(&app, &saved);
+    crate::update::apply_settings(&app, &saved);
     Ok(saved)
 }
 

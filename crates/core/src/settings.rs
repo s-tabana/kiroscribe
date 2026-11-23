@@ -32,6 +32,8 @@ pub struct Settings {
     pub auto_record_meetings: bool,
     /// Windows の起動時に起動し、タスクトレイに常駐する。
     pub launch_at_login: bool,
+    /// 見つけた新しいバージョンを自動でインストールする（既定はオフで、知らせるだけ）。
+    pub auto_update: bool,
 }
 
 impl Default for Settings {
@@ -45,6 +47,7 @@ impl Default for Settings {
             my_name: String::new(),
             auto_record_meetings: true,
             launch_at_login: true,
+            auto_update: false,
         }
     }
 }
@@ -130,6 +133,31 @@ mod tests {
     }
 
     #[test]
+    fn auto_update_is_off_by_default_and_can_be_turned_on() {
+        assert!(!Settings::default().auto_update);
+
+        let db = Database::open_in_memory().unwrap();
+        assert!(!db.load_settings().unwrap().auto_update, "何も保存していないとき");
+        let saved = db
+            .save_settings(Settings {
+                auto_update: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(saved.auto_update);
+        assert!(db.load_settings().unwrap().auto_update);
+        // 画面とは camelCase でやり取りする
+        assert_eq!(serde_json::to_value(&saved).unwrap()["autoUpdate"], true);
+        let from_frontend: Settings = serde_json::from_str(r#"{"autoUpdate":true}"#).unwrap();
+        assert!(from_frontend.auto_update);
+
+        // オフに戻せる
+        let saved = db.save_settings(Settings { auto_update: false, ..saved }).unwrap();
+        assert!(!saved.auto_update);
+        assert!(!db.load_settings().unwrap().auto_update);
+    }
+
+    #[test]
     fn save_and_load_roundtrip() {
         let db = Database::open_in_memory().unwrap();
         let settings = Settings {
@@ -171,9 +199,10 @@ mod tests {
         assert_eq!(loaded.language, "en");
         assert_eq!(loaded.claude_model, DEFAULT_CLAUDE_MODEL);
         assert!(loaded.capture_system_audio);
-        // 後から追加した項目も既定値（オン）になる
+        // 後から追加した項目も既定値になる（自動検出と自動起動はオン、自動更新はオフ）
         assert!(loaded.auto_record_meetings);
         assert!(loaded.launch_at_login);
+        assert!(!loaded.auto_update);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import type { Updater } from "../hooks/useUpdater";
+import { CloseIcon } from "./icons";
 
 interface UpdateProgressProps {
   updater: Updater;
@@ -38,7 +39,20 @@ export function UpdateBanner({ updater }: UpdateProgressProps) {
   if (!status.available && status.phase === "idle") return null;
   return (
     <section className="update-banner" aria-label="アプリの更新">
-      {status.phase === "idle" ? (
+      {status.phase !== "idle" ? (
+        <UpdateProgress updater={updater} />
+      ) : status.ready ? (
+        <div className="update-banner-ready">
+          <p>
+            <span>新しいバージョン {status.available?.version} の</span>
+            <span>準備ができました。</span>
+            <span>ウィンドウを閉じると更新します</span>
+          </p>
+          <button type="button" className="button" onClick={() => void updater.install()}>
+            今すぐ更新
+          </button>
+        </div>
+      ) : (
         <div className="update-banner-row">
           <p>
             <span>新しいバージョン {status.available?.version}</span> <span>があります</span>
@@ -47,14 +61,36 @@ export function UpdateBanner({ updater }: UpdateProgressProps) {
             更新
           </button>
         </div>
-      ) : (
-        <UpdateProgress updater={updater} />
       )}
       {message?.kind === "error" && (
         <p className="error-text update-banner-error" role="alert">
           {message.text}
         </p>
       )}
+    </section>
+  );
+}
+
+interface UpdatedNoticeProps {
+  /** 更新後のバージョン */
+  version: string;
+  onOpenReleaseNotes(): void;
+  onDismiss(): void;
+}
+
+/** サイドバー下部の知らせ: 自動で更新したあと、次にウィンドウを開いたときに 1 回だけ出す */
+export function UpdatedNotice({ version, onOpenReleaseNotes, onDismiss }: UpdatedNoticeProps) {
+  return (
+    <section className="update-banner" role="status" aria-label="更新の完了">
+      <div className="update-banner-row">
+        <p>バージョン {version} に更新しました</p>
+        <button type="button" className="icon-button" onClick={onDismiss} aria-label="更新の知らせを閉じる">
+          <CloseIcon size={15} />
+        </button>
+      </div>
+      <button type="button" className="link-button" onClick={onOpenReleaseNotes}>
+        リリースノート
+      </button>
     </section>
   );
 }

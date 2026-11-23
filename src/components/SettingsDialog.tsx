@@ -5,14 +5,34 @@ import type { ApiKeyStatus, AudioDevice, HelpTab, Provider, Settings } from "../
 import { HelpDialog } from "./HelpDialog";
 import { Markdown } from "./Markdown";
 import { UpdateProgress } from "./UpdateBanner";
-import { CloseIcon, KeyIcon, LogoMark } from "./icons";
+import { CloseIcon, ExternalLinkIcon, KeyIcon, LogoMark } from "./icons";
 
 interface SettingsDialogProps {
   onClose(): void;
 }
 
-const CLAUDE_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
-const TRANSCRIPTION_MODELS = ["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"];
+interface ModelOption {
+  /** API に渡すモデル ID */
+  value: string;
+  label: string;
+}
+
+const CLAUDE_MODELS: ModelOption[] = [
+  { value: "claude-opus-5-5", label: "Claude Opus 5.5（標準）" },
+  { value: "claude-sonnet-5-5", label: "Claude Sonnet 5.5（速くて安い）" },
+  { value: "claude-haiku-5-5", label: "Claude Haiku 5.5（最も速くて安い）" },
+  { value: "claude-fable-5-2", label: "Claude Fable 5.2（最も高性能・高価）" },
+];
+const TRANSCRIPTION_MODELS: ModelOption[] = [
+  { value: "gpt-4o-transcribe", label: "gpt-4o-transcribe（標準）" },
+  { value: "gpt-4o-mini-transcribe", label: "gpt-4o-mini-transcribe（速くて安い）" },
+  { value: "whisper-1", label: "whisper-1" },
+];
+/** API キーを発行するページ */
+const API_KEY_PAGES: Record<Provider, string> = {
+  openai: "https://platform.openai.com/api-keys",
+  anthropic: "https://platform.claude.com/settings/keys",
+};
 const LANGUAGES = [
   { value: "ja", label: "日本語" },
   { value: "en", label: "English" },
@@ -104,6 +124,7 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
                 provider="openai"
                 label="OpenAI"
                 purpose="会議音声の文字起こしに使います"
+                issueUrl={API_KEY_PAGES.openai}
                 configured={keys?.openai ?? false}
                 onSaved={(status, text) => {
                   setKeys(status);
@@ -115,6 +136,7 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
                 provider="anthropic"
                 label="Anthropic（Claude）"
                 purpose="議事録の作成と AI チャットに使います"
+                issueUrl={API_KEY_PAGES.anthropic}
                 configured={keys?.anthropic ?? false}
                 onSaved={(status, text) => {
                   setKeys(status);
@@ -165,16 +187,11 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
                     </label>
                     <label className="field">
                       <span>モデル</span>
-                      <input
-                        list="transcription-models"
+                      <ModelSelect
+                        options={TRANSCRIPTION_MODELS}
                         value={settings.transcriptionModel}
-                        onChange={(e) => update("transcriptionModel", e.target.value)}
+                        onChange={(value) => update("transcriptionModel", value)}
                       />
-                      <datalist id="transcription-models">
-                        {TRANSCRIPTION_MODELS.map((m) => (
-                          <option key={m} value={m} />
-                        ))}
-                      </datalist>
                     </label>
                   </div>
                   <label className="check">
@@ -227,16 +244,11 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
                   <div className="field-row">
                     <label className="field">
                       <span>Claude のモデル</span>
-                      <input
-                        list="claude-models"
+                      <ModelSelect
+                        options={CLAUDE_MODELS}
                         value={settings.claudeModel}
-                        onChange={(e) => update("claudeModel", e.target.value)}
+                        onChange={(value) => update("claudeModel", value)}
                       />
-                      <datalist id="claude-models">
-                        {CLAUDE_MODELS.map((m) => (
-                          <option key={m} value={m} />
-                        ))}
-                      </datalist>
                     </label>
                     <label className="field">
                       <span>議事録での自分の呼び名</span>
@@ -251,7 +263,11 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
               </>
             )}
 
-            <AboutSection onOpenHelp={setHelpTab} />
+            <AboutSection
+              autoUpdate={settings?.autoUpdate ?? null}
+              onAutoUpdateChange={(value) => update("autoUpdate", value)}
+              onOpenHelp={setHelpTab}
+            />
           </div>
 
           <footer className="modal-footer">
@@ -279,12 +295,35 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
   );
 }
 
+interface ModelSelectProps {
+  options: ModelOption[];
+  value: string;
+  onChange(value: string): void;
+}
+
+/** モデルの選択。保存済みの値が一覧にないときは、その値を末尾に出して選んだままにする（別のモデルに置き換えない） */
+function ModelSelect({ options, value, onChange }: ModelSelectProps) {
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)}>
+      {options.map((option) => (
+        <option key={option.value} value={option.value}>
+          {option.label}
+        </option>
+      ))}
+      {!options.some((option) => option.value === value) && <option value={value}>{value}</option>}
+    </select>
+  );
+}
+
 interface AboutSectionProps {
+  /** 設定「新しいバージョンを自動でインストールする」（設定を読み込むまでは null） */
+  autoUpdate: boolean | null;
+  onAutoUpdateChange(value: boolean): void;
   onOpenHelp(tab: HelpTab): void;
 }
 
-/** バージョンの表示、更新の確認と実行、ヘルプへのリンク */
-function AboutSection({ onOpenHelp }: AboutSectionProps) {
+/** バージョンの表示、更新の確認と実行、自動更新の設定、ヘルプへのリンク */
+function AboutSection({ autoUpdate, onAutoUpdateChange, onOpenHelp }: AboutSectionProps) {
   const backend = useBackend();
   const updater = useUpdater(backend);
   const [version, setVersion] = useState<string | null>(null);
@@ -320,10 +359,11 @@ function AboutSection({ onOpenHelp }: AboutSectionProps) {
         {available && idle && (
           <div className="about-update">
             <p>
-              新しいバージョン <strong>{available.version}</strong> があります
+              新しいバージョン <strong>{available.version}</strong>{" "}
+              {status.ready ? "の準備ができました。ウィンドウを閉じると更新します" : "があります"}
             </p>
             <button type="button" className="button button-primary" onClick={() => void updater.install()}>
-              更新して再起動
+              {status.ready ? "今すぐ更新" : "更新して再起動"}
             </button>
           </div>
         )}
@@ -336,6 +376,19 @@ function AboutSection({ onOpenHelp }: AboutSectionProps) {
           <summary>{available.version} の変更点</summary>
           <Markdown text={available.notes} />
         </details>
+      )}
+
+      {autoUpdate !== null && (
+        <label className="check">
+          <input type="checkbox" checked={autoUpdate} onChange={(e) => onAutoUpdateChange(e.target.checked)} />
+          <span>
+            新しいバージョンを自動でインストールする
+            <small>
+              {"オンにすると、ウィンドウを閉じていて、録音もしていないときに更新します。" +
+                "オフのときは、新しいバージョンがあることだけを知らせます。"}
+            </small>
+          </span>
+        </label>
       )}
 
       <p className="about-links">
@@ -354,12 +407,14 @@ interface ApiKeyFieldProps {
   provider: Provider;
   label: string;
   purpose: string;
+  /** キーを発行するページ（既定のブラウザで開く） */
+  issueUrl: string;
   configured: boolean;
   onSaved(status: ApiKeyStatus, message: string): void;
   onError(message: string): void;
 }
 
-function ApiKeyField({ provider, label, purpose, configured, onSaved, onError }: ApiKeyFieldProps) {
+function ApiKeyField({ provider, label, purpose, issueUrl, configured, onSaved, onError }: ApiKeyFieldProps) {
   const backend = useBackend();
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -386,7 +441,18 @@ function ApiKeyField({ provider, label, purpose, configured, onSaved, onError }:
           {configured ? "設定済み" : "未設定"}
         </span>
       </div>
-      <p className="hint">{purpose}</p>
+      <p className="hint">
+        {purpose}
+        <button
+          type="button"
+          className="link-button"
+          aria-label={`${label} のキーを発行する`}
+          onClick={() => backend.openExternal(issueUrl).catch((err) => onError(errorMessage(err)))}
+        >
+          キーを発行する
+          <ExternalLinkIcon size={12} />
+        </button>
+      </p>
       <form
         className="api-key-form"
         onSubmit={(e) => {

@@ -105,9 +105,16 @@ export interface Backend {
   getUpdateStatus(): Promise<UpdateStatus>;
   /** 手動の確認。確認できなかったら理由のメッセージで reject する */
   checkForUpdate(): Promise<UpdateStatus>;
-  /** ダウンロードしてインストールする。成功するとアプリが終了して起動し直される。進み具合は onUpdateStatus */
+  /** インストールする（まだならダウンロードしてから）。成功するとアプリが終了して起動し直される。進み具合は onUpdateStatus */
   installUpdate(): Promise<void>;
   onUpdateStatus(cb: (status: UpdateStatus) => void): Unsubscribe;
+  /**
+   * 自動で更新したあと、ウィンドウを表示しているときに 1 回だけ、更新後のバージョンを返す。
+   * 知らせるものがない・ウィンドウを閉じている間は null
+   */
+  takeUpdateNotice(): Promise<string | null>;
+  /** 閉じていたメインウィンドウが表示された */
+  onMainShown(cb: () => void): Unsubscribe;
 }
 
 /** Tauri のイベント購読を、同期的に解除できる形にする */
@@ -184,13 +191,15 @@ export function createTauriBackend(): Backend {
     checkForUpdate: () => invoke("check_for_update"),
     installUpdate: () => invoke("install_update"),
     onUpdateStatus: (cb) => subscribe("update-status", cb),
+    takeUpdateNotice: () => invoke("take_update_notice"),
+    onMainShown: (cb) => subscribe("main-shown", () => cb()),
   };
 }
 
 export function createDefaultBackend(): Backend {
   if (isTauri()) return createTauriBackend();
   const preview = createMemoryBackend({ seed: true, demo: true });
-  // デザイン確認用: ブラウザのコンソールから preview.simulateUpdate("9.9.9", { announce: true }) などで状態を作れる
+  // デザイン確認用: ブラウザのコンソールから __kiroscribePreview.simulateUpdate("9.9.9", { announce: true }) などで状態を作れる
   (window as { __kiroscribePreview?: unknown }).__kiroscribePreview = preview;
   return preview;
 }

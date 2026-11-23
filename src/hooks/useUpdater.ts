@@ -64,7 +64,7 @@ export function useUpdater(backend: Backend): Updater {
     }
   }, [backend]);
 
-  const available = status.available;
+  const { available, ready } = status;
   const install = useCallback(async () => {
     if (!available) return;
     setMessage(null);
@@ -76,7 +76,9 @@ export function useUpdater(backend: Backend): Updater {
         return;
       }
       const ok = await backend.confirm(
-        `Kiroscribe ${available.version} に更新します。\nダウンロードが終わるとアプリを終了し、新しいバージョンで起動し直します。`,
+        ready
+          ? `Kiroscribe ${available.version} に更新します。\nアプリを終了し、新しいバージョンで起動し直します。`
+          : `Kiroscribe ${available.version} に更新します。\nダウンロードが終わるとアプリを終了し、新しいバージョンで起動し直します。`,
         "アプリの更新",
         "info",
       );
@@ -85,7 +87,29 @@ export function useUpdater(backend: Backend): Updater {
     } catch (err) {
       setMessage({ kind: "error", text: errorMessage(err) });
     }
-  }, [backend, available]);
+  }, [backend, available, ready]);
 
   return { status, checking, percent: downloadPercent(status), message, check, install };
+}
+
+/**
+ * 自動で更新したあとの知らせ（更新後のバージョン）と、それを消す関数。
+ * 自動の更新ではウィンドウを出さずに起動し直すので、次にウィンドウを開いたときに 1 回だけ受け取る。
+ */
+export function useUpdateNotice(backend: Backend): [string | null, () => void] {
+  const [version, setVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    // 受け取れるのは 1 回だけなので、受け取ったものは必ず表示に回す
+    const take = () =>
+      void backend
+        .takeUpdateNotice()
+        .then((next) => next && setVersion(next))
+        .catch(() => undefined);
+    take();
+    return backend.onMainShown(take);
+  }, [backend]);
+
+  const dismiss = useCallback(() => setVersion(null), []);
+  return [version, dismiss];
 }
