@@ -299,7 +299,8 @@ fn clipboard_plugin<R: Runtime>() -> TauriPlugin<R> {
 /// - `resize-window.txt` に「ラベル 幅 高さ」（例: `main 400 300`）が書かれたら、そのウィンドウの大きさを変える。
 ///   利用者がウィンドウの端をドラッグしたときと同じく、OS がウィンドウの最小の大きさを守る
 ///   （WebDriver の大きさの変更は、Windows ではウェブビューの領域しか変えないため）。
-///   変えたあとのウィンドウの大きさ（OS に問い合わせた値）を `window-size.json` に書く
+///   変えたあとのウィンドウの大きさ（OS に問い合わせた値）を `window-size.json` に書く。
+///   Windows では、利用者が縮められる最小の大きさ（[`min_size`]）も書く
 fn control_plugin<R: Runtime>() -> TauriPlugin<R> {
     PluginBuilder::new("e2e-control")
         // 起動に失敗したときに、どこまで進んだかをログから追えるようにする
@@ -380,6 +381,7 @@ fn resize_and_report<R: Runtime>(window: &tauri::WebviewWindow<R>, label: &str, 
         "scaleFactor": measured["scaleFactor"],
         "maximized": measured["maximized"],
         "wasMaximized": was_maximized,
+        "minSize": min_size(window),
         "problems": problems,
     });
     eprintln!("[e2e] ウィンドウの大きさ: {report}");
@@ -403,6 +405,55 @@ fn measure<R: Runtime>(window: &tauri::WebviewWindow<R>) -> Value {
         "scaleFactor": scale,
         "maximized": window.is_maximized().unwrap_or(false),
     })
+}
+
+/// 利用者が縮められる最小の大きさを、OS の決まりどおりにウィンドウへ問い合わせる（Windows だけ。ほかの OS では null）。
+///
+/// Windows は、プログラムからの大きさの変更には最小の大きさを当てはめない（利用者がウィンドウの端を
+/// ドラッグしたときだけ、ウィンドウに問い合わせて止める）。そこで、同じ問い合わせの答えを確かめる。
+/// - `track`: 問い合わせの答えそのまま（枠を含む外側の大きさ。物理ピクセル）
+/// - `inner`: そこから枠の分を引いて、表示の拡大率で割った値（内側の大きさ。設定の最小の大きさと比べる値）
+#[cfg(windows)]
+fn min_size<R: Runtime>(window: &tauri::WebviewWindow<R>) -> Value {
+    let query = || -> Result<Value, String> {
+        let hwnd = window.hwnd().map_err(|err| err.to_string())?.0 as isize;
+        // 問い合わせは、ウィンドウを作ったスレッド（メインスレッド）からする
+        let (sender, receiver) = std::sync::mpsc::channel();
+        window
+            .run_on_main_thread(move || {
+                let _ = sender.send(core::window::min_track_size(hwnd));
+            })
+            .map_err(|err| err.to_string())?;
+        let track = receiver
+            .recv_timeout(Duration::from_secs(3))
+            .map_err(|_| "メインスレッドが応答しません".to_string())?;
+        let inner = window.inner_size().map_err(|err| err.to_string())?;
+        let outer = window.outer_size().map_err(|err| err.to_string())?;
+        let scale = window.scale_factor().map_err(|err| err.to_string())?;
+        Ok(json!({
+            "track": [track.0, track.1],
+            "innerPhysical": [inner.width, inner.height],
+            "outerPhysical": [outer.width, outer.height],
+            "inner": min_inner_size(track, (inner.width, inner.height), (outer.width, outer.height), scale),
+        }))
+    };
+    query().unwrap_or_else(|err| json!({ "problem": err }))
+}
+
+#[cfg(not(windows))]
+fn min_size<R: Runtime>(_window: &tauri::WebviewWindow<R>) -> Value {
+    Value::Null
+}
+
+/// 利用者が縮められる最小の大きさ（内側。表示の拡大率を掛ける前の px）を、OS の答えから求める。
+/// OS の答え（`track`）は枠を含む外側の大きさ（物理ピクセル）なので、枠の分（外側 − 内側）を引いて、拡大率で割る。
+#[cfg(any(windows, test))]
+fn min_inner_size(track: (i32, i32), inner: (u32, u32), outer: (u32, u32), scale: f64) -> [f64; 2] {
+    let logical = |track: i32, inner: u32, outer: u32| {
+        let frame = f64::from(outer) - f64::from(inner);
+        ((f64::from(track) - frame) / scale).round()
+    };
+    [logical(track.0, inner.0, outer.0), logical(track.1, inner.1, outer.1)]
 }
 
 /// `resize-window.txt` の内容（「ラベル 幅 高さ」）を読む。
@@ -478,6 +529,19 @@ pub fn update_first_check_delay() -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// OS が答える最小の大きさ（枠を含む外側・物理ピクセル）から、内側の大きさ（拡大率を掛ける前の px）を求める。
+    #[test]
+    fn the_minimum_inner_size_is_derived_from_the_track_size() {
+        // 拡大率 100%: 枠は 幅 16・高さ 39（外側 916x639・内側 900x600）。答えが 876x599 なら、内側は 860x560
+        assert_eq!(min_inner_size((876, 599), (900, 600), (916, 639), 1.0), [860.0, 560.0]);
+        // 拡大率 150%: 内側 1290x840 に、枠 幅 24・高さ 58 が付く
+        assert_eq!(min_inner_size((1314, 898), (1350, 900), (1374, 958), 1.5), [860.0, 560.0]);
+        // 枠のないウィンドウ（外側と内側が同じ）
+        assert_eq!(min_inner_size((860, 560), (900, 600), (900, 600), 1.0), [860.0, 560.0]);
+        // 最小の大きさを決めていないウィンドウは、OS に (0, 0) を答える。860x560 にはならない
+        assert_ne!(min_inner_size((0, 0), (900, 600), (916, 639), 1.0), [860.0, 560.0]);
+    }
 
     /// ドライバーが環境変数で渡す引数は、Tauri の既定の引数と合わせて 1 つにする。
     #[test]

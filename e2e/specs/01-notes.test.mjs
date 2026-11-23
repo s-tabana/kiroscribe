@@ -189,6 +189,19 @@ test("[TRY-007] ふつうに起動するとメインウィンドウが 1240x820 
   const resized = await ctx.work.resizeWindow("main", 900, 600);
   assert.deepEqual(resized.problems, [], JSON.stringify(resized));
   assert.deepEqual(resized.inner, [900, 600], `900x600 にならない: ${JSON.stringify(resized)}`);
+  if (process.platform === "win32") {
+    // Windows は、プログラムからの大きさの変更には最小の大きさを当てはめない（利用者がウィンドウの端をドラッグしたときだけ、
+    // ウィンドウに最小の大きさを問い合わせて止める）。そこで、同じ問い合わせの答えが、内側の 860x560 に当たることを確かめる。
+    // 実際にドラッグして止まることは、リリース前のチェックリスト（A-1）で確かめる
+    const min = resized.minSize;
+    // 問い合わせの答えそのまま（track）も、ログに残す
+    console.log(`[e2e] メインウィンドウの最小の大きさ（問い合わせの答え）: ${JSON.stringify(min)}`);
+    assert.ok(min && !min.problem, `最小の大きさを問い合わせられない: ${JSON.stringify(resized)}`);
+    // 枠の大きさの端数（拡大率が 100% でないとき）を見込んで、1px の差は許す
+    const near = (actual, expected) => Math.abs(actual - expected) <= 1;
+    assert.ok(near(min.inner[0], 860) && near(min.inner[1], 560), `最小の大きさが 860x560 でない: ${JSON.stringify(resized)}`);
+    return;
+  }
   // 最小（幅 860px・高さ 560px）より小さくしようとしても、最小で止まる
   const shrunk = await ctx.work.resizeWindow("main", 400, 300);
   assert.deepEqual(shrunk.inner, [860, 560], `最小の大きさで止まらない: ${JSON.stringify(shrunk)}`);

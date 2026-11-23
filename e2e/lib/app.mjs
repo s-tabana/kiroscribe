@@ -173,7 +173,9 @@ export class Workspace {
   /**
    * ウィンドウの大きさを変える（利用者がウィンドウの端をドラッグしたときと同じく、OS が最小の大きさを守る）。
    * WebDriver の大きさの変更は、Windows ではウェブビューの領域しか変えないので、アプリの側から変える。
-   * 返すのは、変えたあとの様子: { requested, inner: [幅, 高さ], outer, scaleFactor, maximized, wasMaximized, problems }
+   * 返すのは、変えたあとの様子: { requested, inner: [幅, 高さ], outer, scaleFactor, maximized, wasMaximized, minSize, problems }
+   * minSize は、利用者が縮められる最小の大きさを OS の決まりどおりにウィンドウへ問い合わせた答え（Windows だけ。ほかは null）:
+   * { track: 答えそのまま（枠を含む外側・物理ピクセル）, inner: 内側の大きさに直した値 }。問い合わせられなければ { problem }
    */
   async resizeWindow(label, width, height) {
     fs.rmSync(this.file("window-size.json"), { force: true });

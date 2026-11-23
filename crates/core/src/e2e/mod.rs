@@ -17,13 +17,14 @@
 //!   app.pid         起動したアプリのプロセス ID
 //!   close-window.txt ここにウィンドウのラベル（main など）を書くと、利用者が「×」を押したのと同じように閉じる
 //!   resize-window.txt ここに「ラベル 幅 高さ」（例: main 400 300）を書くと、そのウィンドウの大きさを変える
-//!   window-size.json 大きさを変えたあとの、ウィンドウの大きさ（OS に問い合わせた値）
+//!   window-size.json 大きさを変えたあとの、ウィンドウの大きさと、最小の大きさ（OS に問い合わせた値）
 //! ```
 //!
 //! `meeting.txt` 以下は、アプリの実行中にテストから読み書きする
 //! （`meeting.txt` と `mic-error.txt` 以外は Tauri 側の `e2e` モジュールが扱う）。
 
 pub mod audio;
+pub mod window;
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
