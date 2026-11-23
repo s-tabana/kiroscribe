@@ -449,6 +449,12 @@ fn ipc_contract_matches_the_frontend() {
     assert_eq!(s.ok("clear_chat_messages", json!({ "noteId": id })), Value::Null);
     assert_eq!(s.ok("list_chat_messages", json!({ "noteId": id })), json!([]));
 
+    // ---- 検索（メモの本文・議事録・文字起こしも対象） ----
+    assert_eq!(s.ok("search_notes", json!({ "query": "リリース日" })), json!([id]), "メモの本文");
+    assert_eq!(s.ok("search_notes", json!({ "query": "12/5" })), json!([id]), "議事録");
+    assert_eq!(s.ok("search_notes", json!({ "query": "来週の予定" })), json!([id]), "文字起こし");
+    assert_eq!(s.ok("search_notes", json!({ "query": "どこにもない言葉" })), json!([]));
+
     // ---- 書き出し ----
     let options = json!({ "minutes": true, "notes": true, "transcript": true });
     let exported = s.ok("export_markdown", json!({ "noteId": id, "options": options }));

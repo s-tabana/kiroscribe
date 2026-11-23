@@ -106,6 +106,9 @@ export const called = {
   saveSettings: [
     [{"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"}],
   ] satisfies Called<"saveSettings">[],
+  searchNotes: [
+    ["…"],
+  ] satisfies Called<"searchNotes">[],
   sendChatMessage: [
     ["…","…"],
   ] satisfies Called<"sendChatMessage">[],
@@ -215,6 +218,9 @@ export const returned = {
   saveSettings: [
     {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
   ] satisfies Returned<"saveSettings">[],
+  searchNotes: [
+    ["…"],
+  ] satisfies Returned<"searchNotes">[],
   sendChatMessage: [
     {"content":"…","createdAt":0,"id":0,"noteId":"…","role":"assistant"},
   ] satisfies Returned<"sendChatMessage">[],

@@ -18,6 +18,13 @@ pub fn list_notes(state: State<'_, AppState>) -> CmdResult<Vec<NoteSummary>> {
     Ok(state.db().list_notes()?)
 }
 
+/// 検索の文字を、タイトル・自分のメモ・議事録・文字起こしのどれかに含むノートの ID を、一覧と同じ並びで返す。
+/// 画面は、その場で分かるタイトルとプレビューでの絞り込みに、この結果を足して表示する。
+#[tauri::command]
+pub fn search_notes(state: State<'_, AppState>, query: String) -> CmdResult<Vec<String>> {
+    Ok(state.db().search_notes(&query)?)
+}
+
 #[tauri::command]
 pub fn create_note(state: State<'_, AppState>) -> CmdResult<Note> {
     Ok(state.db().create_note()?)

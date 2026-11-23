@@ -26,7 +26,6 @@ MTG-016 e2e
 MTG-022 e2e
 NOTE-001 e2e
 NOTE-002 e2e
-NOTE-008 e2e
 NOTE-009 e2e
 NOTE-010 e2e
 NOTE-014 e2e
@@ -127,7 +126,6 @@ IPC-008 tauri
 
 ## 画面と本体の取り決めの検査待ち
 # コマンドの名前・引数・戻り値の形を、画面と本体で突き合わせる検査ができたら消す。
-IPC-001 test
 IPC-002 test
 IPC-003 test
 IPC-007 test
@@ -146,12 +144,11 @@ UPD-027 test
 UPD-028 test
 
 ## 実装待ち
-# 仕様一覧に〔実装待ち〕の印がある項目（IPC-001 は上の節）。本体（src-tauri/）の実装とテストがそろったら、印と一緒に消す。
+# 仕様一覧に〔実装待ち〕の印がある項目。本体（src-tauri/）の実装とテストがそろったら、印と一緒に消す。
 CHT-005 test
 MTG-015 test
 MTG-019 test
 TRY-004 test
-NOTE-008 tauri
 TRN-014 tauri
 SHR-009 tauri
 MTG-010 tauri

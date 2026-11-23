@@ -116,6 +116,7 @@ fn register_commands(builder: tauri::Builder<Runtime>) -> tauri::Builder<Runtime
     builder
         .invoke_handler(tauri::generate_handler![
             commands::list_notes,
+            commands::search_notes,
             commands::create_note,
             commands::get_note,
             commands::update_note,

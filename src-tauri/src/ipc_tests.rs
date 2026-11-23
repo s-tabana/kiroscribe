@@ -11,6 +11,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use kiroscribe_core::secrets::MemorySecretStore;
+use kiroscribe_core::transcript::Speaker;
+use kiroscribe_core::Database;
 use serde_json::{json, Value};
 use tauri::ipc::{CallbackFn, InvokeBody};
 use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, MockRuntime, INVOKE_KEY};
@@ -20,6 +23,7 @@ use tauri::{Manager, WebviewWindow, WebviewWindowBuilder};
 use crate::ai::AiState;
 use crate::background::{BackgroundState, MAIN_LABEL};
 use crate::recording::RecorderState;
+use crate::state::AppState;
 use crate::update::UpdateState;
 
 fn repo_root() -> PathBuf {
@@ -249,6 +253,7 @@ export function createDefaultBackend(): Backend {
 /// 画面側が呼ぶコマンドの一覧と、Rust 側が登録しているコマンドの一覧が一致すること。
 /// 片方にしかないコマンドがあると、画面の操作が実行時に「Command ... not found」で失敗するか、
 /// 使われないコマンドが残る。
+// [IPC-001]
 #[test]
 fn frontend_and_rust_agree_on_command_names() {
     let frontend = frontend();
@@ -350,6 +355,7 @@ fn invoke(window: &WebviewWindow<MockRuntime>, command: &str, args: Value) -> Re
 ///
 /// データベースと API キーを持つ状態（`AppState`）は用意しないので、それを使うコマンドは実行の前に断られる
 /// （このテストから外部の API を呼ばない）。更新の確認だけは実行されるので、どこにもつながらない配布元にしておく。
+// [IPC-001]
 #[test]
 fn every_frontend_command_reaches_a_handler() {
     #[cfg(feature = "e2e")]
@@ -377,6 +383,50 @@ fn every_frontend_command_reaches_a_handler() {
     }
     let unknown = invoke(&window, "no_such_command", json!({})).unwrap_err();
     assert!(unknown.to_string().contains("not found"), "{unknown}");
+}
+
+/// 検索のコマンドは、画面が渡す名前（query）で検索の文字を受け取り、タイトル・メモの本文・議事録・文字起こしの
+/// どれかにその文字を含むノートの ID を、一覧と同じ並び（新しい順）で返す。
+// [NOTE-008]
+#[test]
+fn search_notes_command_covers_body_minutes_and_transcript() {
+    #[cfg(feature = "e2e")]
+    scenario::fixture();
+    let (app, window) = mock_app("http://127.0.0.1:9/latest.json");
+    app.manage(AppState::new(
+        Database::open_in_memory().unwrap(),
+        Box::new(MemorySecretStore::default()),
+    ));
+    let create = |title: &str, user_notes: &str| {
+        let id = invoke(&window, "create_note", json!({})).unwrap()["id"].as_str().unwrap().to_string();
+        let patch = json!({ "title": title, "userNotes": user_notes });
+        invoke(&window, "update_note", json!({ "id": id, "patch": patch })).unwrap();
+        id
+    };
+    let by_title = create("Offsite の計画", "");
+    // 一覧のプレビュー（1 行目）には出ない行
+    let by_body = create("定例", "- 日程\n- 来月の offsite の場所");
+    let by_minutes = create("採用面談", "- 経歴");
+    let by_transcript = create("", "");
+    {
+        let state = app.state::<AppState>();
+        let db = state.db();
+        db.save_enhanced_notes(&by_minutes, "## 決定事項\n- 一次面接は通過\n- OFFSITE は箱根", None).unwrap();
+        db.add_segment(&by_transcript, Speaker::Them, 1_000, 2_000, "オフサイト、つまり Offsite ですね").unwrap();
+    }
+
+    let search = |query: &str| invoke(&window, "search_notes", json!({ "query": query })).unwrap();
+    // 大文字と小文字は区別しない。新しいノートが先
+    assert_eq!(search("offsite"), json!([by_transcript, by_minutes, by_body, by_title]));
+    assert_eq!(search("来月"), json!([by_body]), "メモの本文（プレビューに出ない行）");
+    assert_eq!(search("箱根"), json!([by_minutes]), "議事録");
+    assert_eq!(search("オフサイト"), json!([by_transcript]), "文字起こし");
+    assert_eq!(search("どこにもない言葉"), json!([]));
+    assert_eq!(search("   "), json!([]), "空の検索では何も返さない（絞り込まないのは画面の役目）");
+
+    // 検索の文字は query の名前で渡す（ほかの名前では受け付けない）
+    let refused = invoke(&window, "search_notes", json!({ "text": "offsite" })).unwrap_err();
+    assert!(refused.to_string().contains("query"), "{refused}");
 }
 
 // ---- 見本の書き出し ----
