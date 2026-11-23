@@ -149,3 +149,44 @@ test("[CHT-006] 回答の作成は途中で中止でき、中止した質問と�
     gate.open();
   }
 });
+
+test("[CHT-014] 回答の作成中にパネルを閉じて開き直しても、作成中の表示に戻り、終わると回答が出る", async (ctx) => {
+  const gate = createGate();
+  ctx.server.anthropic.reply = () => ({ chunks: ["リリースは "], hold: gate.promise, tail: ["12/5 です。"] });
+  try {
+    const session = await ctx.launch();
+    await createNote(session, { title: "週次定例", memo: "- メモ" });
+    await openChat(session);
+    await (await session.$(chatInput)).type("決まったことは？");
+    await session.click('button[aria-label="送信"]');
+    await session.waitUntil(async () => (await chatMessages(session)).at(-1)?.text === "リリースは", {
+      message: "回答が途中まで表示される",
+    });
+
+    // 作成中にパネルを閉じて、開き直す
+    await session.click('button[aria-label="パネルを閉じる"]');
+    await session.waitGone('aside[aria-label="AI チャット"]');
+    await openChat(session);
+    // 質問が 1 つと、それまでに届いた回答が出て、中止もできる
+    await session.waitUntil(
+      async () => JSON.stringify(await chatMessages(session)) === JSON.stringify([
+        { from: "user", text: "決まったことは？" },
+        { from: "assistant", text: "リリースは" },
+      ]),
+      { message: "開き直すと、作成中の表示に戻る" },
+    );
+    await session.$('xpath://aside[@aria-label="AI チャット"]//button[normalize-space(.)="中止"]');
+    assert.equal(await session.exists('button[aria-label="送信"]'), false);
+
+    // 終わると、そのまま回答に切り替わる
+    gate.open();
+    await session.waitUntil(async () => (await chatMessages(session)).at(-1)?.text === "リリースは 12/5 です。", {
+      message: "回答が最後まで表示される",
+    });
+    await session.$('button[aria-label="送信"]');
+    assert.equal((await chatMessages(session)).length, 2);
+    assert.equal(ctx.server.messages.length, 1, "開き直したときに、送り直していない");
+  } finally {
+    gate.open();
+  }
+});

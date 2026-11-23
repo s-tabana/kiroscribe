@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { errorMessage, useBackend } from "../lib/backend";
+import { currentChatRun, startChatRun, takeChatDraft, type ChatRun } from "../lib/chatRuns";
 import type { ChatMessage } from "../lib/types";
 import { Markdown } from "./Markdown";
 import { SendIcon, TrashIcon } from "./icons";
@@ -21,47 +22,65 @@ export function ChatPanel({ noteId, onError }: ChatPanelProps) {
   const backend = useBackend();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
-  const [pending, setPending] = useState<string | null>(null);
-  const [answer, setAnswer] = useState("");
+  // 作成中の回答は、パネルの外（chatRuns）で持つ。パネルを閉じて開き直しても、続きから表示できる
+  const [run, setRun] = useState<ChatRun | null>(() => currentChatRun(backend, noteId));
+  const [answer, setAnswer] = useState(() => run?.answer ?? "");
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const pending = run?.question ?? null;
 
   useEffect(() => {
     let active = true;
     void backend.listChatMessages(noteId).then((list) => active && setMessages(list));
-    const unsubscribe = backend.onChatDelta((e) => {
-      if (e.noteId === noteId) setAnswer((prev) => prev + e.delta);
-    });
+    // パネルを閉じているあいだに回答をもらえなかった質問があれば、入力欄に戻す
+    const draft = takeChatDraft(backend, noteId);
+    if (draft) setInput((current) => current || draft);
+    return () => {
+      active = false;
+    };
+  }, [backend, noteId]);
+
+  // 作成中の回答を追いかける。終わったら（失敗・中止でも）、履歴を読み直して、送信できる状態に戻す
+  useEffect(() => {
+    if (!run) return;
+    let active = true;
+    setAnswer(run.answer);
+    const unsubscribe = run.subscribe(() => active && setAnswer(run.answer));
+    const finish = async () => {
+      const list = await backend.listChatMessages(noteId).catch(() => null);
+      if (!active) return;
+      if (list) setMessages(list);
+      setRun(null);
+      setAnswer("");
+      // 送れなかった質問は入力欄に戻す
+      const draft = takeChatDraft(backend, noteId);
+      if (draft) setInput((current) => current || draft);
+      inputRef.current?.focus();
+    };
+    run.done.then(finish, finish);
     return () => {
       active = false;
       unsubscribe();
     };
-  }, [backend, noteId]);
+  }, [backend, noteId, run]);
 
   useLayoutEffect(() => {
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, answer, pending]);
 
-  const send = async (text: string) => {
+  const send = (text: string) => {
     const question = text.trim();
     if (!question || pending !== null) return;
-    setPending(question);
     setAnswer("");
     setInput("");
-    try {
-      await backend.sendChatMessage(noteId, question);
-    } catch (err) {
+    const started = startChatRun(backend, noteId, question);
+    // 失敗は、パネルを閉じていても知らせる（中止は知らせない）
+    started.done.catch((err: unknown) => {
       const message = errorMessage(err);
       if (message !== "中止しました") onError(message);
-      // 送れなかった質問は入力欄に戻す
-      setInput((current) => current || question);
-    } finally {
-      setMessages(await backend.listChatMessages(noteId));
-      setPending(null);
-      setAnswer("");
-      inputRef.current?.focus();
-    }
+    });
+    setRun(started);
   };
 
   const clear = async () => {
@@ -70,7 +89,11 @@ export function ChatPanel({ noteId, onError }: ChatPanelProps) {
     setMessages([]);
   };
 
-  const empty = messages.length === 0 && pending === null;
+  // 作成中の質問は、送る前に履歴へ保存されている。開き直したときに読み込んだ履歴の末尾がその質問なら、
+  // 作成中の表示（質問と、届いた分の回答）と重ならないように除く
+  const last = messages[messages.length - 1];
+  const history = pending !== null && last?.role === "user" && last.content === pending ? messages.slice(0, -1) : messages;
+  const empty = history.length === 0 && pending === null;
 
   return (
     <div className="chat">
@@ -80,7 +103,7 @@ export function ChatPanel({ noteId, onError }: ChatPanelProps) {
             <p>このノートのメモ・文字起こし・議事録をもとに、AI が答えます。</p>
             <div className="suggestions">
               {SUGGESTIONS.map((s) => (
-                <button key={s} type="button" className="chip" onClick={() => void send(s)}>
+                <button key={s} type="button" className="chip" onClick={() => send(s)}>
                   {s}
                 </button>
               ))}
@@ -88,7 +111,7 @@ export function ChatPanel({ noteId, onError }: ChatPanelProps) {
           </div>
         ) : (
           <>
-            {messages.map((m) => (
+            {history.map((m) => (
               <div key={m.id} className={`chat-message from-${m.role}`}>
                 {m.role === "assistant" ? <Markdown text={m.content} /> : <p>{m.content}</p>}
               </div>
@@ -111,7 +134,7 @@ export function ChatPanel({ noteId, onError }: ChatPanelProps) {
         className="chat-input"
         onSubmit={(e) => {
           e.preventDefault();
-          void send(input);
+          send(input);
         }}
       >
         <textarea
@@ -124,7 +147,7 @@ export function ChatPanel({ noteId, onError }: ChatPanelProps) {
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
-              void send(input);
+              send(input);
             }
           }}
         />

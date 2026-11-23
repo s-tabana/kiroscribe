@@ -427,6 +427,54 @@ describe("AI チャット: 入力と中止", () => {
     expect(within(panel).getAllByText("決まったことは？", { selector: ".chat-message p" })).toHaveLength(1);
   });
 
+  it("[CHT-014] 回答の作成中にパネルを閉じて開き直しても、作成中の表示に戻り、終わると回答が出る", async () => {
+    const { user, backend, noteId, input } = await openChat({ streamDelayMs: 40 });
+
+    await user.type(input, "決まったことは？{Enter}");
+    let panel = screen.getByRole("complementary", { name: "AI チャット" });
+    await within(panel).findByRole("button", { name: "中止" });
+
+    // 作成中にパネルを閉じて、開き直す
+    await user.click(within(panel).getByRole("button", { name: "パネルを閉じる" }));
+    expect(screen.queryByRole("complementary", { name: "AI チャット" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "AI チャット" }));
+    panel = screen.getByRole("complementary", { name: "AI チャット" });
+
+    // 質問が 1 つと、作成中の表示（それまでに届いた分、または「考えています…」）が出て、中止もできる
+    expect(await within(panel).findByRole("button", { name: "中止" })).toBeInTheDocument();
+    expect(within(panel).getAllByText("決まったことは？", { selector: ".chat-message p" })).toHaveLength(1);
+    expect(within(panel).queryByRole("button", { name: "送信" })).not.toBeInTheDocument();
+
+    // 終わると、開き直さなくても回答が出る
+    expect(await within(panel).findByText(/リリース日は/, undefined, { timeout: 5000 })).toBeInTheDocument();
+    expect(await within(panel).findByRole("button", { name: "送信" })).toBeInTheDocument();
+    expect(within(panel).getAllByText("決まったことは？", { selector: ".chat-message p" })).toHaveLength(1);
+    expect((await backend.listChatMessages(noteId)).map((m) => m.role)).toEqual(["user", "assistant"]);
+    // 入力欄は空のまま（回答をもらえたので、質問を戻さない）
+    expect(within(panel).getByLabelText("AI への質問")).toHaveValue("");
+  });
+
+  it("[CHT-014] パネルを閉じているあいだに回答をもらえなかった質問は、開き直したときに入力欄へ戻る", async () => {
+    const { user, backend, noteId, input } = await openChat({ streamDelayMs: 40 });
+
+    await user.type(input, "決まったことは？{Enter}");
+    let panel = screen.getByRole("complementary", { name: "AI チャット" });
+    await within(panel).findByRole("button", { name: "中止" });
+    await user.click(within(panel).getByRole("button", { name: "パネルを閉じる" }));
+
+    // 閉じているあいだに、作成が止まる（ここでは中止）
+    await act(async () => {
+      await backend.cancelAi(noteId, "chat");
+    });
+    await waitFor(async () => expect(await backend.listChatMessages(noteId)).toEqual([]));
+
+    await user.click(screen.getByRole("button", { name: "AI チャット" }));
+    panel = screen.getByRole("complementary", { name: "AI チャット" });
+    await waitFor(() => expect(within(panel).getByLabelText("AI への質問")).toHaveValue("決まったことは？"));
+    expect(within(panel).getByRole("button", { name: "送信" })).toBeEnabled();
+    expect(within(panel).queryByRole("button", { name: "中止" })).not.toBeInTheDocument();
+  });
+
   it("[CHT-010] 回答の作成中は、次の質問を送れない", async () => {
     const { user, backend, noteId, send, panel, input } = await openChat({ streamDelayMs: 30 });
 
