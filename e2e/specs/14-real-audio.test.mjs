@@ -50,7 +50,16 @@ test("[SET-006][REC-001][REC-009] 本物の音声デバイスから、マイク�
   await createNote(session, { title: "本物の音声デバイス" });
   await pressBarButton(session, "録音を開始");
   await session.waitForText(timer, "録音中");
-  await playSpeech(ctx.work.dir, 12);
+  const playing = playSpeech(ctx.work.dir, 12);
+  // 鳴らしているあいだ、自分と相手の入力の大きさのバーが動く
+  await session.waitUntil(
+    () =>
+      session.execute(
+        "return ['me', 'them'].every((s) => document.querySelectorAll(`.level-${s} .level-bars i.on`).length > 0)",
+      ),
+    { timeout: 15_000, message: "自分と相手の入力の大きさのバーが動く" },
+  );
+  await playing;
   await session.waitUntil(async () => (await speakersShown(session)).size === 2, {
     timeout: 30_000,
     message: "自分と相手の発話が表示される",
