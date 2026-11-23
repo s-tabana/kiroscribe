@@ -75,3 +75,167 @@ foreach ($w in $windows) {
   );
   return out === "pressed";
 }
+
+// ---- タスクトレイ ----
+// 通知領域のアイコンは、エクスプローラー（タスクバー）が持つ。Windows 11 では、新しいアプリのアイコンは
+// 「隠れているインジケーター」（あふれた分の一覧）に入るので、タスクバーで見つからなければ、その一覧を開いて探す。
+// クリックは、利用者と同じく本物のマウスの操作（カーソルを動かして押す）で行う。
+
+const TRAY = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class KiroscribeMouse {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+  public static void Click(int x, int y, bool right) {
+    SetCursorPos(x, y);
+    System.Threading.Thread.Sleep(150);
+    mouse_event(right ? 0x0008u : 0x0002u, 0, 0, 0, UIntPtr.Zero);
+    System.Threading.Thread.Sleep(60);
+    mouse_event(right ? 0x0010u : 0x0004u, 0, 0, 0, UIntPtr.Zero);
+  }
+}
+"@
+$True_ = [System.Windows.Automation.Condition]::TrueCondition
+function Named($name) { New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, $name) }
+function Taskbar { $AE::RootElement.FindFirst($Scope::Children, (New-Object System.Windows.Automation.PropertyCondition($AE::ClassNameProperty, 'Shell_TrayWnd'))) }
+function Click-Element($el, $right) {
+  $r = $el.Current.BoundingRectangle
+  [KiroscribeMouse]::Click([int]($r.X + $r.Width / 2), [int]($r.Y + $r.Height / 2), $right)
+}
+# 名前が $name の、画面に見えているアイコンを探す（タスクバー → あふれた分の一覧の順）。見つからなければ $null
+function Find-TrayIcons($name) {
+  $found = @()
+  foreach ($w in $AE::RootElement.FindAll($Scope::Children, $True_)) {
+    foreach ($e in $w.FindAll($Scope::Descendants, (Named $name))) {
+      if (-not $e.Current.IsOffscreen) { $found += $e }
+    }
+  }
+  return ,$found
+}
+function Open-Overflow {
+  $bar = Taskbar
+  if ($bar -eq $null) { return }
+  foreach ($e in $bar.FindAll($Scope::Descendants, $True_)) {
+    $id = $e.Current.AutomationId; $n = $e.Current.Name
+    if ($id -eq 'SystemTrayIcon' -or $id -eq '1502' -or $n -match 'Hidden Icons|Notification Chevron|隠れているインジケーター') {
+      Click-Element $e $false
+      Start-Sleep -Milliseconds 800
+      return
+    }
+  }
+}
+function Find-TrayIcon($name) {
+  $icons = Find-TrayIcons $name
+  if ($icons.Count -eq 0) { Open-Overflow; $icons = Find-TrayIcons $name }
+  if ($icons.Count -eq 0) { return $null }
+  return $icons[0]
+}
+# 見つからないときに、調べるための材料（タスクバーと、あふれた分の一覧にある名前）
+function Describe-Tray {
+  $names = @()
+  foreach ($w in $AE::RootElement.FindAll($Scope::Children, $True_)) {
+    $cls = $w.Current.ClassName
+    if ($cls -match 'Shell_TrayWnd|NotifyIconOverflowWindow|TopLevelWindowForOverflowXamlIsland|Xaml') {
+      foreach ($e in $w.FindAll($Scope::Descendants, $True_)) {
+        if ($e.Current.Name) { $names += ($cls + ' / ' + $e.Current.ControlType.ProgrammaticName + ' / ' + $e.Current.AutomationId + ' / ' + $e.Current.Name) }
+      }
+    }
+  }
+  return $names
+}
+`;
+
+function trayScript(body, env) {
+  return powershell(TRAY + body, { KIROSCRIBE_UIA_PID: "0", ...env });
+}
+
+/** 通知領域に、名前（ツールチップ）が name のアイコンがいくつ見えているか。見えなければ、調べるための材料も返す */
+export function trayIcons(name) {
+  const out = trayScript(
+    `
+$icons = Find-TrayIcons $env:KIROSCRIBE_TRAY_NAME
+if ($icons.Count -eq 0) { Open-Overflow; $icons = Find-TrayIcons $env:KIROSCRIBE_TRAY_NAME }
+$tray = @(); if ($icons.Count -eq 0) { $tray = Describe-Tray }
+ConvertTo-Json -InputObject ([pscustomobject]@{ count = $icons.Count; tray = @($tray) }) -Depth 3 -Compress
+`,
+    { KIROSCRIBE_TRAY_NAME: name },
+  );
+  return JSON.parse(out);
+}
+
+/** 通知領域のアイコンを、マウスでクリックする（button: "left" | "right"）。押せたら true */
+export function clickTrayIcon(name, button = "left") {
+  const out = trayScript(
+    `
+$icon = Find-TrayIcon $env:KIROSCRIBE_TRAY_NAME
+if ($icon -eq $null) { 'missing'; exit 0 }
+Click-Element $icon ($env:KIROSCRIBE_TRAY_BUTTON -eq 'right')
+'clicked'
+`,
+    { KIROSCRIBE_TRAY_NAME: name, KIROSCRIBE_TRAY_BUTTON: button },
+  );
+  return out === "clicked";
+}
+
+/**
+ * プロセスが出しているメニュー（右クリックのメニュー）の項目。1 件は { name, checked }（checked は分からなければ null）。
+ * メニューが出ていなければ null
+ */
+export function openMenu(pid) {
+  const out = powershell(
+    `
+$menu = $null
+foreach ($w in $AE::RootElement.FindAll($Scope::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
+  if ($w.Current.ClassName -eq '#32768') { $menu = $w; break }
+}
+if ($menu -eq $null) { 'null'; exit 0 }
+$isItem = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::MenuItem)
+$items = @()
+foreach ($e in $menu.FindAll($Scope::Descendants, $isItem)) {
+  $checked = $null
+  $toggle = $null
+  if ($e.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$toggle)) {
+    $checked = ($toggle.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On)
+  }
+  $items += [pscustomobject]@{ name = $e.Current.Name; checked = $checked }
+}
+ConvertTo-Json -InputObject @($items) -Depth 3 -Compress
+`,
+    { KIROSCRIBE_UIA_PID: String(pid) },
+  );
+  return out === "null" ? null : JSON.parse(out);
+}
+
+/** 出ているメニューの項目 name を選ぶ（利用者と同じく、マウスでクリックする）。選べたら true */
+export function chooseMenuItem(name) {
+  const out = trayScript(
+    `
+foreach ($w in $AE::RootElement.FindAll($Scope::Children, $True_)) {
+  if ($w.Current.ClassName -ne '#32768') { continue }
+  $item = $w.FindFirst($Scope::Descendants, (Named $env:KIROSCRIBE_MENU_ITEM))
+  if ($item -ne $null) { Click-Element $item $false; 'chosen'; exit 0 }
+}
+'missing'
+`,
+    { KIROSCRIBE_MENU_ITEM: name },
+  );
+  return out === "chosen";
+}
+
+/** プロセスのウィンドウ（題名 title）を最小化する */
+export function minimizeWindow(pid, title) {
+  const out = powershell(
+    `
+foreach ($w in $windows) {
+  if ($w.Current.Name -ne $env:KIROSCRIBE_UIA_TITLE) { continue }
+  $w.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).SetWindowVisualState([System.Windows.Automation.WindowVisualState]::Minimized)
+  'minimized'; exit 0
+}
+'missing'
+`,
+    { KIROSCRIBE_UIA_PID: String(pid), KIROSCRIBE_UIA_TITLE: title },
+  );
+  return out === "minimized";
+}
