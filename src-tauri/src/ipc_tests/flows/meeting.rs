@@ -145,3 +145,23 @@ fn a_meeting_without_an_openai_key_is_reported_instead_of_recorded() {
     assert!(h.events("note-created").is_empty());
     assert_eq!(h.recording_state(), "idle");
 }
+
+/// 自動で始めた録音が API キーの誤りで止まったら、ポップアップでも理由を知らせる（ウィンドウを閉じていても分かるように）。
+// [TRN-014][POP-006]
+#[test]
+fn a_rejected_api_key_during_a_meeting_is_reported_in_the_popup() {
+    let h = Harness::new();
+    *h.fixture.api.transcription_status.lock().unwrap() = Some(401);
+    h.meeting(MeetingEvent::Started(MeetingApp::GoogleMeet));
+    assert_eq!(h.popup()["kind"], "recording");
+    let popup = wait_until("ポップアップでの知らせ", || Some(h.popup()).filter(|popup| popup["kind"] == "error"));
+    assert_eq!(popup["app"], "Google Meet");
+    let message = popup["message"].as_str().unwrap();
+    assert!(message.starts_with("文字起こしを停止しました。API キーを確認してください（"), "{message}");
+    wait_until("録音の停止", || (h.recording_state() == "idle").then_some(()));
+    assert_eq!(h.events("recording-error").len(), 1);
+    // 会議が終わっても、止まった録音については何も知らせない
+    h.clear_events();
+    h.meeting(MeetingEvent::Ended(MeetingApp::GoogleMeet));
+    assert!(h.events("meeting-popup").is_empty());
+}

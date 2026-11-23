@@ -229,13 +229,21 @@ test(
   },
 );
 
-test("文字起こしの API がキーを拒否したら、文字起こしを止めて、キーの確認を促す", async (ctx) => {
+test("[TRN-014] 文字起こしの API がキーを拒否したら、文字起こしと録音を止めて、キーの確認を促す", async (ctx) => {
   ctx.server.openai.apiKey = "sk-別のキー";
   const session = await ctx.launch();
   await createNote(session, { title: "キーの誤り" });
   await pressBarButton(session, "録音を開始");
   const message = await toastText(session, "文字起こしを停止しました。API キーを確認してください", { timeout: 30_000 });
   assert.match(message, /OpenAI の API キーが正しくないか、権限がありません（HTTP 401/);
+  // 録音も止まる（「録音中」の表示と経過時間が進み続けない）
+  await session.$(barButton("録音を開始"), { timeout: 30_000 });
+  assert.equal(await session.exists(`${sel.noteItems} [aria-label="録音中"]`), false);
+  // 止まったあとは、音声を送らない。知らせも増えない
+  const sent = ctx.server.transcriptions.length;
+  await sleep(3_500);
+  assert.equal(ctx.server.transcriptions.length, sent, "録音を止めたあとも、音声を送っている");
+  assert.equal((await session.findAll(sel.toast)).length, 1);
   // キーに関する知らせには、設定画面への近道が付く
   await session.click(`${sel.toast} button.button`);
   await session.$(sel.settingsDialog);

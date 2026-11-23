@@ -281,7 +281,8 @@ fn ipc_contract_matches_the_frontend() {
     let error = wait_until("文字起こしの失敗の知らせ", || events_named(&events, "recording-error").into_iter().next());
     assert_eq!(error["noteId"], second.as_str());
     assert!(error["message"].as_str().unwrap().contains("API キーを確認してください"), "{error}");
-    s.ok("stop_recording", json!({}));
+    // キーの誤りでは、録音も自動で止まる
+    wait_until("録音の停止", || (s.peek("get_recording_status", json!({}))["state"] == "idle").then_some(()));
     assert_eq!(s.ok("delete_note", json!({ "id": second })), Value::Null);
     *fixture.api.transcription_status.lock().unwrap() = None;
 

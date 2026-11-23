@@ -243,3 +243,39 @@ fn a_transcript_that_cannot_be_saved_is_reported() {
     assert!(h.events("transcript-segment").is_empty(), "保存できなかった発話を画面に送っている");
     assert_eq!(h.ok("stop_recording", json!({}))["state"], "idle");
 }
+
+/// API キーが誤っている（401・403）ときは、文字起こしだけでなく録音も止め、知らせは 1 回だけ出す。
+// [TRN-014]
+#[test]
+fn a_rejected_api_key_stops_the_recording_with_a_single_notice() {
+    for status in [401, 403] {
+        let h = Harness::new();
+        *h.fixture.api.transcription_status.lock().unwrap() = Some(status);
+        let note = h.note("キーの誤り", "");
+        let started = h.ok("start_recording", json!({ "noteId": note }));
+        assert_eq!(started["sources"], json!(["me", "them"]));
+
+        // 最初の発話が拒否されたら、録音が止まる（利用者が「停止」を押さなくても、録音していない状態に戻る）
+        let error = wait_until("キーの誤りの知らせ", || h.events("recording-error").into_iter().next());
+        assert_eq!(error["noteId"], note.as_str());
+        let message = error["message"].as_str().unwrap();
+        assert!(message.starts_with("文字起こしを停止しました。API キーを確認してください（"), "{message}");
+        assert!(message.contains(&format!("HTTP {status}")), "{message}");
+        wait_until("録音の停止", || (h.recording_state() == "idle").then_some(()));
+        let states: Vec<Value> = h.events("recording-status").iter().map(|status| status["state"].clone()).collect();
+        assert_eq!(states, [json!("recording"), json!("finishing"), json!("idle")]);
+
+        // 自分と相手の両方の発話が拒否されても、知らせは 1 回だけ。止まったあとは、何も送らない
+        let sent = h.transcriptions().len();
+        std::thread::sleep(Duration::from_millis(3500));
+        assert_eq!(h.events("recording-error").len(), 1, "{:?}", h.events("recording-error"));
+        assert_eq!(h.transcriptions().len(), sent, "録音を止めたあとも、音声を送っている");
+        assert!(sent <= 2, "拒否されたあとも、発話を送り続けている（{sent} 回）");
+        assert!(h.segments(&note).is_empty());
+
+        // キーを直せば、また録音できる
+        *h.fixture.api.transcription_status.lock().unwrap() = None;
+        h.record_until_transcribed(&note);
+        assert_eq!(h.events("recording-error").len(), 1);
+    }
+}
