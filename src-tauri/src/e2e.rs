@@ -25,6 +25,7 @@ const CLIPBOARD_FILE: &str = "clipboard.txt";
 const OPENED_URLS_FILE: &str = "opened-urls.log";
 const PID_FILE: &str = "app.pid";
 const CLOSE_WINDOW_FILE: &str = "close-window.txt";
+const RESIZE_WINDOW_FILE: &str = "resize-window.txt";
 
 /// 作業フォルダごとに変えるアプリの識別子の先頭。製品の識別子（`dev.kiroscribe.desktop`）とは重ならない。
 const IDENTIFIER_PREFIX: &str = "dev.kiroscribe.e2e";
@@ -294,6 +295,9 @@ fn clipboard_plugin<R: Runtime>() -> TauriPlugin<R> {
 ///   動くので、書くのは 1 つ目の起動だけ
 /// - `close-window.txt` にウィンドウのラベル（`main` など）が書かれたら、そのウィンドウを閉じる。
 ///   利用者がウィンドウの「×」を押したのと同じ扱いになる（WebDriver からは「×」を押せないため）
+/// - `resize-window.txt` に「ラベル 幅 高さ」（例: `main 400 300`）が書かれたら、そのウィンドウの大きさを変える。
+///   利用者がウィンドウの端をドラッグしたときと同じく、OS がウィンドウの最小の大きさを守る
+///   （WebDriver の大きさの変更は、Windows ではウェブビューの領域しか変えないため）
 fn control_plugin<R: Runtime>() -> TauriPlugin<R> {
     PluginBuilder::new("e2e-control")
         // 起動に失敗したときに、どこまで進んだかをログから追えるようにする
@@ -311,20 +315,45 @@ fn control_plugin<R: Runtime>() -> TauriPlugin<R> {
                 .spawn(move || loop {
                     std::thread::sleep(Duration::from_millis(100));
                     let Some(path) = core::file(CLOSE_WINDOW_FILE) else { return };
-                    let Ok(label) = std::fs::read_to_string(&path) else { continue };
-                    let _ = std::fs::remove_file(&path);
-                    match app.get_webview_window(label.trim()) {
-                        Some(window) => {
-                            if let Err(err) = window.close() {
-                                eprintln!("[e2e] ウィンドウ {} を閉じられません: {err}", label.trim());
+                    if let Ok(label) = std::fs::read_to_string(&path) {
+                        let _ = std::fs::remove_file(&path);
+                        match app.get_webview_window(label.trim()) {
+                            Some(window) => {
+                                if let Err(err) = window.close() {
+                                    eprintln!("[e2e] ウィンドウ {} を閉じられません: {err}", label.trim());
+                                }
                             }
+                            None => eprintln!("[e2e] ウィンドウ {} がありません", label.trim()),
                         }
-                        None => eprintln!("[e2e] ウィンドウ {} がありません", label.trim()),
+                    }
+                    let Some(path) = core::file(RESIZE_WINDOW_FILE) else { return };
+                    if let Ok(request) = std::fs::read_to_string(&path) {
+                        let _ = std::fs::remove_file(&path);
+                        match parse_resize(&request) {
+                            Some((label, width, height)) => match app.get_webview_window(label) {
+                                Some(window) => {
+                                    if let Err(err) = window.set_size(tauri::LogicalSize::new(width, height)) {
+                                        eprintln!("[e2e] ウィンドウ {label} の大きさを変えられません: {err}");
+                                    }
+                                }
+                                None => eprintln!("[e2e] ウィンドウ {label} がありません"),
+                            },
+                            None => eprintln!("[e2e] {RESIZE_WINDOW_FILE} の内容が正しくありません: {request}"),
+                        }
                     }
                 })?;
             Ok(())
         })
         .build()
+}
+
+/// `resize-window.txt` の内容（「ラベル 幅 高さ」）を読む。
+fn parse_resize(request: &str) -> Option<(&str, f64, f64)> {
+    let mut parts = request.split_whitespace();
+    let label = parts.next()?;
+    let width: f64 = parts.next()?.parse().ok()?;
+    let height: f64 = parts.next()?.parse().ok()?;
+    (parts.next().is_none() && width > 0.0 && height > 0.0).then_some((label, width, height))
 }
 
 /// ダイアログとクリップボードのプラグインを、E2E テスト用のものに置き換える
@@ -480,6 +509,15 @@ mod tests {
         assert_eq!(simulated_tick(None, Some(meet)), (None, false), "会議が終わった");
         // 別の会議アプリに書き換えたら、前の会議は続いていない（別の会議が始まろうとしている）
         assert_eq!(simulated_tick(Some(MeetingApp::Zoom), Some(meet)), (Some(zoom), false));
+    }
+
+    #[test]
+    fn resize_requests_name_a_window_and_a_size() {
+        assert_eq!(parse_resize("main 400 300\n"), Some(("main", 400.0, 300.0)));
+        assert_eq!(parse_resize("  meeting-popup  380.5 128 "), Some(("meeting-popup", 380.5, 128.0)));
+        for broken in ["", "main", "main 400", "main 400 x", "main 0 300", "main 400 300 extra"] {
+            assert_eq!(parse_resize(broken), None, "{broken:?}");
+        }
     }
 
     #[test]

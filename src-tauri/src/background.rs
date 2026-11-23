@@ -7,7 +7,7 @@ use kiroscribe_core::settings::Settings;
 use serde::Serialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::error::CmdResult;
 use crate::recording::stop_now;
@@ -28,6 +28,9 @@ pub const AUTOSTART_ARG: &str = "--autostart";
 
 const POPUP_WIDTH: f64 = 380.0;
 const POPUP_HEIGHT: f64 = 128.0;
+/// ポップアップと、モニターの右端・下端とのあいだ（下は、タスクバーにかからないように広くとる）
+const POPUP_MARGIN_RIGHT: f64 = 16.0;
+const POPUP_MARGIN_BOTTOM: f64 = 64.0;
 
 /// ポップアップに表示する内容。
 #[derive(Debug, Clone, Serialize)]
@@ -89,21 +92,16 @@ pub fn show_popup(app: &AppHandle, payload: PopupPayload) {
         return;
     }
 
-    // 主モニターの右下（タスクバーの少し上）に出す
-    let (x, y) = app
-        .primary_monitor()
-        .ok()
-        .flatten()
-        .map(|m| {
-            let scale = m.scale_factor();
-            let size = m.size().to_logical::<f64>(scale);
-            let pos = m.position().to_logical::<f64>(scale);
-            (
-                pos.x + size.width - POPUP_WIDTH - 16.0,
-                pos.y + size.height - POPUP_HEIGHT - 64.0,
-            )
-        })
-        .unwrap_or((80.0, 80.0));
+    // 主モニターの右下（タスクバーの少し上）に出す。位置は、見えている部分の左上で決める
+    let monitor = app.primary_monitor().ok().flatten();
+    let target = monitor.as_ref().map(|m| popup_position(m.position(), m.size(), m.scale_factor()));
+    let (x, y) = match (&monitor, target) {
+        (Some(m), Some(target)) => {
+            let logical = target.to_logical::<f64>(m.scale_factor());
+            (logical.x, logical.y)
+        }
+        _ => (80.0, 80.0),
+    };
 
     #[allow(unused_mut)]
     let mut builder = WebviewWindowBuilder::new(app, POPUP_LABEL, WebviewUrl::App("index.html#/popup".into()))
@@ -120,10 +118,30 @@ pub fn show_popup(app: &AppHandle, payload: PopupPayload) {
     if let Some(args) = crate::e2e::browser_args() {
         builder = builder.additional_browser_args(&args);
     }
-    let built = builder.build();
-    if let Err(err) = built {
-        eprintln!("ポップアップを表示できませんでした: {err}");
+    match builder.build() {
+        Ok(window) => {
+            // Windows では、ウィンドウの位置は、見えない枠（左右と下に数 px）を含めた外側で決まる。
+            // そのままだと、見えている部分が意図より右下に寄るので、枠のぶんだけ戻す
+            if let (Some(target), Ok(outer), Ok(inner)) = (target, window.outer_position(), window.inner_position()) {
+                let frame = (inner.x - outer.x, inner.y - outer.y);
+                if frame != (0, 0) {
+                    let _ = window.set_position(PhysicalPosition::new(target.x - frame.0, target.y - frame.1));
+                }
+            }
+        }
+        Err(err) => eprintln!("ポップアップを表示できませんでした: {err}"),
     }
+}
+
+/// ポップアップの見えている部分の左上の位置（物理ピクセル）: モニターの右端から 16px、下端から 64px 内側に、
+/// 幅 380px・高さ 128px のポップアップが収まる位置。px は、表示の拡大率を掛ける前の値（拡大率 150% なら 1.5 倍になる）。
+fn popup_position(monitor_position: &PhysicalPosition<i32>, monitor_size: &PhysicalSize<u32>, scale: f64) -> PhysicalPosition<i32> {
+    let from_right = ((POPUP_WIDTH + POPUP_MARGIN_RIGHT) * scale).round() as i32;
+    let from_bottom = ((POPUP_HEIGHT + POPUP_MARGIN_BOTTOM) * scale).round() as i32;
+    PhysicalPosition::new(
+        monitor_position.x + monitor_size.width as i32 - from_right,
+        monitor_position.y + monitor_size.height as i32 - from_bottom,
+    )
 }
 
 /// 自動で始めた録音が、会議の終了を待たずに止まった（利用者がメインウィンドウで止めた）ときに、
@@ -303,4 +321,30 @@ pub fn setup_tray(app: &AppHandle, settings: &Settings) -> tauri::Result<()> {
     }
     builder.build(app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ポップアップの位置は、表示の拡大率が変わっても、見た目で右端から 16px・下端から 64px 内側になる。
+    // [POP-001]
+    #[test]
+    fn the_popup_sits_at_the_bottom_right_of_the_primary_monitor_at_any_scale() {
+        let origin = PhysicalPosition::new(0, 0);
+        // 100%: 1920x1080
+        let at = popup_position(&origin, &PhysicalSize::new(1920, 1080), 1.0);
+        assert_eq!((at.x, at.y), (1920 - 380 - 16, 1080 - 128 - 64));
+        // 150%: 物理ピクセルでは、ポップアップも余白も 1.5 倍
+        let at = popup_position(&origin, &PhysicalSize::new(2880, 1620), 1.5);
+        assert_eq!((at.x, at.y), (2880 - 570 - 24, 1620 - 192 - 96));
+        let logical = at.to_logical::<f64>(1.5);
+        assert_eq!((logical.x, logical.y), (1920.0 - 380.0 - 16.0, 1080.0 - 128.0 - 64.0), "見た目の位置は 100% のときと同じ");
+        // 125%: 端数は丸める（1px 以内）
+        let at = popup_position(&origin, &PhysicalSize::new(1920, 1080), 1.25);
+        assert_eq!((at.x, at.y), (1920 - 495, 1080 - 240));
+        // 主モニターが原点にないとき（左に別のモニターがある、など）
+        let at = popup_position(&PhysicalPosition::new(-1280, 200), &PhysicalSize::new(1280, 720), 1.0);
+        assert_eq!((at.x, at.y), (-1280 + 1280 - 396, 200 + 720 - 192));
+    }
 }

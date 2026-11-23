@@ -20,12 +20,14 @@ test("[NOTE-001][NOTE-008][NOTE-009][NOTE-014][NOTE-019][NOTE-020][DAT-001][TRY-
   if (screenWidth >= 1240 && screenHeight >= 820) {
     assert.deepEqual(await innerSize(), [1240, 820], "メインウィンドウの大きさ");
   }
-  // 幅 860px・高さ 560px より小さくはできない
-  await session.setWindowSize(400, 300).catch(() => {});
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  const [minWidth, minHeight] = await innerSize();
-  assert.ok(minWidth >= 860 && minHeight >= 560, `小さくしすぎている: ${minWidth}x${minHeight}`);
-  await session.setWindowSize(1240, 820).catch(() => {});
+  // 幅 860px・高さ 560px より小さくはできない（それより小さくしようとしても、860x560 で止まる）
+  ctx.work.resizeWindow("main", 400, 300);
+  await session.waitUntil(async () => (await innerSize()).join("x") === "860x560", {
+    message: `ウィンドウが最小の大きさ（860x560）になる（いまは ${(await innerSize()).join("x")}）`,
+  });
+  // 最小より大きい大きさには、そのまま変えられる
+  ctx.work.resizeWindow("main", 900, 600);
+  await session.waitUntil(async () => (await innerSize()).join("x") === "900x600", { message: "ウィンドウが 900x600 になる" });
 
   // 初回起動: ノートはまだない。データベースは、アプリのデータフォルダの中にできる
   await session.waitForText("main", "最初の会議ノートを作りましょう");

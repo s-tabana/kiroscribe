@@ -170,6 +170,14 @@ export class Workspace {
     fs.writeFileSync(this.file("close-window.txt"), label);
   }
 
+  /**
+   * ウィンドウの大きさを変える（利用者がウィンドウの端をドラッグしたときと同じく、OS が最小の大きさを守る）。
+   * WebDriver の大きさの変更は、Windows ではウェブビューの領域しか変えないので、アプリの側から変える
+   */
+  resizeWindow(label, width, height) {
+    fs.writeFileSync(this.file("resize-window.txt"), `${label} ${width} ${height}`);
+  }
+
   /** 起動しているアプリのプロセス ID（まだ起動していなければ null） */
   pid() {
     const text = this.#read("app.pid");
