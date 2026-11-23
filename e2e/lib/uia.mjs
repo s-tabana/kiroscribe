@@ -256,3 +256,52 @@ foreach ($w in $windows) {
   );
   return out === "minimized";
 }
+
+/**
+ * プロセスのウィンドウのうち、幅が maxWidth 以下のもの（ポップアップなど）を、本物のマウスで
+ * 左上から (grabX, grabY) の所をつかんで (dx, dy) だけドラッグする。動かす前と後の位置を返す: { before, after }（[左, 上, 幅, 高さ]）
+ */
+export function dragWindow(pid, { maxWidth = 500, grabX = 60, grabY = 16, dx = -200, dy = -150 } = {}) {
+  const out = powershell(
+    `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class KiroscribeDrag {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+}
+"@
+function Rect($el) { $r = $el.Current.BoundingRectangle; @([int]$r.X, [int]$r.Y, [int]$r.Width, [int]$r.Height) }
+$target = $null
+foreach ($w in $windows) {
+  if ((Is-Shown $w) -and $w.Current.BoundingRectangle.Width -le [int]$env:KIROSCRIBE_MAX_WIDTH) { $target = $w; break }
+}
+if ($target -eq $null) { 'null'; exit 0 }
+$before = Rect $target
+$x = $before[0] + [int]$env:KIROSCRIBE_GRAB_X; $y = $before[1] + [int]$env:KIROSCRIBE_GRAB_Y
+$dx = [int]$env:KIROSCRIBE_DX; $dy = [int]$env:KIROSCRIBE_DY
+[KiroscribeDrag]::SetCursorPos($x, $y) | Out-Null
+Start-Sleep -Milliseconds 200
+[KiroscribeDrag]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+Start-Sleep -Milliseconds 200
+for ($i = 1; $i -le 20; $i++) {
+  [KiroscribeDrag]::SetCursorPos($x + [int]($dx * $i / 20), $y + [int]($dy * $i / 20)) | Out-Null
+  Start-Sleep -Milliseconds 30
+}
+Start-Sleep -Milliseconds 200
+[KiroscribeDrag]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+Start-Sleep -Milliseconds 500
+ConvertTo-Json -Compress -InputObject ([pscustomobject]@{ before = $before; after = (Rect $target) })
+`,
+    {
+      KIROSCRIBE_UIA_PID: String(pid),
+      KIROSCRIBE_MAX_WIDTH: String(maxWidth),
+      KIROSCRIBE_GRAB_X: String(grabX),
+      KIROSCRIBE_GRAB_Y: String(grabY),
+      KIROSCRIBE_DX: String(dx),
+      KIROSCRIBE_DY: String(dy),
+    },
+  );
+  return out === "null" ? null : JSON.parse(out);
+}
