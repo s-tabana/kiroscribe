@@ -596,15 +596,16 @@ export class Context {
 
 /**
  * E2E テストを 1 件定義する（node:test の test と同じ形で書ける）。
- * options: { config?: アプリの設定の上書き, apiKeys?: false | { openai, anthropic }, timeout?: ミリ秒 }
+ * options: { config?: アプリの設定の上書き, apiKeys?: false | { openai, anthropic }, timeout?: ミリ秒,
+ *            skip?: 飛ばす理由（文字列）。その環境では確かめられないテストに付ける }
  * fn にはテスト 1 件ぶんの道具（Context）が渡る。失敗したら、スクリーンショットとログを e2e/artifacts/ に残す。
  *
  * 仕様の ID を付けるときは、テストの名前の先頭に角かっこで書く（例: 「[NOTE-001] 起動するとメイン画面が出て…」）。
  */
 export function test(name, options, fn) {
   if (typeof options === "function") [options, fn] = [{}, options];
-  const { timeout = 180_000, ...contextOptions } = options;
-  nodeTest(name, { timeout }, async () => {
+  const { timeout = 180_000, skip = false, ...contextOptions } = options;
+  nodeTest(name, { timeout, skip }, async () => {
     const context = await Context.create(name, contextOptions);
     try {
       await fn(context);

@@ -65,21 +65,18 @@ pub fn failure_message(reason: &str) -> String {
 pub fn report_failure(app: &AppHandle, reason: &str) {
     let message = failure_message(reason);
     eprintln!("{message}");
-    // E2E テスト用のビルドでは、OS のダイアログは出さずに、出そうとしたことを記録して終了する（src/e2e.rs）
+    // E2E テスト用のビルドでは、ふつうは OS のダイアログは出さずに、出そうとしたことを記録して終了する（src/e2e.rs）。
+    // 作業フォルダの設定で求められたときは、製品と同じダイアログを出す（UI オートメーションで確かめるテスト用）
     #[cfg(feature = "e2e")]
-    {
-        let _ = app;
+    if !crate::e2e::native_startup_dialog() {
         crate::e2e::record_message_dialog(FAILURE_TITLE, &message, "error");
         std::process::exit(1);
     }
-    #[cfg(not(feature = "e2e"))]
-    {
-        use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-        let handle = app.clone();
-        app.dialog()
-            .message(message)
-            .title(FAILURE_TITLE)
-            .kind(MessageDialogKind::Error)
-            .show(move |_| handle.exit(1));
-    }
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    let handle = app.clone();
+    app.dialog()
+        .message(message)
+        .title(FAILURE_TITLE)
+        .kind(MessageDialogKind::Error)
+        .show(move |_| handle.exit(1));
 }

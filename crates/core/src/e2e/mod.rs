@@ -78,6 +78,9 @@ pub struct Config {
     /// （インストールしたアプリを使うテスト用）。書かなければ、E2E テスト用のビルドは登録しない
     /// （製品の自動起動の登録を、テストのビルドで書き換えないため）
     pub register_autostart: bool,
+    /// 起動できなかったときのダイアログを、記録に置き換えずに本当に出す
+    /// （OS のダイアログが出て、閉じると終了することを、UI オートメーションで確かめるテスト用）
+    pub native_startup_dialog: bool,
     pub audio: AudioConfig,
     pub timing: Timing,
 }

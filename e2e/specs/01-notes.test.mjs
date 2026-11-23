@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { test } from "../lib/app.mjs";
-import { barButton, createNote, noteTitles, openNote, pressBarButton, sel, utterances, waitSaved } from "../lib/ui.mjs";
+import { barButton, closeSettings, createNote, noteTitles, openNote, openSettings, pressBarButton, sel, utterances, waitSaved } from "../lib/ui.mjs";
 import { Key } from "../lib/webdriver.mjs";
 
 const noteList = 'nav[aria-label="ノート一覧"]';
@@ -191,8 +191,8 @@ test("[TRY-007] ふつうに起動するとメインウィンドウが 1240x820 
   assert.deepEqual(resized.inner, [900, 600], `900x600 にならない: ${JSON.stringify(resized)}`);
   if (process.platform === "win32") {
     // Windows は、プログラムからの大きさの変更には最小の大きさを当てはめない（利用者がウィンドウの端をドラッグしたときだけ、
-    // ウィンドウに最小の大きさを問い合わせて止める）。そこで、同じ問い合わせの答えが、内側の 860x560 に当たることを確かめる。
-    // 実際にドラッグして止まることは、リリース前のチェックリスト（A-1）で確かめる
+    // ウィンドウに最小の大きさを問い合わせて止める）。そこで、同じ問い合わせの答えが、内側の 860x560 に当たることを確かめる
+    // （利用者のドラッグは、OS がこの答えで止める。その大きさで表示が崩れないことは、下のテストで確かめる）
     const min = resized.minSize;
     // 問い合わせの答えそのまま（track）も、ログに残す
     console.log(`[e2e] メインウィンドウの最小の大きさ（問い合わせの答え）: ${JSON.stringify(min)}`);
@@ -214,4 +214,62 @@ test("[TRY-007] ふつうに起動するとメインウィンドウが 1240x820 
   await session.waitUntil(async () => (await session.execute("return [window.innerWidth, window.innerHeight]")).join("x") === "1000x560", {
     message: "画面の大きさが、ウィンドウの大きさに合う",
   });
+});
+
+/**
+ * いま見えている画面の部品が、ウィンドウからはみ出していないかを調べる（はみ出しの一覧を返す）。
+ * - 画面全体が横にはみ出して、横のスクロールができていない
+ * - ボタン・入力欄・タブが、ウィンドウの左右からはみ出していない
+ * - 決まった部品（required）が、上下も含めてすべて見えている
+ */
+function layoutProblems(session, required) {
+  return session.execute(`
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    const problems = [];
+    const describe = (el) => (el.getAttribute("aria-label") || el.textContent || el.tagName).trim().slice(0, 30);
+    if (document.documentElement.scrollWidth > vw + 1) {
+      problems.push("画面全体が横にはみ出している: " + document.documentElement.scrollWidth + " > " + vw);
+    }
+    for (const el of document.querySelectorAll('button, input, textarea, select, [role="tab"]')) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0 || getComputedStyle(el).visibility === "hidden") continue;
+      if (r.left < -1 || r.right > vw + 1) problems.push("横にはみ出している: " + describe(el) + "（" + Math.round(r.left) + "〜" + Math.round(r.right) + "）");
+    }
+    for (const selector of ${JSON.stringify(required)}) {
+      const el = document.querySelector(selector);
+      if (!el) { problems.push("見つからない: " + selector); continue; }
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) problems.push("大きさがない: " + selector);
+      else if (r.top < -1 || r.bottom > vh + 1 || r.left < -1 || r.right > vw + 1) {
+        problems.push("ウィンドウに収まっていない: " + selector + "（" + [r.left, r.top, r.right, r.bottom].map(Math.round).join(",") + "、ウィンドウ " + vw + "x" + vh + "）");
+      }
+    }
+    return problems;
+  `);
+}
+
+test("[TRY-007] 最小の大きさ（860x560）でも、画面の部品がはみ出さず、主な操作がすべて見えている", async (ctx) => {
+  const session = await ctx.launch();
+  // 長いタイトルのノートと、録音のバーを出しておく（いちばん横幅を使う状態）
+  await createNote(session, { title: "とても長いタイトルの会議メモ".repeat(6), memo: "メモ" });
+  const resized = await ctx.work.resizeWindow("main", 860, 560);
+  assert.deepEqual(resized.inner, [860, 560], JSON.stringify(resized));
+  await session.waitUntil(async () => (await session.execute("return [window.innerWidth, window.innerHeight]")).join("x") === "860x560", {
+    message: "画面の大きさが 860x560 になる",
+  });
+
+  const main = [sel.newNote, sel.search, sel.title, sel.memo, `${sel.recordingBar} button`];
+  assert.deepEqual(await layoutProblems(session, main), []);
+
+  // 設定画面も、ウィンドウに収まり、保存と閉じるのボタンが見えている（中身はスクロールして読む）
+  await openSettings(session);
+  const footer = `${sel.settingsDialog} .modal-footer button`;
+  assert.deepEqual(await layoutProblems(session, [sel.settingsDialog, footer]), []);
+  await closeSettings(session);
+
+  // ヘルプも同じ
+  await session.click('button[aria-label="ヘルプ"]');
+  await session.$(sel.helpDialog);
+  assert.deepEqual(await layoutProblems(session, [sel.helpDialog, `${sel.helpDialog} button[aria-label="閉じる"]`]), []);
 });

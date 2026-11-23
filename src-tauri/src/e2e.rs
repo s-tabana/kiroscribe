@@ -569,6 +569,11 @@ pub fn register_autostart() -> bool {
     core::config().register_autostart
 }
 
+/// 起動できなかったときのダイアログを本当に出すか（`config.json` の `nativeStartupDialog`）。
+pub fn native_startup_dialog() -> bool {
+    core::config().native_startup_dialog
+}
+
 pub fn tray_unavailable() -> bool {
     core::config().tray_unavailable
 }
