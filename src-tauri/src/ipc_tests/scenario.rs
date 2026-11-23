@@ -272,7 +272,7 @@ fn ipc_contract_matches_the_frontend() {
     let refused = s
         .call("save_markdown", json!({ "noteId": id, "options": options, "path": fixture.dir.join("x.exe") }))
         .unwrap_err();
-    assert!(refused.contains(".md / .txt"), "{refused}");
+    assert!(refused.contains(".md / .markdown / .txt"), "{refused}");
 
     // ---- 文字起こし API がキーを拒否したら、画面に知らせる ----
     *fixture.api.transcription_status.lock().unwrap() = Some(401);

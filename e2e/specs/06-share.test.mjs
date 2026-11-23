@@ -16,7 +16,7 @@ async function openShare(session) {
   await session.$(popover);
 }
 
-test("[SHR-007][SHR-008][SHR-012] 共有: Markdown をコピーでき、選んだ場所にファイルとして保存できる", async (ctx) => {
+test("[SHR-007][SHR-008][SHR-009][SHR-012] 共有: Markdown をコピーでき、選んだ場所にファイルとして保存できる", async (ctx) => {
   const session = await ctx.launch();
   await createNote(session, { title: "週次定例", memo: "- リリース日を決める" });
 
@@ -76,6 +76,6 @@ test("[SHR-007][SHR-008][SHR-012] 共有: Markdown をコピーでき、選ん�
   const wrong = ctx.work.file("書き出し.exe");
   ctx.work.answerDialogs({ savePath: wrong });
   await session.click(shareButton("ファイルに保存…"));
-  await session.waitForText(shareStatus, "保存できるのは .md / .txt ファイルだけです");
+  await session.waitForText(shareStatus, "保存できるのは .md / .markdown / .txt ファイルだけです");
   assert.equal(fs.existsSync(wrong), false);
 });

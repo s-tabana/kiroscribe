@@ -136,7 +136,7 @@ pub fn save_markdown(
         .unwrap_or(false);
     if !allowed {
         return Err(CommandError(
-            "保存できるのは .md / .txt ファイルだけです".into(),
+            "保存できるのは .md / .markdown / .txt ファイルだけです".into(),
         ));
     }
     let export = build_export(&state, &note_id, options)?;

@@ -7,7 +7,7 @@ use super::super::fixture::{wait_until, Harness};
 
 /// ファイルへの保存: 文字コードは UTF-8（BOM なし）で、内容は「Markdown をコピー」と同じ。
 /// Markdown・テキスト以外の拡張子には書かない。
-// [SHR-010][SHR-011]
+// [SHR-009][SHR-010][SHR-011]
 #[test]
 fn markdown_is_saved_as_utf8_only_to_markdown_or_text_files() {
     let h = Harness::new();
@@ -44,7 +44,7 @@ fn markdown_is_saved_as_utf8_only_to_markdown_or_text_files() {
         let err = h
             .call("save_markdown", json!({ "noteId": note, "options": options, "path": path }))
             .unwrap_err();
-        assert_eq!(err, "保存できるのは .md / .txt ファイルだけです", "{name}");
+        assert_eq!(err, "保存できるのは .md / .markdown / .txt ファイルだけです", "{name}");
         assert!(!path.exists(), "{name}: 断ったのにファイルを書いている");
     }
 
