@@ -224,9 +224,7 @@ pub fn apply_settings(app: &AppHandle, settings: &Settings) {
     if let Some(item) = app.state::<BackgroundState>().tray_auto_item.lock().unwrap().as_ref() {
         let _ = item.set_checked(settings.auto_record_meetings);
     }
-    // 開発中の実行ファイルを自動起動に登録しないよう、リリースビルドだけで行う（E2E テスト用のビルドでも行わない）
-    #[cfg(all(not(debug_assertions), not(feature = "e2e")))]
-    {
+    if registers_autostart() {
         use tauri_plugin_autostart::ManagerExt;
         let autolaunch = app.autolaunch();
         let result = if settings.launch_at_login {
@@ -237,6 +235,20 @@ pub fn apply_settings(app: &AppHandle, settings: &Settings) {
         if let Err(err) = result {
             eprintln!("自動起動の設定を変更できませんでした: {err}");
         }
+    }
+}
+
+/// Windows の自動起動に登録するか。開発中の実行ファイルを登録しないよう、リリースビルドだけで行う。
+/// E2E テスト用のビルドは、作業フォルダの設定（`registerAutostart`）で求められたときだけ行う
+/// （インストールしたアプリで、登録と解除を確かめるテスト用）。
+fn registers_autostart() -> bool {
+    #[cfg(feature = "e2e")]
+    {
+        crate::e2e::register_autostart()
+    }
+    #[cfg(not(feature = "e2e"))]
+    {
+        !cfg!(debug_assertions)
     }
 }
 

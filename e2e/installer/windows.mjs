@@ -59,6 +59,43 @@ export function installed() {
   };
 }
 
+/** Windows の起動時に起動するプログラムの一覧（利用者ごと）。タスクマネージャーの「スタートアップ アプリ」に出る */
+export const RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+/** 自動起動に登録されているコマンド（なければ null） */
+export function autostartCommand() {
+  return readRegistry(RUN_KEY)?.[PRODUCT_NAME] ?? null;
+}
+
+/** 自動起動の登録を書く（アプリが登録したのと同じ状態を作る） */
+export function setAutostartCommand(command) {
+  const result = spawnSync("reg", ["add", RUN_KEY, "/v", PRODUCT_NAME, "/t", "REG_SZ", "/d", command, "/f"], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (result.status !== 0) throw new Error(`自動起動の登録を書けません: ${result.stderr}`);
+}
+
+/** 自動起動の登録を消す（なければ何もしない） */
+export function removeAutostartCommand() {
+  spawnSync("reg", ["delete", RUN_KEY, "/v", PRODUCT_NAME, "/f"], { windowsHide: true });
+}
+
+/**
+ * 自動起動に登録されたコマンドを、実行ファイルと引数に分ける（Windows のコマンドラインの決まりのうち、ここで要る分だけ）。
+ * 実行ファイルは、引用符で囲まれていてもいなくてもよい（空白を含むパスは、引用符がないと分け方があいまいになる）
+ */
+export function splitCommand(command, exe) {
+  const quoted = /^"([^"]+)"(?:\s+(.*))?$/.exec(command);
+  if (quoted) return { file: quoted[1], args: quoted[2] ? quoted[2].split(/\s+/) : [] };
+  if (exe && command.toLowerCase().startsWith(exe.toLowerCase())) {
+    const rest = command.slice(exe.length).trim();
+    return { file: command.slice(0, exe.length), args: rest ? rest.split(/\s+/) : [] };
+  }
+  const [file, ...args] = command.split(/\s+/);
+  return { file, args };
+}
+
 /** 実行ファイルに埋め込まれたバージョン（ファイルのプロパティの「製品バージョン」） */
 export function fileVersion(exe) {
   const result = spawnSync(

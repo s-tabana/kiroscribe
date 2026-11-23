@@ -74,6 +74,10 @@ pub struct Config {
     pub main_visible_at_start: bool,
     /// タスクトレイのアイコンを作れなかったことにする（トレイが使えない環境でも起動することを確かめるため）
     pub tray_unavailable: bool,
+    /// 設定の「Windows の起動時に Kiroscribe を起動する」に合わせて、Windows の自動起動に本当に登録する
+    /// （インストールしたアプリを使うテスト用）。書かなければ、E2E テスト用のビルドは登録しない
+    /// （製品の自動起動の登録を、テストのビルドで書き換えないため）
+    pub register_autostart: bool,
     pub audio: AudioConfig,
     pub timing: Timing,
 }

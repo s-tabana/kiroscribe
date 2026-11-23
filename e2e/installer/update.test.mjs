@@ -10,15 +10,29 @@
 // テストは 1 つのインストール先を順に使うので、この順に 1 件ずつ走らせる（node:test は、同じファイルの中では順に走らせる）。
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, before } from "node:test";
-import { test } from "../lib/app.mjs";
+import { appEnvironment, test } from "../lib/app.mjs";
 import { createNote, noteTitles, openSettings, saveSettings, closeSettings, sel, settingsCheck } from "../lib/ui.mjs";
 import { createSigningKey, publishFile, signFile } from "../lib/update-fixture.mjs";
 import { BUILD_INFO } from "./build.mjs";
-import { fileVersion, install, installed, isAlive, shortcuts, uninstall, waitFor } from "./windows.mjs";
+import {
+  autostartCommand,
+  fileVersion,
+  install,
+  installed,
+  isAlive,
+  kill,
+  removeAutostartCommand,
+  setAutostartCommand,
+  shortcuts,
+  splitCommand,
+  uninstall,
+  waitFor,
+} from "./windows.mjs";
 
 const build = JSON.parse(fs.readFileSync(BUILD_INFO, "utf8"));
 const OLD = build.old.version;
@@ -101,6 +115,53 @@ test("[REL-001][REL-010] インストーラで入れると、アプリと機能�
   const launch = ctx.work.launches().at(-1);
   assert.equal(launch.version, OLD);
   assert.ok(sameFile(launch.exe, info.exe), launch.exe);
+});
+
+/** 設定画面のチェックを切り替えて保存する */
+async function setSettingsCheck(session, text, enabled) {
+  await openSettings(session);
+  const check = await session.$(settingsCheck(text));
+  if ((await check.isSelected()) !== enabled) await check.click();
+  await saveSettings(session);
+  await closeSettings(session);
+}
+
+const LAUNCH_AT_LOGIN = "Windows の起動時に Kiroscribe を起動する";
+
+test("[TRY-009][TRY-008] 設定に合わせて Windows の自動起動に登録・解除し、登録したとおりに起動するとトレイに常駐する", { config: { registerAutostart: true } }, async (ctx) => {
+  const info = installed();
+  removeAutostartCommand();
+
+  // 起動すると、設定（最初はオン）に合わせて登録する。登録するのは、インストールした実行ファイルと --autostart
+  const session = await launchInstalled(ctx);
+  const command = await waitFor(() => autostartCommand(), { timeout: 30_000, message: "Windows の自動起動に登録される" });
+  assert.ok([`${info.exe} --autostart`, `"${info.exe}" --autostart`].includes(command), `登録されたコマンド: ${command}`);
+
+  // オフにして保存すると解除し、オンに戻すと登録し直す
+  await setSettingsCheck(session, LAUNCH_AT_LOGIN, false);
+  await waitFor(() => autostartCommand() === null, { timeout: 30_000, message: "自動起動の登録が消える" });
+  await setSettingsCheck(session, LAUNCH_AT_LOGIN, true);
+  await waitFor(() => autostartCommand() === command, { timeout: 30_000, message: "自動起動に登録し直される" });
+  await ctx.stop();
+
+  // 登録したとおりに起動する（Windows がサインインのときに行うのと同じ。作業フォルダだけは環境変数で渡す）
+  const { file, args } = splitCommand(command, info.exe);
+  const launchesBefore = ctx.work.launches().length;
+  const child = spawn(file, args, { env: appEnvironment(ctx.work), stdio: "ignore", windowsHide: false });
+  try {
+    const launch = await waitFor(() => ctx.work.launches()[launchesBefore], {
+      timeout: 60_000,
+      message: "登録したコマンドでアプリが起動する",
+    });
+    assert.deepEqual(launch.args, ["--autostart"]);
+    assert.equal(launch.mainShown, false, "Windows の起動時の自動起動で、ウィンドウを出した");
+    assert.equal(launch.version, OLD);
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    assert.ok(isAlive(launch.pid), "自動起動したアプリが、すぐに終了した（トレイに常駐していない）");
+    kill(launch.pid);
+  } finally {
+    child.kill();
+  }
 });
 
 test("[UPD-010][SEC-010] 本物のインストーラでも、信頼していない鍵で署名された更新は実行せず、入っている版はそのまま", async (ctx) => {
@@ -220,8 +281,10 @@ test("[REL-009] 入っている版の上に新しいインストーラを実行�
   await session.waitForText(sel.settingsDialog, `Kiroscribe ${NEW}`);
 });
 
-test("[REL-011] アンインストールすると、アプリ・一覧の情報・ショートカットが消え、アプリのデータは残る", async () => {
+test("[REL-011] アンインストールすると、アプリ・一覧の情報・ショートカット・自動起動の登録が消え、アプリのデータは残る", async () => {
   const info = installed() ?? (await install(build.old.installer));
+  // アプリが自動起動に登録した状態にしておく（TRY-009）
+  setAutostartCommand(`${info.exe} --autostart`);
   // 製品のデータの場所（%APPDATA%\<識別子>）に印を置き、アンインストールで消えないことを確かめる。
   // 本物のデータがある PC では、触らずに確かめを省く
   const dataDir = path.join(process.env.APPDATA, "dev.kiroscribe.desktop");
@@ -237,6 +300,7 @@ test("[REL-011] アンインストールすると、アプリ・一覧の情報�
     assert.equal(fs.existsSync(info.exe), false, `実行ファイルが残っています: ${info.exe}`);
     assert.equal(fs.existsSync(shortcuts().startMenu), false, "スタートメニューのショートカットが残っています");
     assert.equal(fs.existsSync(shortcuts().desktop), false, "デスクトップのショートカットが残っています");
+    assert.equal(autostartCommand(), null, "自動起動の登録が残っています（サインインのたびに、ないアプリを起動しようとする）");
     if (checkData) assert.ok(fs.existsSync(marker), "アンインストールで、アプリのデータが消えた");
   } finally {
     if (checkData) fs.rmSync(dataDir, { recursive: true, force: true });

@@ -564,6 +564,11 @@ fn simulated_tick(meeting: Option<kiroscribe_core::meetings::MeetingApp>, active
 }
 
 /// タスクトレイのアイコンを作れなかったことにするか。
+/// Windows の自動起動に本当に登録するか（`config.json` の `registerAutostart`）。
+pub fn register_autostart() -> bool {
+    core::config().register_autostart
+}
+
 pub fn tray_unavailable() -> bool {
     core::config().tray_unavailable
 }
