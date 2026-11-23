@@ -127,3 +127,68 @@ jobs:
           path: e2e/artifacts/
           if-no-files-found: ignore
           retention-days: 14
+
+  # 本物の音声デバイスでの録音（e2e/specs/14-real-audio.test.mjs）。
+  # Windows のランナーには音声デバイスがないので、仮想のオーディオケーブル（VB-CABLE）を入れる。
+  # 入れるのは、音声を扱うソフトウェアの CI で使われている LABSN/sound-ci-helpers（コミットで固定）。
+  # VB-CABLE は vb-audio.com から取得する（寄付で支えられているソフトウェアで、この使い捨ての環境にだけ入れる）
+  real-audio:
+    name: E2E（Windows・本物の音声デバイス）
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: 仮想のオーディオケーブルのインストール
+        uses: LABSN/sound-ci-helpers@e9d6ba52163a3283714a68412036ddf33f78d49c # v1
+
+      - name: 音声デバイスの一覧
+        shell: pwsh
+        run: |
+          Get-Service Audiosrv | Format-List Name, Status, StartType
+          Get-PnpDevice -Class AudioEndpoint, MEDIA -ErrorAction SilentlyContinue | Format-Table -AutoSize Class, FriendlyName, Status
+
+      - name: 依存関係のインストール
+        run: npm ci
+
+      - name: tauri-driver のインストール
+        run: cargo install tauri-driver --locked --version 2.1.0
+
+      - name: msedgedriver の取得
+        shell: pwsh
+        working-directory: ${{ runner.temp }}
+        run: |
+          cargo install --git https://github.com/chippers/msedgedriver-tool --rev 8c4b34f51b45f5cf08013366d703de464ab871d1 --locked
+          & "$HOME/.cargo/bin/msedgedriver-tool.exe"
+          if (-not (Test-Path msedgedriver.exe)) { throw "msedgedriver.exe を取得できませんでした" }
+          "KIROSCRIBE_E2E_NATIVE_DRIVER=$((Get-Item msedgedriver.exe).FullName)" >> $env:GITHUB_ENV
+
+      - name: E2E テスト用のアプリのビルド
+        run: npm run build:e2e
+
+      - name: E2E テスト（本物の音声デバイス）
+        env:
+          KIROSCRIBE_E2E_REAL_AUDIO: "1"
+        run: npm run test:e2e -- e2e/specs/14-real-audio.test.mjs
+
+      - name: 失敗したテストのスクリーンショットとログを保存
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-artifacts-real-audio
+          path: e2e/artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
