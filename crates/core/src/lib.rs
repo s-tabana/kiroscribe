@@ -1,6 +1,7 @@
 //! Kiroscribe のコアロジック。Tauri に依存しないため単体でテストできる。
 
 pub mod audio;
+pub mod autostart;
 pub mod chat;
 pub mod claude;
 pub mod db;

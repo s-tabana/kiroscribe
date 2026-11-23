@@ -62,7 +62,9 @@ test(
       let windows = [];
       const deadline = Date.now() + 60_000;
       // 文とボタンがそろうまで待つ（ダイアログは、出始めてから部品がそろうまでに少しかかる）
-      const ready = (w) => w.texts.some((text) => text.includes("Kiroscribe を起動できませんでした")) && w.buttons.length > 0;
+      // OK は、ダイアログの作りによって、ボタンではなくほかの種類の部品として見える（タスク ダイアログでは Pane）
+      const parts = (w) => [...w.buttons, ...w.others.map((other) => other.slice(other.indexOf(":") + 1))];
+      const ready = (w) => w.texts.some((text) => text.includes("Kiroscribe を起動できませんでした")) && parts(w).includes("OK");
       while (!windows.some(ready)) {
         if (Date.now() >= deadline || child.exitCode !== null) {
           const appLog = fs.readFileSync(ctx.work.file("app-1.log"), "utf8").split("\n").slice(-30).join("\n");
@@ -77,7 +79,7 @@ test(
       const text = dialog.texts.join("\n");
       assert.ok(text.includes("データベース"), text);
       assert.ok(text.includes("データは変更していません"), text);
-      assert.ok(dialog.buttons.includes("OK"), `OK のボタンがない: ${JSON.stringify(dialog.buttons)}`);
+      assert.ok(parts(dialog).includes("OK"), `OK のボタンがない: ${JSON.stringify(dialog)}`);
 
       // 閉じるまでは待っている（読まないうちに消えない）
       await sleep(1_500);

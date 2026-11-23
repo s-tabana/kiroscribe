@@ -137,3 +137,11 @@ Set-ItemProperty -Path $p -Name Value -Value $env:KIROSCRIBE_CONSENT
     { KIROSCRIBE_CONSENT: value },
   );
 }
+
+/**
+ * Windows の音声サービス（Audiosrv）を止める・動かす。止めると、開いている音声デバイスはすべて使えなくなる
+ * （録音中にデバイスで問題が起きたときと同じく、アプリにエラーが届く）。管理者の権限が要る（CI のランナーにはある）
+ */
+export function setAudioServiceRunning(running) {
+  powershell(running ? "Start-Service -Name Audiosrv" : "Stop-Service -Name Audiosrv -Force");
+}

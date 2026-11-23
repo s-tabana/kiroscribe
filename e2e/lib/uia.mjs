@@ -57,7 +57,8 @@ foreach ($w in $windows) {
   $texts = @(); $buttons = @(); $others = @()
   foreach ($e in $w.FindAll($Scope::Descendants, [System.Windows.Automation.Condition]::TrueCondition)) {
     $type = $e.Current.ControlType.ProgrammaticName
-    if ($type -eq 'ControlType.Button') { $buttons += $e.Current.Name }
+    $invokable = [bool]$e.GetCurrentPropertyValue($AE::IsInvokePatternAvailableProperty)
+    if ($type -eq 'ControlType.Button' -or ($invokable -and $e.Current.Name)) { $buttons += $e.Current.Name }
     elseif ($type -eq 'ControlType.Text') { $texts += $e.Current.Name }
     else { $others += ($type + ':' + $e.Current.Name) }
   }
@@ -78,7 +79,26 @@ foreach ($w in $windows) {
   $byName = New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, $env:KIROSCRIBE_UIA_BUTTON)
   $button = $w.FindFirst($Scope::Descendants, $byName)
   if ($button -ne $null) {
-    $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $pattern = $null
+    if ($button.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
+      $pattern.Invoke()
+    } else {
+      # 押す操作を受け付けない部品（タスク ダイアログのボタンなど）は、本物のマウスでクリックする
+      Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class KiroscribeClick {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+}
+"@
+      $r = $button.Current.BoundingRectangle
+      [KiroscribeClick]::SetCursorPos([int]($r.X + $r.Width / 2), [int]($r.Y + $r.Height / 2)) | Out-Null
+      Start-Sleep -Milliseconds 150
+      [KiroscribeClick]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+      Start-Sleep -Milliseconds 60
+      [KiroscribeClick]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+    }
     'pressed'
     exit 0
   }
@@ -304,4 +324,19 @@ ConvertTo-Json -Compress -InputObject ([pscustomobject]@{ before = $before; afte
     },
   );
   return out === "null" ? null : JSON.parse(out);
+}
+
+/** 調べるための材料: 画面のいちばん上のウィンドウの一覧（種類・名前・プロセス・見えているか・位置） */
+export function describeTopWindows() {
+  return powershell(
+    `
+$lines = @()
+foreach ($w in $AE::RootElement.FindAll($Scope::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
+  $r = $w.Current.BoundingRectangle
+  $lines += ('{0} | {1} | pid {2} | 見える {3} | {4},{5} {6}x{7}' -f $w.Current.ClassName, $w.Current.Name, $w.Current.ProcessId, (Is-Shown $w), [int]$r.X, [int]$r.Y, [int]$r.Width, [int]$r.Height)
+}
+$lines -join "\`n"
+`,
+    { KIROSCRIBE_UIA_PID: "0" },
+  );
 }

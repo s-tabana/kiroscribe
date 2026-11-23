@@ -225,16 +225,32 @@ pub fn apply_settings(app: &AppHandle, settings: &Settings) {
         let _ = item.set_checked(settings.auto_record_meetings);
     }
     if registers_autostart() {
-        use tauri_plugin_autostart::ManagerExt;
-        let autolaunch = app.autolaunch();
-        let result = if settings.launch_at_login {
-            autolaunch.enable()
-        } else {
-            autolaunch.disable()
-        };
-        if let Err(err) = result {
+        if let Err(err) = set_launch_at_login(app, settings.launch_at_login) {
             eprintln!("自動起動の設定を変更できませんでした: {err}");
         }
+    }
+}
+
+/// 自動起動の登録の名前。アンインストーラ（NSIS）が消す名前（製品名）と同じにする。
+#[cfg(windows)]
+const AUTOSTART_NAME: &str = "Kiroscribe";
+
+/// Windows の起動時に起動するよう登録する（`enabled` が false なら解除する）。
+/// Windows では、利用者ごとの場所にだけ、引用符で囲んだパスで登録する（kiroscribe_core::autostart）。
+/// 自動起動のライブラリは、管理者として動いていると全ユーザー共通の場所に書いてしまうため使わない。
+fn set_launch_at_login(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let _ = app;
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        kiroscribe_core::autostart::set_enabled(AUTOSTART_NAME, &exe, &[AUTOSTART_ARG], enabled).map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        let autolaunch = app.autolaunch();
+        let result = if enabled { autolaunch.enable() } else { autolaunch.disable() };
+        result.map_err(|e| e.to_string())
     }
 }
 

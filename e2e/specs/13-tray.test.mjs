@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "../lib/app.mjs";
 import { closeSettings, openSettings, settingsCheck } from "../lib/ui.mjs";
-import { chooseMenuItem, clickTrayIcon, minimizeWindow, openMenu, trayIcons } from "../lib/uia.mjs";
+import { chooseMenuItem, clickTrayIcon, describeTopWindows, minimizeWindow, openMenu, trayIcons } from "../lib/uia.mjs";
 
 const TOOLTIP = "Kiroscribe（会議の自動検出）";
 const OPEN = "Kiroscribe を開く";
@@ -33,9 +33,14 @@ async function until(fn, { timeout = 15_000, message }) {
   }
 }
 
-/** 右クリックのメニューが出るまで待って、項目を返す */
-function menuItems(pid) {
-  return until(() => openMenu(pid), { timeout: 10_000, message: "右クリックのメニューが出る" });
+/** 右クリックのメニューが出るまで待って、項目を返す。出なければ、画面のウィンドウの一覧を付けて失敗にする */
+async function menuItems(pid) {
+  try {
+    return await until(() => openMenu(pid), { timeout: 10_000, message: "右クリックのメニューが出る" });
+  } catch (error) {
+    error.message += `\n--- 画面のウィンドウ ---\n${describeTopWindows()}`;
+    throw error;
+  }
 }
 
 const isMinimized = (session) =>

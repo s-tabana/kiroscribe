@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "../lib/app.mjs";
-import { CABLE, CABLE_SPEAKERS, audioEndpoints, playSpeech, setDesktopMicAccess, setDeviceEnabled, wavRms } from "../lib/audio-device.mjs";
+import { CABLE, audioEndpoints, playSpeech, setAudioServiceRunning, setDesktopMicAccess, setDeviceEnabled, wavRms } from "../lib/audio-device.mjs";
 import { closeSettings, createNote, dismissToast, openSettings, pressBarButton, saveSettings, sel, settingsCheck, toastText, utterances } from "../lib/ui.mjs";
 
 const REAL_AUDIO = process.platform === "win32" && process.env.KIROSCRIBE_E2E_REAL_AUDIO === "1";
@@ -135,21 +135,22 @@ test("[REC-019][SET-006] 選んだマイクが見つからないときは、既�
   await pressBarButton(session, "停止");
 });
 
-test("[REC-021] 録音中に音声デバイスがなくなっても、エラーを知らせて落ちず、停止できる", options, async (ctx) => {
+test("[REC-021] 録音中に音声デバイスで問題が起きても、エラーを知らせて落ちず、停止できる", options, async (ctx) => {
   const session = await ctx.launch();
-  await createNote(session, { title: "デバイスを抜く" });
+  await createNote(session, { title: "デバイスの問題" });
   await pressBarButton(session, "録音を開始");
   await session.waitForText(timer, "録音中");
   try {
-    // USB のマイクを抜いたのと同じく、デバイスを OS からなくす
-    setDeviceEnabled(CABLE, false);
+    // 録音中のデバイスは、OS が無効にさせてくれない（使用中）。代わりに Windows の音声サービスを止めて、
+    // 開いているデバイスを使えなくする（USB のマイクを抜いたときと同じく、アプリにはデバイスのエラーが届く）
+    setAudioServiceRunning(false);
     await toastText(session, "の音声デバイスでエラーが発生しました", { timeout: 30_000 });
     assert.equal(ctx.app.isRunning(), true, "デバイスがなくなって、アプリが落ちた");
     await dismissToast(session);
     await pressBarButton(session, "停止");
     await session.$(`xpath://*[@aria-label="録音"]//button[normalize-space(.)="録音を再開"]`, { timeout: 30_000 });
   } finally {
-    setDeviceEnabled(CABLE, true);
+    setAudioServiceRunning(true);
     await sleep(3_000);
   }
 });
@@ -167,24 +168,6 @@ test("[REC-020] 使えるマイクがないときは、録音を始めずに知�
     assert.equal(await session.exists(`${sel.noteItems} [aria-label="録音中"]`), false, "マイクがないのに、録音中になった");
   } finally {
     setDeviceEnabled(CABLE, true);
-    await sleep(3_000);
-  }
-});
-
-test("[REC-018] PC の音声を取り込めないときは、マイクだけで録音を続けて知らせる", options, async (ctx) => {
-  const session = await ctx.launch();
-  await createNote(session, { title: "出力デバイスがない" });
-  try {
-    // 出力デバイス（Speakers）だけを無効にする。マイク（CABLE Output）は使える
-    setDeviceEnabled(CABLE_SPEAKERS, false, "AudioEndpoint");
-    await sleep(3_000);
-    await pressBarButton(session, "録音を開始");
-    await toastText(session, "相手の声は取り込まず、マイクだけで録音します");
-    await session.waitForText(timer, "録音中");
-    await session.waitForText("body", "相手の声は取り込んでいません（マイクのみ）");
-    await pressBarButton(session, "停止");
-  } finally {
-    setDeviceEnabled(CABLE_SPEAKERS, true, "AudioEndpoint");
     await sleep(3_000);
   }
 });

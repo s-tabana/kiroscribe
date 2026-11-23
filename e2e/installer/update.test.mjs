@@ -26,6 +26,7 @@ import {
   installed,
   isAlive,
   kill,
+  machineAutostartCommand,
   removeAutostartCommand,
   setAutostartCommand,
   shortcuts,
@@ -139,7 +140,10 @@ test("[TRY-009][TRY-008] 設定に合わせて Windows の自動起動に登録�
   // 起動すると、設定（最初はオン）に合わせて登録する。登録するのは、インストールした実行ファイルと --autostart
   const session = await launchInstalled(ctx);
   const command = await waitFor(() => autostartCommand(), { timeout: 30_000, message: "Windows の自動起動に登録される" });
-  assert.ok([`${info.exe} --autostart`, `"${info.exe}" --autostart`].includes(command), `登録されたコマンド: ${command}`);
+  // 実行ファイルのパスは引用符で囲む（利用者のフォルダの名前に空白があっても取り違えない）
+  assert.equal(command, `"${info.exe}" --autostart`);
+  // 管理者として動いていても（CI はそう）、全ユーザー共通の場所には書かない
+  assert.equal(machineAutostartCommand(), null, "全ユーザー共通の自動起動（HKLM）に登録した");
 
   // オフにして保存すると解除し、オンに戻すと登録し直す
   await setSettingsCheck(session, LAUNCH_AT_LOGIN, false);

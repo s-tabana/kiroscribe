@@ -67,6 +67,11 @@ export function autostartCommand() {
   return readRegistry(RUN_KEY)?.[PRODUCT_NAME] ?? null;
 }
 
+/** 全ユーザー共通の自動起動（HKLM）に登録されているコマンド（なければ null）。利用者ごとのアプリは、ここに書いてはいけない */
+export function machineAutostartCommand() {
+  return readRegistry(RUN_KEY.replace(/^HKCU/, "HKLM"))?.[PRODUCT_NAME] ?? null;
+}
+
 /** 自動起動の登録を書く（アプリが登録したのと同じ状態を作る） */
 export function setAutostartCommand(command) {
   const result = spawnSync("reg", ["add", RUN_KEY, "/v", PRODUCT_NAME, "/t", "REG_SZ", "/d", command, "/f"], {
