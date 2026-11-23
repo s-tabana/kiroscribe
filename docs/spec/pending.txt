@@ -16,5 +16,4 @@ MTG-015 test
 MTG-019 test
 TRY-004 test
 MTG-010 tauri
-POP-011 tauri
 DAT-007 tauri

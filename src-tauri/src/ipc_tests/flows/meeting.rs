@@ -165,3 +165,32 @@ fn a_rejected_api_key_during_a_meeting_is_reported_in_the_popup() {
     h.meeting(MeetingEvent::Ended(MeetingApp::GoogleMeet));
     assert!(h.events("meeting-popup").is_empty());
 }
+
+/// 自動で始めた録音をメインウィンドウの「停止」で止めたら、ポップアップも停止の表示に変える。
+// [POP-011]
+#[test]
+fn stopping_from_the_main_window_turns_the_popup_to_stopped() {
+    let h = Harness::new();
+    h.meeting(MeetingEvent::Started(MeetingApp::Zoom));
+    let recording = h.popup();
+    assert_eq!(recording["kind"], "recording");
+    let note_id = recording["noteId"].as_str().unwrap().to_string();
+    // ノートのタイトルを直してから止める（停止の表示には、そのときのタイトルを出す）
+    h.ok("update_note", json!({ "id": note_id, "patch": { "title": "顧客との打ち合わせ" } }));
+
+    // メインウィンドウの「停止」と同じコマンド
+    assert_eq!(h.ok("stop_recording", json!({}))["state"], "idle");
+    let stopped = json!({ "kind": "stopped", "app": "Zoom", "noteId": note_id, "title": "顧客との打ち合わせ" });
+    assert_eq!(h.popup(), stopped, "ポップアップが録音中の表示のまま残っている");
+    assert_eq!(popup_kinds(&h), [json!("recording"), json!("stopped")]);
+
+    // そのあと別のノートを手動で録音して止めても、ポップアップは変わらない
+    let manual = h.note("手動の録音", "");
+    h.ok("start_recording", json!({ "noteId": manual }));
+    h.ok("stop_recording", json!({}));
+    assert_eq!(h.popup(), stopped);
+    assert_eq!(popup_kinds(&h).len(), 2);
+    // 会議が終わっても、もう何も知らせない
+    h.meeting(MeetingEvent::Ended(MeetingApp::Zoom));
+    assert_eq!(popup_kinds(&h).len(), 2);
+}

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { errorMessage, useBackend } from "../lib/backend";
 import type { PopupPayload } from "../lib/types";
 import { elapsedMs, formatElapsed } from "../lib/elapsed";
@@ -43,16 +43,45 @@ export function MeetingPopup() {
     return () => clearTimeout(timer);
   }, [payload, backend]);
 
+  // 知らせている録音が、このポップアップの外（メインウィンドウの「停止」など）で止まったら、表示を合わせる。
+  // 録音中の表示のまま残ると、その「停止」が、あとから始めた別の録音を止めてしまう
+  const sawRecording = useRef<string | null>(null);
+  useEffect(() => {
+    if (!payload || payload.kind === "error" || payload.kind === "stopped") return;
+    const mine = status.noteId === payload.noteId;
+    const ended = !mine || status.state === "idle";
+    if (payload.kind === "recording") {
+      if (mine && (status.state === "recording" || status.state === "paused")) {
+        sawRecording.current = payload.noteId;
+      } else if (mine && status.state === "finishing") {
+        setStoppedHere(true);
+        setPayload({ ...payload, kind: "finishing" });
+      } else if (ended && sawRecording.current === payload.noteId) {
+        setPayload({ ...payload, kind: "stopped" });
+      }
+    } else if (stoppedHere && ended && !busy) {
+      // 利用者が止めた録音の仕上げが終わった（会議の終了で止まるときは、本体からの知らせを待つ）
+      setPayload({ ...payload, kind: "stopped" });
+    }
+  }, [payload, status, stoppedHere, busy]);
+
   if (!payload) return <div className="popup" />;
 
   const stop = async () => {
     if (payload.kind !== "recording") return;
     setBusy(true);
-    setStoppedHere(true);
-    setPayload({ ...payload, kind: "finishing" });
     try {
+      // 止めるのは、このポップアップが知らせている録音だけ（もう終わっていたら、表示を合わせるだけにする）
+      const current = await backend.getRecordingStatus();
+      if (current.noteId !== payload.noteId || current.state === "idle") {
+        setPayload({ ...payload, kind: "stopped" });
+        return;
+      }
+      setStoppedHere(true);
+      setPayload({ ...payload, kind: "finishing" });
       await backend.stopRecording();
-      setPayload({ ...payload, kind: "stopped" });
+      // 本体が先に停止を知らせていたら（そのときのタイトルが入っている）、そのままにする
+      setPayload((shown) => (shown?.kind === "stopped" ? shown : { ...payload, kind: "stopped" }));
     } catch (err) {
       setError(errorMessage(err));
     } finally {

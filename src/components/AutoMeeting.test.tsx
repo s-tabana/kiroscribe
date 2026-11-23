@@ -221,6 +221,47 @@ describe("会議検出のポップアップ: 表示が変わるとき・閉じ�
 });
 
 describe("メイン画面との連携: ポップアップからの操作", () => {
+  it("[POP-011] 自動で始めた録音をメインウィンドウで止めると、ポップアップも停止の表示に変わる", async () => {
+    const backend = await meetingBackend();
+    const note = backend.simulateMeetingNote("Google Meet 11/20 15:04");
+    await backend.startRecording(note.id);
+    backend.setPopup({ kind: "recording", app: "Google Meet", noteId: note.id, title: note.title });
+    renderWith(backend, <MeetingPopup />);
+    const popup = await screen.findByRole("alertdialog", { name: "会議の自動録音" });
+    expect(await within(popup).findByRole("timer")).toBeInTheDocument();
+
+    // メインウィンドウの「停止」（ポップアップの外から録音を止める）
+    await act(async () => {
+      await backend.stopRecording();
+    });
+
+    expect(
+      await within(popup).findByText("録音を停止しました。「Google Meet 11/20 15:04」に保存しています。"),
+    ).toBeInTheDocument();
+    expect(within(popup).queryByRole("button", { name: "停止" })).not.toBeInTheDocument();
+    expect(within(popup).queryByText(/会議が終わりました/)).not.toBeInTheDocument();
+    expect(within(popup).getByRole("button", { name: "議事録を作成" })).toBeInTheDocument();
+  });
+
+  it("[POP-011] 録音中の表示のまま残ったポップアップの「停止」は、別のノートの録音を止めない", async () => {
+    const user = userEvent.setup();
+    const backend = await meetingBackend();
+    const meeting = backend.simulateMeetingNote("Zoom 11/20 10:00");
+    const other = await backend.createNote();
+    // 会議のノートの録音はもう終わっていて、いまは別のノートを手動で録音している
+    await backend.startRecording(other.id);
+    backend.setPopup({ kind: "recording", app: "Zoom", noteId: meeting.id, title: meeting.title });
+    renderWith(backend, <MeetingPopup />);
+    const popup = await screen.findByRole("alertdialog", { name: "会議の自動録音" });
+
+    await user.click(await within(popup).findByRole("button", { name: "停止" }));
+
+    expect(await within(popup).findByText("録音を停止しました。「Zoom 11/20 10:00」に保存しています。")).toBeInTheDocument();
+    const status = await backend.getRecordingStatus();
+    expect(status.state).toBe("recording");
+    expect(status.noteId).toBe(other.id);
+  });
+
   it("[POP-007] 「ノートを開く」で、メインウィンドウがそのノートを開き、検索欄を空に戻す", async () => {
     const user = userEvent.setup();
     const backend = await meetingBackend();

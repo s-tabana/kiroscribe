@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "../lib/app.mjs";
-import { closeSettings, noteTitles, openSettings, saveSettings, sel, settingsCheck } from "../lib/ui.mjs";
+import { barButton, closeSettings, noteTitles, openSettings, pressBarButton, saveSettings, sel, settingsCheck } from "../lib/ui.mjs";
 import { byText } from "../lib/webdriver.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -163,4 +163,32 @@ test("[MTG-012] 設定の「会議の自動検出」がオフのときは、会�
   assert.equal(await ctx.app.hasPopup(), false, "ポップアップを出している");
   assert.deepEqual(await noteTitles(session), [], "ノートを作っている");
   assert.equal(ctx.server.transcriptions.length, 0, "録音している");
+});
+
+test("[POP-011] 自動で始めた録音をメインウィンドウの［停止］で止めると、ポップアップも停止の表示に変わる", async (ctx) => {
+  const session = await ctx.launch();
+  ctx.work.setMeeting("teams");
+  await ctx.app.popup();
+  await session.waitForText(sel.popup, "自動で録音・文字起こしを始めました");
+
+  // メインウィンドウで会議のノートを開いて、［停止］を押す
+  await ctx.app.main();
+  await session.waitUntil(async () => (await noteTitles(session)).length === 1, { message: "会議のノートができる" });
+  const [title] = await noteTitles(session);
+  await session.click(`${sel.noteItems}`);
+  await session.waitForText(`${sel.recordingBar} [role="timer"]`, "録音中");
+  await session.waitUntil(() => ctx.server.transcriptions.length > 0, { timeout: 30_000, message: "会議の音声が文字起こしされる" });
+  await pressBarButton(session, "停止");
+  await session.$(barButton("録音を再開"), { timeout: 30_000 });
+
+  // ポップアップは、録音中の表示のまま残らない
+  await ctx.app.popup();
+  const stopped = await session.waitForText(sel.popup, "録音を停止しました。「");
+  assert.ok(stopped.includes(`「${title}」に保存しています`), stopped);
+  assert.equal(await session.exists(`${sel.popup} button.popup-stop`), false, "ポップアップに［停止］が残っている");
+  // 会議は続いているが、録音は始め直さない
+  await ctx.app.main();
+  await sleep(1_500);
+  assert.equal((await noteTitles(session)).length, 1);
+  assert.equal(await session.exists(`${sel.noteItems} [aria-label="録音中"]`), false);
 });

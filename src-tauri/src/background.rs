@@ -114,6 +114,43 @@ pub fn show_popup(app: &AppHandle, payload: PopupPayload) {
     }
 }
 
+/// 自動で始めた録音が、会議の終了を待たずに止まった（利用者がメインウィンドウで止めた）ときに、
+/// ポップアップを停止の表示に変える。録音中の表示のまま残さない
+/// （残ると、その「停止」が、あとから始めた別の録音を止めてしまう）。
+pub fn popup_recording_stopped(app: &AppHandle, note_id: &str) {
+    let background = app.state::<BackgroundState>();
+    let shown = background.popup.lock().unwrap().clone();
+    let Some(PopupPayload::Recording {
+        app: label,
+        note_id: shown_id,
+        title,
+    }) = shown
+    else {
+        return;
+    };
+    if shown_id != note_id {
+        return;
+    }
+    // 録音のあいだにタイトルを直していたら、いまのタイトルを出す
+    let title = app
+        .state::<AppState>()
+        .db()
+        .get_note(note_id)
+        .map(|note| note.title)
+        .unwrap_or(title);
+    let payload = PopupPayload::Stopped {
+        app: label,
+        note_id: shown_id,
+        title,
+    };
+    if app.get_webview_window(POPUP_LABEL).is_some() {
+        show_popup(app, payload);
+    } else {
+        // 利用者がポップアップを閉じていたら、出し直さない（自分で止めたことは分かっている）
+        *background.popup.lock().unwrap() = Some(payload);
+    }
+}
+
 pub fn close_popup_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(POPUP_LABEL) {
         let _ = window.close();

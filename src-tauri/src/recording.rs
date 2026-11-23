@@ -13,7 +13,7 @@ use kiroscribe_core::transcript::{Segment, Speaker};
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 
-use crate::background::{show_popup, PopupPayload};
+use crate::background::{popup_recording_stopped, show_popup, PopupPayload};
 use crate::error::{CmdResult, CommandError};
 use crate::runtime::AppHandle;
 use crate::state::AppState;
@@ -318,6 +318,7 @@ pub async fn resume_recording(
 
 /// 止めた録音。
 pub struct Stopped {
+    pub note_id: String,
     /// 会議の自動検出で始めた録音なら、その会議アプリ
     pub auto: Option<MeetingApp>,
 }
@@ -340,7 +341,10 @@ pub async fn stop_active(app: &AppHandle, only_note: Option<&str>) -> Option<Sto
     *recorder.finishing.lock().unwrap() = Some(recording.note_id.clone());
     emit_status(app, &recorder.status().await);
 
-    let stopped = Stopped { auto: recording.auto };
+    let stopped = Stopped {
+        note_id: recording.note_id.clone(),
+        auto: recording.auto,
+    };
     recording.session.stop().await;
 
     *recorder.finishing.lock().unwrap() = None;
@@ -356,5 +360,11 @@ pub async fn stop_now(app: &AppHandle) -> RecordingStatus {
 
 #[tauri::command]
 pub async fn stop_recording(app: AppHandle) -> CmdResult<RecordingStatus> {
-    Ok(stop_now(&app).await)
+    if let Some(stopped) = stop_active(&app, None).await {
+        // 自動で始めた録音を利用者が止めたら、ポップアップも停止の表示にする
+        if stopped.auto.is_some() {
+            popup_recording_stopped(&app, &stopped.note_id);
+        }
+    }
+    Ok(app.state::<RecorderState>().status().await)
 }
