@@ -9,6 +9,7 @@
 //!   config.json     起動時に 1 回読む設定（[`Config`]。接続先・模擬の音声・待ち時間）。なければすべて既定のまま
 //!   data/           アプリのデータ（データベース・API キー・ウェブビューのデータ）
 //!   meeting.txt     いま会議中として扱う会議アプリ（例: googleMeet）。なし・空なら会議中ではない
+//!   mic-error.txt   あるあいだは、マイクを開けなかったことにする（中身が理由の文）
 //!   dialogs.json    確認ダイアログと保存ダイアログへの答え
 //!   dialogs.log     アプリが出そうとしたダイアログの記録（1 行 1 件の JSON）
 //!   clipboard.txt   アプリがクリップボードへ書こうとした文字
@@ -17,7 +18,8 @@
 //!   close-window.txt ここにウィンドウのラベル（main など）を書くと、利用者が「×」を押したのと同じように閉じる
 //! ```
 //!
-//! `meeting.txt` 以下は、アプリの実行中にテストから読み書きする（`meeting.txt` 以外は Tauri 側の `e2e` モジュールが扱う）。
+//! `meeting.txt` 以下は、アプリの実行中にテストから読み書きする
+//! （`meeting.txt` と `mic-error.txt` 以外は Tauri 側の `e2e` モジュールが扱う）。
 
 pub mod audio;
 

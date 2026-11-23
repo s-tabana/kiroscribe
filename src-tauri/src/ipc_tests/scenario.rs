@@ -5,200 +5,22 @@
 //! 見本が変わったとき（コマンドの戻り値を変えたとき）は、次のコマンドで書き直してから `npm run typecheck` を通す:
 //! `KIROSCRIBE_UPDATE_IPC_CONTRACT=1 cargo test -p kiroscribe --features e2e ipc_contract`
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use kiroscribe_core::e2e as core;
 use kiroscribe_core::secrets::platform_store;
 use kiroscribe_core::Database;
 use serde_json::{json, Value};
 use tauri::test::MockRuntime;
-use tauri::{Listener, Manager, WebviewWindow, WebviewWindowBuilder};
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+use tauri::{Manager, WebviewWindow, WebviewWindowBuilder};
 
+use super::fixture::{events_named, exclusive, record_events, wait_until};
 use super::{frontend, invoke, mock_app, read, repo_root, Frontend, Samples};
 use crate::background::POPUP_LABEL;
 use crate::state::AppState;
 
 const CONTRACT_FILE: &str = "src/test/ipc-contract.generated.ts";
 const UPDATE_ENV: &str = "KIROSCRIBE_UPDATE_IPC_CONTRACT";
-const WAIT: Duration = Duration::from_secs(30);
-
-/// このテストのプロセス全体で 1 つだけ用意するもの（差し替えの設定はプロセスに 1 つしか持てないため）。
-pub(super) struct Fixture {
-    dir: PathBuf,
-    server_uri: String,
-    /// 文字起こし API が 401 を返すようにする
-    transcription_fails: Arc<AtomicBool>,
-    _runtime: tokio::runtime::Runtime,
-    _server: MockServer,
-}
-
-struct Transcription(Arc<AtomicBool>);
-
-impl Respond for Transcription {
-    fn respond(&self, request: &Request) -> ResponseTemplate {
-        assert!(String::from_utf8_lossy(&request.body).contains("RIFF"), "WAV が送られていません");
-        if self.0.load(Ordering::SeqCst) {
-            return ResponseTemplate::new(401)
-                .set_body_json(json!({ "error": { "message": "Incorrect API key provided" } }));
-        }
-        ResponseTemplate::new(200).set_body_json(json!({ "text": "来週の予定を確認します。" }))
-    }
-}
-
-fn sse(events: &[Value]) -> ResponseTemplate {
-    let body: String = events
-        .iter()
-        .map(|e| format!("event: {}\ndata: {}\n\n", e["type"].as_str().unwrap(), e))
-        .collect();
-    ResponseTemplate::new(200)
-        .insert_header("content-type", "text/event-stream")
-        .set_body_string(body)
-}
-
-fn claude_stream(chunks: &[&str]) -> ResponseTemplate {
-    let mut events = vec![
-        json!({"type": "message_start", "message": {"model": "claude-opus-5-5"}}),
-        json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
-    ];
-    for chunk in chunks {
-        events.push(json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": chunk}}));
-    }
-    events.push(json!({"type": "content_block_stop", "index": 0}));
-    events.push(json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}));
-    events.push(json!({"type": "message_stop"}));
-    sse(&events)
-}
-
-async fn start_server(transcription_fails: Arc<AtomicBool>) -> MockServer {
-    let server = MockServer::start().await;
-    let uri = server.uri();
-    Mock::given(method("POST"))
-        .and(path("/openai/v1/audio/transcriptions"))
-        .respond_with(Transcription(transcription_fails))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/anthropic/v1/messages"))
-        .respond_with(claude_stream(&["# 週次定例\n\n## 決定事項\n", "- リリースは 12/5\n"]))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/raw/s-tabana/kiroscribe/main/docs/guide.md"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("# Kiroscribe の使い方\n\n模擬サーバーの内容です。\n"))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/repos/s-tabana/kiroscribe/releases"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
-            "tag_name": "v99.0.0",
-            "name": "Kiroscribe 99.0.0",
-            "published_at": "2026-12-01T00:00:00Z",
-            "body": "- 模擬サーバーのリリースノート",
-            "html_url": "https://github.com/s-tabana/kiroscribe/releases/tag/v99.0.0",
-            "draft": false,
-            "prerelease": false
-        }])))
-        .mount(&server)
-        .await;
-    // 更新: どの環境向けにも同じファイルを返す。署名は正しくないので、インストールは署名の確認で止まる
-    let platform = json!({ "signature": "bm90IGEgc2lnbmF0dXJl", "url": format!("{uri}/update/package") });
-    let mut platforms = serde_json::Map::new();
-    for os in ["linux", "windows", "darwin"] {
-        for arch in ["x86_64", "aarch64", "i686", "armv7"] {
-            platforms.insert(format!("{os}-{arch}"), platform.clone());
-        }
-    }
-    Mock::given(method("GET"))
-        .and(path("/update/latest.json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "version": "99.0.0",
-            "notes": "- 模擬サーバーの更新",
-            "pub_date": "2026-12-01T00:00:00Z",
-            "platforms": platforms,
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/update/package"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![7u8; 4096]))
-        .mount(&server)
-        .await;
-    server
-}
-
-/// テストの実行ファイルの隣（target の中）に作る作業フォルダ。毎回作り直す。
-fn work_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("テストの実行ファイルの場所が分かりません");
-    let dir = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("target の場所が分かりません")
-        .join("ipc-contract-work");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-pub(super) fn fixture() -> &'static Fixture {
-    static FIXTURE: OnceLock<Fixture> = OnceLock::new();
-    FIXTURE.get_or_init(|| {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        let transcription_fails = Arc::new(AtomicBool::new(false));
-        let server = runtime.block_on(start_server(transcription_fails.clone()));
-        let server_uri = server.uri();
-        let dir = work_dir();
-        let config = core::Config {
-            openai_base_url: Some(format!("{server_uri}/openai/v1")),
-            anthropic_base_url: Some(format!("{server_uri}/anthropic/v1")),
-            github_raw_base_url: Some(format!("{server_uri}/raw")),
-            github_api_base_url: Some(format!("{server_uri}/api")),
-            update_endpoint: Some(format!("{server_uri}/update/latest.json")),
-            update_pubkey: None,
-            audio: core::AudioConfig {
-                mic: Some("speech".into()),
-                system: Some("speech".into()),
-            },
-            timing: core::Timing {
-                meeting_poll_ms: Some(50),
-                meeting_start_confirm_ms: Some(200),
-                meeting_end_grace_ms: Some(400),
-                update_first_check_ms: None,
-                retry_base_delay_ms: Some(10),
-            },
-        };
-        assert!(
-            core::install(dir.clone(), config),
-            "差し替えの設定を、ほかのテストが先に読み込みました（設定を使うテストは、最初に fixture() を呼ぶ）"
-        );
-        Fixture {
-            dir,
-            server_uri,
-            transcription_fails,
-            _runtime: runtime,
-            _server: server,
-        }
-    })
-}
-
-fn wait_until<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
-    let started = Instant::now();
-    loop {
-        if let Some(value) = check() {
-            return value;
-        }
-        assert!(started.elapsed() < WAIT, "待っても起きませんでした: {what}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
 
 /// コマンドを呼び、見本を集める。
 struct Session {
@@ -260,18 +82,6 @@ impl Session {
     }
 }
 
-type Events = Arc<Mutex<Vec<(String, Value)>>>;
-
-fn events_named(events: &Events, name: &str) -> Vec<Value> {
-    events
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(event, _)| event == name)
-        .map(|(_, payload)| payload.clone())
-        .collect()
-}
-
 fn render_samples(samples: &Samples, name: &str, helper: &str, out: &mut String) {
     out.push_str(&format!("\nexport const {name} = {{\n"));
     for (method, samples) in &samples.0 {
@@ -329,9 +139,10 @@ fn check_contract_file(rendered: &str) {
     );
 }
 
+// [IPC-002][IPC-003][IPC-004][IPC-005][IPC-006][IPC-008]
 #[test]
 fn ipc_contract_matches_the_frontend() {
-    let fixture = fixture();
+    let (fixture, _serial) = exclusive();
     let data_dir = core::data_dir(&fixture.dir);
     std::fs::create_dir_all(&data_dir).unwrap();
 
@@ -346,14 +157,7 @@ fn ipc_contract_matches_the_frontend() {
         .expect("模擬のポップアップを作れません");
 
     let frontend = frontend();
-    let events: Events = Arc::default();
-    for binding in &frontend.events {
-        let (name, events) = (binding.event.clone(), events.clone());
-        app.listen_any(binding.event.clone(), move |event| {
-            let payload = serde_json::from_str(event.payload()).expect("イベントの内容が JSON ではありません");
-            events.lock().unwrap().push((name.clone(), payload));
-        });
-    }
+    let events = record_events(&app);
     let mut s = Session {
         window,
         frontend,
@@ -471,7 +275,7 @@ fn ipc_contract_matches_the_frontend() {
     assert!(refused.contains(".md / .txt"), "{refused}");
 
     // ---- 文字起こし API がキーを拒否したら、画面に知らせる ----
-    fixture.transcription_fails.store(true, Ordering::SeqCst);
+    *fixture.api.transcription_status.lock().unwrap() = Some(401);
     let second = s.ok("create_note", json!({}))["id"].as_str().unwrap().to_string();
     s.ok("start_recording", json!({ "noteId": second }));
     let error = wait_until("文字起こしの失敗の知らせ", || events_named(&events, "recording-error").into_iter().next());
@@ -479,7 +283,7 @@ fn ipc_contract_matches_the_frontend() {
     assert!(error["message"].as_str().unwrap().contains("API キーを確認してください"), "{error}");
     s.ok("stop_recording", json!({}));
     assert_eq!(s.ok("delete_note", json!({ "id": second })), Value::Null);
-    fixture.transcription_fails.store(false, Ordering::SeqCst);
+    *fixture.api.transcription_status.lock().unwrap() = None;
 
     // ---- 会議の検出（API キーあり）: ノートを作って録音し、会議が終わったら止める ----
     std::fs::write(&meeting_file, "zoom").unwrap();

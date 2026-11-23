@@ -705,6 +705,26 @@ mod tests {
         assert_eq!(t.tick(None, false, 50_000), None);
     }
 
+    /// 会議の検出が調べるのは、マイクを使っているアプリの名前と、表示中のウィンドウのタイトルだけ。
+    /// 調べるものを増やすとき（項目を足すとき）は、ここがコンパイルできなくなるので、仕様（SEC-013）と一緒に見直す。
+    // [SEC-013]
+    #[test]
+    fn detection_looks_only_at_mic_users_and_window_titles() {
+        let Observation { mic_users, windows } = observe();
+        for MicUser { id, in_use } in mic_users {
+            let _: (String, bool) = (id, in_use);
+        }
+        for WindowInfo { exe, title } in windows {
+            let _: (String, String) = (exe, title);
+        }
+        // 調べるのは PC の中だけ: 通信・音声・画面の取り込みの部品を、この部品（meetings.rs）は使わない
+        let source = include_str!("meetings.rs");
+        let code = &source[..source.find("#[cfg(test)]\nmod tests").expect("テストの手前まで")];
+        for forbidden in ["reqwest", "crate::http", "crate::audio", "crate::transcribe", "crate::claude", "BitBlt", "PrintWindow"] {
+            assert!(!code.contains(forbidden), "会議の検出が {forbidden} を使っている");
+        }
+    }
+
     // [MTG-001]
     #[test]
     fn exe_name_handles_both_separators() {

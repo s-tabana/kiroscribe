@@ -798,6 +798,7 @@ mod tests {
 
     const HOUR: i64 = 60 * 60 * 1000;
 
+    // [UPD-005]
     #[test]
     fn check_result_becomes_the_status() {
         let mut tracker = Tracker::<&str>::default();
@@ -816,6 +817,7 @@ mod tests {
         assert_eq!(tracker.begin_install(), Err(MSG_NO_UPDATE.to_string()));
     }
 
+    // [UPD-020]
     #[test]
     fn with_auto_update_off_nothing_is_downloaded_or_installed_automatically() {
         let mut tracker = Tracker::<&str>::default();
@@ -831,6 +833,7 @@ mod tests {
         assert_eq!(tracker.status().phase, UpdatePhase::Downloading);
     }
 
+    // [UPD-021]
     #[test]
     fn with_auto_update_on_a_found_update_is_downloaded_and_kept_until_it_can_be_installed() {
         let mut tracker = Tracker::<&str>::new(true, None);
@@ -859,6 +862,7 @@ mod tests {
         assert_eq!(tracker.begin_auto_install(), None);
     }
 
+    // [UPD-023]
     #[test]
     fn manual_install_uses_the_downloaded_package() {
         let mut tracker = downloaded();
@@ -877,6 +881,7 @@ mod tests {
         assert_eq!(tracker.begin_install(), Ok(("更新の本体", None)));
     }
 
+    // [UPD-026]
     #[test]
     fn turning_auto_update_off_stops_the_pending_install_without_a_restart() {
         let mut tracker = downloaded();
@@ -902,6 +907,7 @@ mod tests {
         assert_eq!(tracker.begin_auto_install(), None);
     }
 
+    // [UPD-021][UPD-027]
     #[test]
     fn a_failed_automatic_attempt_waits_for_the_next_check() {
         let mut tracker = Tracker::<&str>::new(true, None);
@@ -928,6 +934,7 @@ mod tests {
         assert_eq!(tracker.begin_auto_install(), None);
     }
 
+    // [UPD-021]
     #[test]
     fn downloaded_package_is_kept_only_for_the_same_version() {
         let mut tracker = downloaded();
@@ -944,6 +951,7 @@ mod tests {
         assert_eq!(tracker.begin_auto_install(), None);
     }
 
+    // [UPD-028]
     #[test]
     fn a_version_that_failed_to_install_automatically_is_left_to_the_user() {
         let mut tracker = Tracker::<&str>::new(true, Some("0.3.0".into()));
@@ -957,6 +965,7 @@ mod tests {
         assert_eq!(tracker.begin_background_download(), Some("更新の本体"));
     }
 
+    // [UPD-022]
     #[test]
     fn installs_automatically_only_when_nothing_is_in_use() {
         let quiet = InstallConditions {
@@ -991,6 +1000,7 @@ mod tests {
         }
     }
 
+    // [UPD-022]
     #[test]
     fn a_download_or_install_in_progress_is_not_ready_to_install() {
         let mut tracker = Tracker::<&str>::new(true, None);
@@ -1006,6 +1016,7 @@ mod tests {
         assert_eq!(tracker.begin_auto_install(), None);
     }
 
+    // [UPD-001]
     #[test]
     fn checks_every_six_hours_and_retries_sooner_after_a_failure() {
         let mut tracker = Tracker::<&str>::default();
@@ -1024,6 +1035,7 @@ mod tests {
         assert!(tracker.check_due(0), "時計が戻されても確認が止まらない");
     }
 
+    // [UPD-014][UPD-015]
     #[test]
     fn install_needs_a_found_update_and_runs_one_at_a_time() {
         let mut tracker = Tracker::<&str>::default();
@@ -1048,6 +1060,7 @@ mod tests {
         assert_eq!(tracker.begin_install(), Ok(("更新の本体", None)));
     }
 
+    // [UPD-009]
     #[test]
     fn download_progress_is_reported_once_per_percent() {
         let mut tracker = Tracker::<&str>::default();
@@ -1080,6 +1093,7 @@ mod tests {
         assert_eq!((status.downloaded_bytes, status.total_bytes), (0, None));
     }
 
+    // [UPD-009]
     #[test]
     fn progress_without_total_size_is_reported_by_bytes() {
         let mut tracker = Tracker::<&str>::default();
@@ -1090,6 +1104,7 @@ mod tests {
         assert_eq!(status.total_bytes, None, "大きさ 0 は不明として扱う");
     }
 
+    // [IPC-003][IPC-008]
     #[test]
     fn status_is_serialized_for_the_frontend() {
         let mut tracker = Tracker::<&str>::default();
@@ -1110,6 +1125,7 @@ mod tests {
         assert_eq!(serde_json::to_value(downloaded().status()).unwrap()["ready"], true);
     }
 
+    // [UPD-006][UPD-010][UPD-015]
     #[test]
     fn check_errors_are_explained_in_japanese() {
         use tauri_plugin_updater::Error;
@@ -1129,6 +1145,7 @@ mod tests {
         assert!(install_error_message(&Error::InvalidUpdaterFormat).starts_with("更新をインストールできませんでした: "));
     }
 
+    // [UPD-013]
     #[test]
     fn manual_restart_marker_is_used_once_and_expires() {
         let db = Database::open_in_memory().unwrap();
@@ -1152,6 +1169,7 @@ mod tests {
         assert_eq!(auto_skip_version(&db), None);
     }
 
+    // [UPD-024]
     #[test]
     fn automatic_restart_is_told_apart_from_a_manual_one() {
         let db = Database::open_in_memory().unwrap();
@@ -1172,6 +1190,7 @@ mod tests {
         assert_eq!(take_restart(&db, "0.4.0", 3_000), Some(Restart::Manual));
     }
 
+    // [UPD-013][UPD-024]
     #[test]
     fn window_is_shown_on_launch_unless_started_in_the_background() {
         // 通常の起動: 自動起動（--autostart）のときだけ出さない
@@ -1185,6 +1204,7 @@ mod tests {
         assert!(!show_window_on_launch(true, Some(Restart::Auto)));
     }
 
+    // [UPD-025]
     #[test]
     fn automatic_update_leaves_a_notice_that_is_shown_once() {
         let db = Database::open_in_memory().unwrap();
@@ -1205,6 +1225,7 @@ mod tests {
         assert_eq!(take_notice(&db, "0.5.0"), None);
     }
 
+    // [UPD-028]
     #[test]
     fn automatic_install_that_did_not_update_is_not_repeated() {
         let db = Database::open_in_memory().unwrap();

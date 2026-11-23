@@ -181,6 +181,11 @@ pub fn clear_chat_messages(state: State<'_, AppState>, note_id: String) -> CmdRe
     Ok(state.db().clear_chat_messages(&note_id)?)
 }
 
+/// AI に送る会話: 履歴のうち新しいほうから `MAX_HISTORY` 件までを、交互の発言にまとめたもの。
+fn recent_turns(history: &[ChatMessage]) -> Vec<Turn> {
+    to_turns(&history[history.len().saturating_sub(MAX_HISTORY)..])
+}
+
 /// 同じ話者が続くメッセージをまとめる（API は user と assistant が交互である前提のため）。
 fn to_turns(history: &[ChatMessage]) -> Vec<Turn> {
     let mut turns: Vec<Turn> = Vec::new();
@@ -223,10 +228,9 @@ pub async fn send_chat_message(
         db.add_chat_message(&note_id, Role::User, &content)?;
         db.list_chat_messages(&note_id)?
     };
-    let recent = &history[history.len().saturating_sub(MAX_HISTORY)..];
     let request = MessageRequest {
         system: chat_system_prompt(&context(&loaded)),
-        messages: to_turns(recent),
+        messages: recent_turns(&history),
         max_tokens: 16_000,
         effort: Effort::Low,
     };
@@ -259,6 +263,7 @@ mod tests {
         }
     }
 
+    // [CHT-007]
     #[test]
     fn turns_alternate_and_start_with_user() {
         let history = [
@@ -276,6 +281,34 @@ mod tests {
         assert_eq!(turns[2].content, "ありがとう");
     }
 
+    // [CHT-007]
+    #[test]
+    fn only_the_latest_twenty_messages_are_sent() {
+        // 質問と回答が交互に 15 往復（30 件）
+        let history: Vec<ChatMessage> = (0..30)
+            .map(|i| {
+                let role = if i % 2 == 0 { Role::User } else { Role::Assistant };
+                msg(i, role, &format!("発言 {i}"))
+            })
+            .collect();
+        let turns = recent_turns(&history);
+        assert_eq!(turns.len(), 20, "新しいほうから 20 件まで");
+        assert_eq!(turns[0].content, "発言 10");
+        assert_eq!(turns[0].role, Role::User);
+        assert_eq!(turns[19].content, "発言 29");
+
+        // 20 件に切ったところが AI の回答から始まるときは、利用者の発言から始まるように詰める
+        let turns = recent_turns(&history[..29]);
+        assert_eq!(turns.len(), 19);
+        assert_eq!((turns[0].role, turns[0].content.as_str()), (Role::User, "発言 10"));
+        assert_eq!(turns[18].content, "発言 28");
+
+        // 20 件に満たなければ全部
+        assert_eq!(recent_turns(&history[..4]).len(), 4);
+        assert!(recent_turns(&[]).is_empty());
+    }
+
+    // [MIN-008]
     #[test]
     fn only_one_run_per_key() {
         let state = AiState::default();
@@ -283,7 +316,12 @@ mod tests {
         let guard = state.begin("enhance:a".into(), "busy").unwrap();
         assert!(state.is_busy());
         assert!(state.begin("enhance:a".into(), "busy").is_err());
+        assert_eq!(state.begin("enhance:a".into(), "このノートの議事録を作成中です").err().unwrap().0, "このノートの議事録を作成中です");
+        // 同じノートの AI チャットや、別のノートの議事録とは同時に進められる
         assert!(state.begin("chat:a".into(), "busy").is_ok());
+        let other = state.begin("enhance:b".into(), "busy").expect("別のノートは始められる");
+        drop(other);
+        assert!(state.is_busy(), "ほかの作成が終わっても、このノートの作成は続いている");
         state.cancel("enhance:a");
         assert!(guard.cancel.load(Ordering::SeqCst));
         drop(guard);

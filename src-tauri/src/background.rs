@@ -185,12 +185,18 @@ fn toggle_auto_record(app: &AppHandle) -> CmdResult<()> {
     Ok(())
 }
 
+/// 終了の前の片づけ: 録音中なら止めて、最後の発話の文字起こしが終わるまで待つ。
+/// ここから先は、メインウィンドウを閉じる操作を「隠す」に読み替えない（本当に終了する）。
+pub(crate) async fn prepare_quit(app: &AppHandle) {
+    app.state::<BackgroundState>().quitting.store(true, Ordering::SeqCst);
+    stop_now(app).await;
+}
+
 /// 終了する。録音中なら止めて、最後の発話の文字起こしを待ってから終わる。
 pub fn quit(app: &AppHandle) {
-    app.state::<BackgroundState>().quitting.store(true, Ordering::SeqCst);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        stop_now(&app).await;
+        prepare_quit(&app).await;
         app.exit(0);
     });
 }

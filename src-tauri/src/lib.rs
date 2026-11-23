@@ -10,13 +10,11 @@ mod help;
 mod ipc_tests;
 mod recording;
 mod runtime;
+mod startup;
 mod state;
 mod update;
 
-use kiroscribe_core::legacy;
-use kiroscribe_core::secrets::{migrate_legacy_api_keys, platform_store};
 use kiroscribe_core::time::now_ms;
-use kiroscribe_core::Database;
 use tauri::{Manager, WindowEvent};
 
 use crate::ai::AiState;
@@ -43,25 +41,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
-            let db_path = data_dir.join("kiroscribe.db");
-            // 改名前（Kiroku）のデータは、Kiroscribe のデータベースがまだない初回起動のときだけ引き継ぐ
-            // （毎回引き継ぐと、Kiroscribe で消した API キーが旧アプリの分から戻ってしまう）
-            let first_launch = !db_path.exists();
-            if first_launch {
-                if let Some(legacy_db) = legacy::legacy_database_path(&data_dir) {
-                    // 失敗したら空のデータベースで始めずに起動を止める（次回の起動でやり直せる）
-                    legacy::migrate_database(&legacy_db, &db_path)?;
-                }
-            }
-            let db = Database::open(&db_path)?;
-            let settings = db.load_settings()?;
-            let secrets = platform_store(&data_dir)?;
-            if first_launch {
-                // API キーは入力し直せるので、引き継げなくても起動は続ける
-                if let Err(err) = migrate_legacy_api_keys(&data_dir, secrets.as_ref()) {
-                    eprintln!("以前の Kiroku の API キーを引き継げませんでした: {err}");
-                }
-            }
+            let startup::Opened { db, settings, secrets } = startup::open_data(&data_dir)?;
             // アプリ内更新で再起動した直後か（下で、ウィンドウを出すかどうかを決める）
             let version = app.package_info().version.to_string();
             let restart = update::take_restart(&db, &version, now_ms());
@@ -166,6 +146,7 @@ mod tests {
 
     /// バージョンは package.json を正とし、Cargo（ワークスペース）と tauri.conf.json がそれに合っていること。
     /// ずれると、画面に出るバージョン・インストーラ・更新の判定が食い違う。
+    // [UPD-017]
     #[test]
     fn versions_are_consistent() {
         let tauri_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -194,6 +175,7 @@ mod tests {
 
     /// 待ち時間の本来の値。E2E テスト用のビルド（feature `e2e`）では設定で縮められるので、
     /// 製品の値はここで確かめておく（会議の開始・終了の確定は meetings、API の再試行は retry のテストにある）。
+    // [UPD-001][MTG-007][MTG-008][ERR-006]
     #[cfg(not(feature = "e2e"))]
     #[test]
     fn waits_have_their_product_values() {
@@ -209,6 +191,7 @@ mod tests {
     }
 
     /// アプリ内更新の配布元と公開鍵が設定されていること（欠けると更新の確認が常に失敗する）。
+    // [UPD-003][REL-007]
     #[test]
     fn updater_is_configured() {
         let conf = read_json(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json"));

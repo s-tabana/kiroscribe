@@ -239,8 +239,22 @@ fn source_for(speaker: Speaker) -> Result<Source> {
         .ok_or_else(|| CoreError::Audio(format!("{}の模擬の音声が指定されていません", speaker.label())))
 }
 
+/// 作業フォルダにこのファイルがあるあいだは、マイクを開けなかったことにする（中身が理由の文）。
+/// マイクがない・使えないときの動きを確かめるために、テストが実行中に置いたり消したりする。
+const MIC_ERROR_FILE: &str = "mic-error.txt";
+
+fn mic_error() -> Option<String> {
+    let text = std::fs::read_to_string(super::file(MIC_ERROR_FILE)?).ok()?;
+    Some(text.trim().to_string())
+}
+
 /// 模擬の音源を開く。
 pub fn open(speaker: Speaker) -> Result<(MockCapture, OpenedSource)> {
+    if speaker == Speaker::Me {
+        if let Some(reason) = mic_error() {
+            return Err(CoreError::Audio(reason));
+        }
+    }
     let source = source_for(speaker)?;
     let signal = Signal::load(&source, speaker)?;
     let sample_rate = signal.sample_rate;

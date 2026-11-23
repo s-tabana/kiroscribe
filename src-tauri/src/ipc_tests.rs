@@ -287,6 +287,7 @@ fn frontend_and_rust_agree_on_command_names() {
 }
 
 /// 画面側が購読するイベントの一覧と、Rust 側が定義しているイベント名（`EVENT_*`）の一覧が一致すること。
+// [IPC-005]
 #[test]
 fn frontend_and_rust_agree_on_event_names() {
     let subscribed: BTreeSet<String> = frontend().events.iter().map(|b| b.event.clone()).collect();
@@ -300,7 +301,35 @@ fn frontend_and_rust_agree_on_event_names() {
     );
 }
 
+/// ウィンドウの名前は、本体・アプリの設定・画面に渡す権限・画面のコードで同じものを指していること。
+/// ずれると、イベントが届かない・ポップアップに権限がない・ポップアップにメインの画面が出る、のどれかになる。
+// [IPC-007]
+#[test]
+fn window_labels_match_the_config_and_the_frontend() {
+    use crate::background::POPUP_LABEL;
+    assert_eq!(MAIN_LABEL, "main");
+    assert_eq!(POPUP_LABEL, "meeting-popup");
+
+    let tauri_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let conf: Value = serde_json::from_str(&read(&tauri_dir.join("tauri.conf.json"))).unwrap();
+    let windows = conf["app"]["windows"].as_array().expect("tauri.conf.json の app.windows");
+    assert_eq!(windows.len(), 1, "起動時に作るのはメインウィンドウだけ（ポップアップは本体が作る）");
+    assert_eq!(windows[0]["label"], MAIN_LABEL);
+
+    let capability: Value = serde_json::from_str(&read(&tauri_dir.join("capabilities/default.json"))).unwrap();
+    assert_eq!(capability["windows"], json!([MAIN_LABEL, POPUP_LABEL]));
+
+    // ポップアップは、メインウィンドウと同じ画面のコードを index.html#/popup で開く
+    assert!(include_str!("background.rs").contains(r#"WebviewUrl::App("index.html#/popup".into())"#));
+    let main_tsx = read(&repo_root().join("src/main.tsx"));
+    assert!(main_tsx.contains(r##"window.location.hash.startsWith("#/popup")"##), "src/main.tsx がポップアップを見分けていません");
+}
+
 // ---- 模擬のランタイムでコマンドを呼ぶ ----
+
+/// 更新の署名を確かめる公開鍵（このテストのために作った使い捨ての鍵。秘密鍵は残していない）。
+/// 模擬の配布元（`fixture`）が配るファイルのうち、「署名が正しい」ものは、この鍵で署名してある。
+const TEST_UPDATE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIzNEM2QUNDQzU2NjQwMkEKUldRcVFHYkZ6R3BNc3pKUU5tYVVHbWs4REhFUTBOUWRWUmpPSm9QaERKTjdOOVcwWDk1eHpyZXoK";
 
 /// 模擬のランタイムの上に、製品と同じコマンドを登録したアプリを作る。
 /// 状態は、データベースと API キーを持つ `AppState` 以外を用意する（`AppState` は使う側が足す）。
@@ -309,7 +338,7 @@ fn mock_app(update_endpoint: &str) -> (tauri::App<MockRuntime>, WebviewWindow<Mo
     context.config_mut().plugins.0.insert(
         "updater".into(),
         json!({
-            "pubkey": "dGVzdA==",
+            "pubkey": TEST_UPDATE_PUBKEY,
             "endpoints": [update_endpoint],
             "dangerousInsecureTransportProtocol": true,
         }),
@@ -359,7 +388,7 @@ fn invoke(window: &WebviewWindow<MockRuntime>, command: &str, args: Value) -> Re
 #[test]
 fn every_frontend_command_reaches_a_handler() {
     #[cfg(feature = "e2e")]
-    scenario::fixture();
+    fixture::fixture();
     let (_app, window) = mock_app("http://127.0.0.1:9/latest.json");
     for binding in frontend().commands {
         let result = invoke(&window, &binding.command, json!({}));
@@ -391,7 +420,7 @@ fn every_frontend_command_reaches_a_handler() {
 #[test]
 fn search_notes_command_covers_body_minutes_and_transcript() {
     #[cfg(feature = "e2e")]
-    scenario::fixture();
+    fixture::fixture();
     let (app, window) = mock_app("http://127.0.0.1:9/latest.json");
     app.manage(AppState::new(
         Database::open_in_memory().unwrap(),
@@ -556,5 +585,9 @@ fn samples_keep_only_what_the_type_check_needs() {
     assert_eq!(samples.0["openNoteFromPopup"].lines(), [r#"["id",true]"#]);
 }
 
+#[cfg(feature = "e2e")]
+mod fixture;
+#[cfg(feature = "e2e")]
+mod flows;
 #[cfg(feature = "e2e")]
 mod scenario;

@@ -288,6 +288,7 @@ mod tests {
         }));
     }
 
+    // [UPD-018]
     #[test]
     fn config_is_redirected_into_the_work_directory() {
         let mut config: tauri::Config = serde_json::from_value(json!({

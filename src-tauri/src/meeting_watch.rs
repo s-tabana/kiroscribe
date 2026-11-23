@@ -79,7 +79,8 @@ fn create_meeting_note(app: &AppHandle, meeting: MeetingApp) -> Result<Note, Str
     .map_err(|e| e.to_string())
 }
 
-async fn handle(app: &AppHandle, event: MeetingEvent) {
+/// 確定した会議の開始・終了を処理する。
+pub(crate) async fn handle(app: &AppHandle, event: MeetingEvent) {
     match event {
         MeetingEvent::Started(meeting) => on_started(app, meeting).await,
         MeetingEvent::Ended(meeting) => on_ended(app, meeting).await,
