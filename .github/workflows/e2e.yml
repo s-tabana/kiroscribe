@@ -176,13 +176,16 @@ jobs:
           if (-not (Test-Path msedgedriver.exe)) { throw "msedgedriver.exe を取得できませんでした" }
           "KIROSCRIBE_E2E_NATIVE_DRIVER=$((Get-Item msedgedriver.exe).FullName)" >> $env:GITHUB_ENV
 
-      - name: E2E テスト用のアプリのビルド
-        run: npm run build:e2e
+      # hold_mic: マイクを開いたまま待つだけのプログラム。会議アプリの名前に写して、会議の検出を確かめる
+      - name: E2E テスト用のアプリと、マイクを使うだけのプログラムのビルド
+        run: |
+          npm run build:e2e
+          cargo build -p kiroscribe-core --example hold_mic --locked
 
-      - name: E2E テスト（本物の音声デバイス）
+      - name: E2E テスト（本物の音声デバイス・会議の検出）
         env:
           KIROSCRIBE_E2E_REAL_AUDIO: "1"
-        run: npm run test:e2e -- e2e/specs/14-real-audio.test.mjs
+        run: npm run test:e2e -- e2e/specs/14-real-audio.test.mjs e2e/specs/15-real-meeting.test.mjs
 
       - name: 失敗したテストのスクリーンショットとログを保存
         if: failure()

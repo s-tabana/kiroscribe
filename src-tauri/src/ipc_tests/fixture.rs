@@ -311,6 +311,7 @@ pub(super) fn fixture() -> &'static Fixture {
             tray_unavailable: false,
             register_autostart: false,
             native_startup_dialog: false,
+            real_meeting_detection: false,
             audio: core::AudioConfig {
                 mic: Some("speech".into()),
                 system: Some("speech".into()),

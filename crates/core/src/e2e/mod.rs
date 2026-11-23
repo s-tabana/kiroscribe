@@ -81,6 +81,9 @@ pub struct Config {
     /// 起動できなかったときのダイアログを、記録に置き換えずに本当に出す
     /// （OS のダイアログが出て、閉じると終了することを、UI オートメーションで確かめるテスト用）
     pub native_startup_dialog: bool,
+    /// 会議の検出を `meeting.txt` で模擬せず、製品と同じく Windows のマイクの使用状況とウィンドウのタイトルから行う
+    /// （マイクを使うプログラムやブラウザを本当に動かして確かめるテスト用）
+    pub real_meeting_detection: bool,
     pub audio: AudioConfig,
     pub timing: Timing,
 }
@@ -254,7 +257,11 @@ pub fn retry_policy(default: &RetryPolicy) -> Option<RetryPolicy> {
 
 /// 会議の検出の差し替え。作業フォルダがなければ `None`（実際の検出を使う）。
 /// あれば実際の検出は行わず、`meeting.txt` に書かれた会議アプリの会議中として扱う（なし・空なら会議中ではない）。
+/// `config.json` の `realMeetingDetection` が true なら `None`（実際の検出を使う）。
 pub fn simulated_meeting() -> Option<Option<MeetingApp>> {
+    if config().real_meeting_detection {
+        return None;
+    }
     let path = file(MEETING_FILE)?;
     Some(std::fs::read_to_string(path).ok().and_then(|text| parse_meeting(&text)))
 }
