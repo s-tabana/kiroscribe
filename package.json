@@ -10,6 +10,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
+    "build:e2e": "tauri build --debug --no-bundle --features e2e --config scripts/tauri.ci.conf.json",
+    "test:e2e": "node e2e/run.mjs",
     "test": "npm run test:web && npm run test:rust",
     "test:web": "vitest run",
     "test:web:coverage": "vitest run --coverage --coverage.provider=v8 --coverage.reportsDirectory=target/coverage-web --coverage.reporter=text-summary --coverage.reporter=json-summary --coverage.include=src/**/*.ts --coverage.include=src/**/*.tsx --coverage.exclude=src/**/*.test.ts --coverage.exclude=src/**/*.test.tsx --coverage.exclude=src/test/**",

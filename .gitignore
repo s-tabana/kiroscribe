@@ -20,6 +20,9 @@ Thumbs.db
 # リリースのワークフロー（release.yml）が作る中間ファイル
 release-assets/
 
+# E2E テストが失敗したときに残す、スクリーンショットとログ
+e2e/artifacts/
+
 # アプリ内更新の署名鍵（秘密鍵は GitHub の Secret にだけ置き、コミットしない）
 *.key
 
