@@ -524,6 +524,7 @@ fn ipc_contract_matches_the_frontend() {
     assert!(refused.contains("このリンクは開けません"), "{refused}");
 
     // ---- 更新 ----
+    assert_eq!(s.ok("take_update_notice", json!({})), Value::Null, "自動で更新していなければ、知らせるものはない");
     assert_eq!(s.ok("get_update_status", json!({}))["available"], Value::Null);
     let status = s.ok("check_for_update", json!({}));
     assert_eq!(status["available"]["version"], "99.0.0");

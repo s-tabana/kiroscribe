@@ -104,7 +104,7 @@ export const called = {
     [],
   ] satisfies Called<"resumeRecording">[],
   saveSettings: [
-    [{"autoRecordMeetings":true,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"}],
+    [{"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"}],
   ] satisfies Called<"saveSettings">[],
   sendChatMessage: [
     ["…","…"],
@@ -119,6 +119,9 @@ export const called = {
   stopRecording: [
     [],
   ] satisfies Called<"stopRecording">[],
+  takeUpdateNotice: [
+    [],
+  ] satisfies Called<"takeUpdateNotice">[],
   updateNote: [
     ["…",{"title":"…","userNotes":"…"}],
   ] satisfies Called<"updateNote">[],
@@ -129,7 +132,7 @@ export const returned = {
     null,
   ] satisfies Returned<"cancelAi">[],
   checkForUpdate: [
-    {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"idle","totalBytes":null},
+    {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"idle","ready":false,"totalBytes":null},
   ] satisfies Returned<"checkForUpdate">[],
   clearChatMessages: [
     null,
@@ -176,11 +179,11 @@ export const returned = {
     {"fetchedAt":0,"releases":[{"body":"…","htmlUrl":"…","name":"…","publishedAt":"…","tagName":"…","version":"…"}],"source":"network"},
   ] satisfies Returned<"getReleaseNotes">[],
   getSettings: [
-    {"autoRecordMeetings":true,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
+    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
   ] satisfies Returned<"getSettings">[],
   getUpdateStatus: [
-    {"available":null,"checkedAt":null,"downloadedBytes":0,"phase":"idle","totalBytes":null},
-    {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"idle","totalBytes":null},
+    {"available":null,"checkedAt":null,"downloadedBytes":0,"phase":"idle","ready":false,"totalBytes":null},
+    {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"idle","ready":false,"totalBytes":null},
   ] satisfies Returned<"getUpdateStatus">[],
   listAudioDevices: [
     [{"id":"…","isDefault":true,"name":"…"}],
@@ -210,7 +213,7 @@ export const returned = {
     {"elapsedMs":0,"noteId":"…","runningSince":0,"sources":["me","them"],"state":"recording"},
   ] satisfies Returned<"resumeRecording">[],
   saveSettings: [
-    {"autoRecordMeetings":true,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
+    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
   ] satisfies Returned<"saveSettings">[],
   sendChatMessage: [
     {"content":"…","createdAt":0,"id":0,"noteId":"…","role":"assistant"},
@@ -225,6 +228,9 @@ export const returned = {
   stopRecording: [
     {"elapsedMs":0,"noteId":null,"runningSince":null,"sources":[],"state":"idle"},
   ] satisfies Returned<"stopRecording">[],
+  takeUpdateNotice: [
+    null,
+  ] satisfies Returned<"takeUpdateNotice">[],
   updateNote: [
     {"createdAt":0,"enhancedAt":null,"enhancedNotes":null,"id":"…","title":"…","updatedAt":0,"userNotes":"…"},
   ] satisfies Returned<"updateNote">[],
@@ -267,8 +273,8 @@ export const emitted = {
     {"endedAt":0,"id":0,"noteId":"…","speaker":"them","startedAt":0,"text":"…"},
   ] satisfies Emitted<"onSegment">[],
   onUpdateStatus: [
-    {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"idle","totalBytes":null},
-    {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"downloading","totalBytes":null},
-    {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"downloading","totalBytes":0},
+    {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"idle","ready":false,"totalBytes":null},
+    {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"downloading","ready":false,"totalBytes":null},
+    {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"downloading","ready":false,"totalBytes":0},
   ] satisfies Emitted<"onUpdateStatus">[],
 };

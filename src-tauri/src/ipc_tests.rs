@@ -316,7 +316,7 @@ fn mock_app(update_endpoint: &str) -> (tauri::App<MockRuntime>, WebviewWindow<Mo
     app.manage(RecorderState::default());
     app.manage(AiState::default());
     app.manage(BackgroundState::default());
-    app.manage(UpdateState::default());
+    app.manage(UpdateState::new(false, None));
     let window = WebviewWindowBuilder::new(&app, MAIN_LABEL, Default::default())
         .build()
         .expect("模擬のウィンドウを作れません");
