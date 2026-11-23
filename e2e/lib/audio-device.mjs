@@ -119,3 +119,21 @@ foreach ($d in $devices) {
 
 /** 仮想のオーディオケーブル（デバイスそのもの）の名前 */
 export const CABLE = "*VB-Audio Virtual Cable*";
+
+/** 出力デバイス（PC の音声）としての仮想のケーブルの名前 */
+export const CABLE_SPEAKERS = "Speakers (VB-Audio*";
+
+/**
+ * Windows のプライバシー設定の「デスクトップ アプリがマイクにアクセスできるようにする」を切り替える（"Allow" か "Deny"）。
+ * 利用者が設定画面で切り替えるのと同じ値を書く
+ */
+export function setDesktopMicAccess(value) {
+  powershell(
+    `
+$p = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone\\NonPackaged'
+if (-not (Test-Path $p)) { New-Item -Path $p -Force | Out-Null }
+Set-ItemProperty -Path $p -Name Value -Value $env:KIROSCRIBE_CONSENT
+`,
+    { KIROSCRIBE_CONSENT: value },
+  );
+}

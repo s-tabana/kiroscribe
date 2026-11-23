@@ -1,0 +1,70 @@
+{
+  "format": "kiroscribe-meeting-record/1",
+  "appVersion": "0.3.0",
+  "ownExe": "kiroscribe.exe",
+  "entries": [
+    {
+      "at": 1795000000000,
+      "observation": {
+        "micUsers": [
+          {
+            "app": "msedge.exe",
+            "inUse": false
+          }
+        ],
+        "windows": []
+      }
+    },
+    {
+      "at": 1795000010000,
+      "observation": {
+        "micUsers": [
+          {
+            "app": "msedge.exe",
+            "inUse": true
+          }
+        ],
+        "windows": [
+          {
+            "exe": "msedge.exe",
+            "title": "Meet - abc-defg-hij and 2 more pages - Personal - Microsoft​ Edge"
+          }
+        ]
+      }
+    },
+    {
+      "at": 1795000040000,
+      "observation": {
+        "micUsers": [
+          {
+            "app": "msedge.exe",
+            "inUse": true
+          }
+        ],
+        "windows": [
+          {
+            "exe": "msedge.exe",
+            "title": "資料 - Google ドキュメント and 2 more pages - Personal - Microsoft​ Edge"
+          }
+        ]
+      }
+    },
+    {
+      "at": 1795000090000,
+      "observation": {
+        "micUsers": [
+          {
+            "app": "msedge.exe",
+            "inUse": false
+          }
+        ],
+        "windows": []
+      }
+    }
+  ],
+  "expected": [
+    "started:googleMeet",
+    "ended:googleMeet"
+  ],
+  "description": "Edge の Google Meet。会議中に別のタブへ切り替えても（マイクは使ったまま）続き、抜けると終わる。Edge のタイトルの末尾には、見えない空白（U+200B）が入る"
+}

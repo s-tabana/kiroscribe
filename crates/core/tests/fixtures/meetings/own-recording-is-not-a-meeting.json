@@ -1,0 +1,33 @@
+{
+  "format": "kiroscribe-meeting-record/1",
+  "appVersion": "0.3.0",
+  "ownExe": "kiroscribe.exe",
+  "entries": [
+    {
+      "at": 1795000000000,
+      "observation": {
+        "micUsers": [
+          {
+            "app": "kiroscribe.exe",
+            "inUse": true
+          }
+        ],
+        "windows": []
+      }
+    },
+    {
+      "at": 1795000060000,
+      "observation": {
+        "micUsers": [
+          {
+            "app": "kiroscribe.exe",
+            "inUse": false
+          }
+        ],
+        "windows": []
+      }
+    }
+  ],
+  "expected": [],
+  "description": "Kiroscribe 自身が録音でマイクを使っていても、会議とはみなさない"
+}

@@ -155,6 +155,23 @@ jobs:
       - name: 仮想のオーディオケーブルのインストール
         uses: LABSN/sound-ci-helpers@e9d6ba52163a3283714a68412036ddf33f78d49c # v1
 
+      # Windows のプライバシー設定で、デスクトップ アプリがマイクを使えるようにする（ランナーの既定では拒否されている）。
+      # 拒否されているときの知らせは、テスト（REC-022）の中で切り替えて確かめる
+      - name: マイクへのアクセスを許可
+        shell: pwsh
+        run: |
+          $base = 'CapabilityAccessManager\ConsentStore\microphone'
+          $paths = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\$base",
+                   "HKCU:\Software\Microsoft\Windows\CurrentVersion\$base",
+                   "HKCU:\Software\Microsoft\Windows\CurrentVersion\$base\NonPackaged"
+          foreach ($p in $paths) {
+            $before = (Get-ItemProperty -Path $p -Name Value -ErrorAction SilentlyContinue).Value
+            if (-not (Test-Path $p)) { New-Item -Path $p -Force | Out-Null }
+            Set-ItemProperty -Path $p -Name Value -Value Allow
+            "$p : $before -> Allow"
+          }
+          Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy' -ErrorAction SilentlyContinue | Format-List
+
       - name: 音声デバイスの一覧
         shell: pwsh
         run: |

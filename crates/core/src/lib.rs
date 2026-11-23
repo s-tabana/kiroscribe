@@ -11,6 +11,7 @@ pub mod export;
 pub mod help;
 pub mod http;
 pub mod legacy;
+pub mod meeting_record;
 pub mod meetings;
 pub mod notes;
 pub mod prompts;

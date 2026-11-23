@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "../lib/app.mjs";
-import { CABLE, audioEndpoints, playSpeech, setDeviceEnabled, wavRms } from "../lib/audio-device.mjs";
+import { CABLE, CABLE_SPEAKERS, audioEndpoints, playSpeech, setDesktopMicAccess, setDeviceEnabled, wavRms } from "../lib/audio-device.mjs";
 import { closeSettings, createNote, dismissToast, openSettings, pressBarButton, sel, toastText, utterances } from "../lib/ui.mjs";
 
 const REAL_AUDIO = process.platform === "win32" && process.env.KIROSCRIBE_E2E_REAL_AUDIO === "1";
@@ -147,8 +147,8 @@ test("[REC-018] PC の音声を取り込めないときは、マイクだけで�
   const session = await ctx.launch();
   await createNote(session, { title: "出力デバイスがない" });
   try {
-    // 出力デバイス（CABLE Input）だけを無効にする。マイク（CABLE Output）は使える
-    setDeviceEnabled("*CABLE Input*", false, "AudioEndpoint");
+    // 出力デバイス（Speakers）だけを無効にする。マイク（CABLE Output）は使える
+    setDeviceEnabled(CABLE_SPEAKERS, false, "AudioEndpoint");
     await sleep(3_000);
     await pressBarButton(session, "録音を開始");
     await toastText(session, "相手の声は取り込まず、マイクだけで録音します");
@@ -156,7 +156,23 @@ test("[REC-018] PC の音声を取り込めないときは、マイクだけで�
     await session.waitForText("body", "相手の声は取り込んでいません（マイクのみ）");
     await pressBarButton(session, "停止");
   } finally {
-    setDeviceEnabled("*CABLE Input*", true, "AudioEndpoint");
+    setDeviceEnabled(CABLE_SPEAKERS, true, "AudioEndpoint");
     await sleep(3_000);
+  }
+});
+
+test("[REC-022] Windows のプライバシー設定でマイクが許可されていないときは、録音を始めず、直す場所を知らせる", options, async (ctx) => {
+  const session = await ctx.launch();
+  await createNote(session, { title: "マイクの許可がない" });
+  try {
+    setDesktopMicAccess("Deny");
+    await sleep(1_000);
+    await pressBarButton(session, "録音を開始");
+    const shown = await toastText(session, "マイクを使う許可がありません");
+    assert.ok(shown.includes("プライバシーとセキュリティ"), shown);
+    assert.ok(!/access is denied|os error/i.test(shown), `Windows の技術的な文が出ている: ${shown}`);
+    assert.equal(await session.exists(`${sel.noteItems} [aria-label="録音中"]`), false, "許可がないのに、録音中になった");
+  } finally {
+    setDesktopMicAccess("Allow");
   }
 });
