@@ -15,6 +15,19 @@ $Scope = [System.Windows.Automation.TreeScope]
 $targetPid = [int]$env:KIROSCRIBE_UIA_PID
 $cond = New-Object System.Windows.Automation.PropertyCondition($AE::ProcessIdProperty, $targetPid)
 $windows = $AE::RootElement.FindAll($Scope::Children, $cond)
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class KiroscribeWindow {
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+}
+"@
+# 画面に見えているか（隠した内部用のウィンドウ（多重起動の判定・イベントの受け口など）を除く）
+function Is-Shown($el) {
+  $hwnd = $el.Current.NativeWindowHandle
+  if ($hwnd -eq 0) { return -not $el.Current.IsOffscreen }
+  return [KiroscribeWindow]::IsWindowVisible([IntPtr]$hwnd)
+}
 `;
 
 function powershell(script, env) {
@@ -32,22 +45,23 @@ function powershell(script, env) {
 
 /**
  * プロセスが出している、画面に見えるウィンドウ（トップレベル）の一覧。
- * 1 件は { name: 題名, className, texts: [中の文字], buttons: [ボタンの名前] }。
- * 隠しているウィンドウ（閉じてトレイにいるメインウィンドウなど）は含まない
+ * 1 件は { name: 題名, className, texts: [中の文字], buttons: [ボタンの名前], others: [そのほかの部品（種類:名前）] }。
+ * 隠しているウィンドウ（閉じてトレイにいるメインウィンドウ、内部用のウィンドウなど）は含まない
  */
 export function visibleWindows(pid) {
   const out = powershell(
     `
 $result = @()
 foreach ($w in $windows) {
-  $texts = @(); $buttons = @()
+  if (-not (Is-Shown $w)) { continue }
+  $texts = @(); $buttons = @(); $others = @()
   foreach ($e in $w.FindAll($Scope::Descendants, [System.Windows.Automation.Condition]::TrueCondition)) {
     $type = $e.Current.ControlType.ProgrammaticName
     if ($type -eq 'ControlType.Button') { $buttons += $e.Current.Name }
     elseif ($type -eq 'ControlType.Text') { $texts += $e.Current.Name }
+    else { $others += ($type + ':' + $e.Current.Name) }
   }
-  if ($w.Current.IsOffscreen) { continue }
-  $result += [pscustomobject]@{ name = $w.Current.Name; className = $w.Current.ClassName; texts = $texts; buttons = $buttons }
+  $result += [pscustomobject]@{ name = $w.Current.Name; className = $w.Current.ClassName; texts = $texts; buttons = $buttons; others = $others }
 }
 ConvertTo-Json -InputObject @($result) -Depth 4 -Compress
 `,

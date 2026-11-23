@@ -61,7 +61,9 @@ test(
       // 利用者が見るとおりに読む: 題名「Kiroscribe」のダイアログだけが出ている
       let windows = [];
       const deadline = Date.now() + 60_000;
-      while (!windows.some((w) => w.texts.some((text) => text.includes("Kiroscribe を起動できませんでした")))) {
+      // 文とボタンがそろうまで待つ（ダイアログは、出始めてから部品がそろうまでに少しかかる）
+      const ready = (w) => w.texts.some((text) => text.includes("Kiroscribe を起動できませんでした")) && w.buttons.length > 0;
+      while (!windows.some(ready)) {
         if (Date.now() >= deadline || child.exitCode !== null) {
           const appLog = fs.readFileSync(ctx.work.file("app-1.log"), "utf8").split("\n").slice(-30).join("\n");
           assert.fail(`起動の失敗のダイアログが出ません（終了コード ${child.exitCode}）: ${JSON.stringify(windows)}\n--- アプリのログ ---\n${appLog}`);
