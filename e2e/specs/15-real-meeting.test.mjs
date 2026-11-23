@@ -10,7 +10,7 @@
 // 環境変数 KIROSCRIBE_E2E_REAL_AUDIO=1 のときだけ走る。
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -49,12 +49,31 @@ function startFakeApp(ctx, exeName) {
   fs.mkdirSync(dir, { recursive: true });
   const exe = path.join(dir, exeName);
   fs.copyFileSync(HOLD_MIC, exe);
-  return spawn(exe, ["120"], { stdio: "ignore", windowsHide: true });
+  const log = fs.openSync(ctx.work.file(`${exeName}.log`), "a");
+  const child = spawn(exe, ["120"], { stdio: ["ignore", log, log], windowsHide: true });
+  fs.closeSync(log);
+  return child;
+}
+
+/** 調べるための材料: Windows が記録しているマイクの使用状況（ConsentStore）と、マイクを使うプログラムの出力 */
+function detectionDiagnostics(ctx) {
+  const key = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone";
+  const registry = spawnSync("reg", ["query", key, "/s"], { encoding: "utf8", windowsHide: true }).stdout ?? "";
+  const logs = fs
+    .readdirSync(ctx.work.dir)
+    .filter((name) => name.endsWith(".exe.log"))
+    .map((name) => `--- ${name} ---\n${fs.readFileSync(ctx.work.file(name), "utf8")}`);
+  return `--- マイクの使用状況（${key}） ---\n${registry.split("\n").slice(-60).join("\n")}\n${logs.join("\n")}`;
 }
 
 /** 会議が始まって、ポップアップとノートができ、録音が始まるまで待つ。できたノートのタイトルを返す */
 async function waitForMeetingStart(ctx, session, label) {
-  await ctx.app.popup({ timeout: 60_000 });
+  try {
+    await ctx.app.popup({ timeout: 60_000 });
+  } catch (error) {
+    error.message += `\n${detectionDiagnostics(ctx)}`;
+    throw error;
+  }
   const started = await session.waitForText(sel.popup, "自動で録音・文字起こしを始めました");
   assert.ok(started.includes(label), started);
   await ctx.app.main();
