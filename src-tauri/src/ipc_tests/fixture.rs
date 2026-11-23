@@ -307,6 +307,8 @@ pub(super) fn fixture() -> &'static Fixture {
             github_api_base_url: Some(format!("{server_uri}/api")),
             update_endpoint: Some(format!("{server_uri}/update/latest.json")),
             update_pubkey: None,
+            main_visible_at_start: false,
+            tray_unavailable: false,
             audio: core::AudioConfig {
                 mic: Some("speech".into()),
                 system: Some("speech".into()),

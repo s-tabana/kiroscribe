@@ -58,6 +58,11 @@ pub struct Config {
     pub update_endpoint: Option<String>,
     /// アプリ内更新の署名を確かめる公開鍵（`tauri.conf.json` の `plugins.updater.pubkey` と同じ形式）
     pub update_pubkey: Option<String>,
+    /// メインウィンドウを、起動時の処理を待たずに最初から表示する（製品では、起動時の処理が済んでから表示する）。
+    /// WebDriver でつながらないときの切り分け用
+    pub main_visible_at_start: bool,
+    /// タスクトレイのアイコンを作れなかったことにする（トレイが使えない環境でも起動することを確かめるため）
+    pub tray_unavailable: bool,
     pub audio: AudioConfig,
     pub timing: Timing,
 }

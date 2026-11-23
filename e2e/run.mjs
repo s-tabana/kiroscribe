@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // E2E テストを走らせる: npm run test:e2e [-- <テストのファイル>...]
 //
+// 0. 起動の確認（アプリを 1 回起動して、WebDriver で操作できること。できなければ、調べるための情報を出してやめる）
 // 1. 模擬サーバーのテスト（e2e/lib/*.test.mjs。アプリは起動しない）
 // 2. アプリを起動して操作するテスト（e2e/specs/*.test.mjs）。1 件ずつ順に走らせる
 //
@@ -12,7 +13,8 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { appBinary, ARTIFACTS_DIR, ROOT, tauriDriverBinary } from "./lib/app.mjs";
+import { appBinary, ARTIFACTS_DIR, Context, ROOT, tauriDriverBinary } from "./lib/app.mjs";
+import { describeTools, devToolsPorts, fileExcerpt, probeNativeDriver, processSnapshot } from "./lib/diagnostics.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const IS_LINUX = process.platform === "linux";
@@ -71,6 +73,65 @@ if (IS_LINUX && !process.env.KIROSCRIBE_E2E_WRAPPED) {
     const [command, ...args] = [...wrap, process.execPath, fileURLToPath(import.meta.url), ...process.argv.slice(2)];
     const result = spawnSync(command, args, { stdio: "inherit", env: { ...process.env, KIROSCRIBE_E2E_WRAPPED: "1" } });
     process.exit(result.status ?? 1);
+  }
+}
+
+// ---- 起動の確認 ----
+// アプリを 1 回起動して、WebDriver で操作できることを確かめる。できなければ、どのシナリオも動かないので、
+// 原因を調べるための情報をジョブのログに出して、ここでやめる（全部のシナリオが時間切れになるのを待たない）。
+
+/** 標準エラーへ、取りこぼしなく書く（このあとすぐ終了しても、最後まで出る） */
+function report(text) {
+  fs.writeSync(process.stderr.fd, `${text}\n`);
+}
+
+/**
+ * アプリを 1 回起動して、操作できるかを確かめる。できなければ、調べるための情報を出して false を返す。
+ * config は、アプリの設定（config.json）の上書き。
+ */
+async function preflight(label, config = {}) {
+  const context = await Context.create(label, { config });
+  // 起動を待っているあいだの様子（止まっているとき、何が動いているかを残す）
+  let during = null;
+  const watch = setTimeout(() => {
+    during = `${processSnapshot()}\n${devToolsPorts(context.work)}`;
+  }, 20_000);
+  const started = Date.now();
+  try {
+    const session = await context.launch();
+    const title = await session.title();
+    console.log(`${label}: アプリを起動して操作できました（${Date.now() - started} ミリ秒、タイトル「${title}」）`);
+    return true;
+  } catch (error) {
+    report(`\n===== ${label}: アプリを起動して WebDriver でつなぐことができませんでした（${Date.now() - started} ミリ秒） =====`);
+    report(`${error?.message ?? error}`);
+    report(`\n----- 起動を待っているあいだ（20 秒後）のプロセスとファイル -----\n${during ?? "（20 秒たつ前に失敗しました）"}`);
+    report(`\n----- 失敗した時点のプロセスとファイル -----\n${processSnapshot()}\n${devToolsPorts(context.work)}`);
+    report(`\n----- tauri-driver・ネイティブのドライバー・アプリの出力（app-1.log） -----\n${fileExcerpt(context.work.file("app-1.log"), { head: 100, tail: 300 })}`);
+    return false;
+  } finally {
+    clearTimeout(watch);
+    await context.dispose();
+  }
+}
+
+if (!process.env.KIROSCRIBE_E2E_SKIP_PREFLIGHT) {
+  console.log(describeTools());
+  if (!(await preflight("起動の確認"))) {
+    report("\nE2E テストを始められません。どのシナリオも動かないので、ここでやめます。以下は、原因を調べるための情報です。");
+    // 切り分け 1: ネイティブのドライバーを直接、詳しいログ付きで動かして、どこで止まるかを調べる（Windows）
+    const probe = await Context.create("起動の調査", { apiKeys: false });
+    try {
+      report(`\n----- ネイティブのドライバーを直接動かした結果 -----\n${await probeNativeDriver(probe.work)}`);
+    } catch (error) {
+      report(`（調査に失敗しました: ${error?.message ?? error}）`);
+    } finally {
+      await probe.dispose();
+    }
+    // 切り分け 2: メインウィンドウを最初から表示して起動すると、つながるか
+    const visible = await preflight("起動の確認（メインウィンドウを最初から表示）", { mainVisibleAtStart: true });
+    report(`\n切り分け: メインウィンドウを最初から表示して起動すると、${visible ? "つながりました" : "やはりつながりませんでした"}。`);
+    process.exit(1);
   }
 }
 

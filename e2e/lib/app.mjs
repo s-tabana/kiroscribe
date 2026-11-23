@@ -31,7 +31,7 @@ export function tauriDriverBinary() {
   return process.env.TAURI_DRIVER ?? path.join(os.homedir(), ".cargo", "bin", `tauri-driver${EXE}`);
 }
 
-function freePort() {
+export function freePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
     server.once("error", reject);
@@ -107,6 +107,35 @@ export class Workspace {
     fs.writeFileSync(path.join(this.dataDir, "secrets.json"), JSON.stringify(keys));
   }
 
+  /** マイクを開けなかったことにする（message が理由の文）。null で元に戻す */
+  setMicError(message) {
+    if (message) fs.writeFileSync(this.file("mic-error.txt"), message);
+    else fs.rmSync(this.file("mic-error.txt"), { force: true });
+  }
+
+  /**
+   * アプリのデータベースを直接開いて、fn に渡す（アプリを止めているあいだに、状態を作り込むために使う）。
+   * Node に組み込みの SQLite（node:sqlite）を使う。
+   */
+  async withDatabase(fn) {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(path.join(this.dataDir, "kiroscribe.db"));
+    try {
+      return fn(db);
+    } finally {
+      db.close();
+    }
+  }
+
+  /** アプリと tauri-driver のログ（起動した回ごとのファイルをつないだもの） */
+  logs() {
+    return fs
+      .readdirSync(this.dir)
+      .filter((name) => /^(app-\d+|second-instance)\.log$/.test(name))
+      .map((name) => fs.readFileSync(this.file(name), "utf8"))
+      .join("\n");
+  }
+
   /** いま会議中として扱う会議アプリ（"googleMeet"・"slackHuddle"・"zoom"・"teams"・"discord"）。null で会議を終える */
   setMeeting(app) {
     if (app) fs.writeFileSync(this.file("meeting.txt"), app);
@@ -173,7 +202,7 @@ export class App {
   }
 
   /** tauri-driver を起動し、その下でアプリを起動する。環境変数は tauri-driver → ネイティブのドライバー → アプリへ引き継がれる */
-  static async launch(workspace, { index = 1, waitForMain = true } = {}) {
+  static async launch(workspace, { index = 1, waitForMain = true, args: appArgs = [] } = {}) {
     const [port, nativePort] = [await freePort(), await freePort()];
     const logFile = workspace.file(`app-${index}.log`);
     const log = fs.openSync(logFile, "a");
@@ -199,7 +228,7 @@ export class App {
     let session;
     try {
       await Promise.race([waitForServer(baseUrl), failed]);
-      session = await Promise.race([Session.create(baseUrl, { application: appBinary() }), failed]);
+      session = await Promise.race([Session.create(baseUrl, { application: appBinary(), args: appArgs }), failed]);
     } catch (err) {
       driver.kill();
       throw new Error(
@@ -238,6 +267,23 @@ export class App {
       { timeout, message: "会議検出のポップアップが出る" },
     );
     return session;
+  }
+
+  /** いま開いているポップアップのウィンドウのハンドル（操作の対象はメインウィンドウに戻す） */
+  async popupHandles() {
+    const { session } = this;
+    const found = [];
+    for (const handle of await session.windowHandles()) {
+      if (handle === this.mainHandle) continue;
+      try {
+        await session.switchToWindow(handle);
+        if ((await session.url()).includes("#/popup")) found.push(handle);
+      } catch {
+        // 調べているあいだに閉じた
+      }
+    }
+    await session.switchToWindow(this.mainHandle);
+    return found;
   }
 
   /** ポップアップのウィンドウがあるか（操作の対象はメインウィンドウに戻す） */
@@ -295,7 +341,7 @@ export class App {
   }
 }
 
-function appEnvironment(workspace) {
+export function appEnvironment(workspace) {
   const env = { ...process.env, KIROSCRIBE_E2E_DIR: workspace.dir };
   // 模擬サーバー（127.0.0.1）への通信を、プロキシに回さない
   const noProxy = [process.env.NO_PROXY ?? process.env.no_proxy, "127.0.0.1", "localhost"].filter(Boolean).join(",");
@@ -356,26 +402,35 @@ export class Context {
     return new Context(name, server, workspace);
   }
 
-  /** アプリを起動して、メインウィンドウの WebDriver のセッションを返す */
+  /**
+   * アプリを起動して、メインウィンドウの WebDriver のセッションを返す。
+   * options: { args?: アプリに渡す引数（例: ["--autostart"]）, waitForMain?: false でメイン画面の表示を待たない }
+   */
   async launch(options) {
     this.launches += 1;
     this.app = await App.launch(this.work, { index: this.launches, ...options });
     return this.app.session;
   }
 
-  /** アプリを終了して、同じデータのまま起動し直す */
-  async relaunch() {
+  /** アプリを終了して、同じデータのまま起動し直す。options は launch と同じ（例: { args: ["--autostart"] }） */
+  async relaunch(options) {
+    await this.stop();
+    return this.launch(options);
+  }
+
+  /** アプリを終了する（データはそのまま残る） */
+  async stop() {
     await this.app.stop();
-    return this.launch();
+    this.app = null;
   }
 
   /**
    * 同じ作業フォルダ（＝同じデータ）で、アプリをもう 1 つ直接起動する。終了するまで待って、終了コードを返す。
    * 多重起動の防止が働けば、2 つ目はすぐに終了する。
    */
-  async launchSecondInstance({ timeout = 30_000 } = {}) {
+  async launchSecondInstance({ timeout = 30_000, args = [] } = {}) {
     const log = fs.openSync(this.work.file("second-instance.log"), "a");
-    const child = spawn(appBinary(), [], { env: appEnvironment(this.work), stdio: ["ignore", log, log] });
+    const child = spawn(appBinary(), args, { env: appEnvironment(this.work), stdio: ["ignore", log, log] });
     fs.closeSync(log);
     const exited = new Promise((resolve, reject) => {
       child.once("error", reject);

@@ -718,8 +718,9 @@ mod tests {
             let _: (String, String) = (exe, title);
         }
         // 調べるのは PC の中だけ: 通信・音声・画面の取り込みの部品を、この部品（meetings.rs）は使わない
-        let source = include_str!("meetings.rs");
-        let code = &source[..source.find("#[cfg(test)]\nmod tests").expect("テストの手前まで")];
+        // （Windows では改行が CRLF で取り出されることがあるので、そろえてから探す）
+        let source = include_str!("meetings.rs").replace("\r\n", "\n");
+        let code = &source[..source.find("\n#[cfg(test)]\nmod tests").expect("テストの手前まで")];
         for forbidden in ["reqwest", "crate::http", "crate::audio", "crate::transcribe", "crate::claude", "BitBlt", "PrintWindow"] {
             assert!(!code.contains(forbidden), "会議の検出が {forbidden} を使っている");
         }

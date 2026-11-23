@@ -48,6 +48,31 @@ pub fn prepare<R: Runtime>(context: &mut Context<R>) {
         core::update_endpoint(),
         core::config().update_pubkey.as_deref(),
     );
+    if core::config().main_visible_at_start {
+        for window in &mut context.config_mut().app.windows {
+            window.visible = true;
+        }
+    }
+    log_environment(dir);
+}
+
+/// WebDriver でつながらないときに原因を追えるよう、起動のしかたをログに残す。
+/// Windows のドライバー（msedgedriver）は、環境変数でウェブビューにデバッグ用のポートを開かせる。
+fn log_environment(dir: &Path) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    eprintln!("[e2e] 引数: {args:?}");
+    for name in [
+        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+        "WEBVIEW2_USER_DATA_FOLDER",
+        "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER",
+        "TAURI_WEBVIEW_AUTOMATION",
+    ] {
+        match std::env::var(name) {
+            Ok(value) => eprintln!("[e2e] 環境変数 {name}={value}"),
+            Err(_) => eprintln!("[e2e] 環境変数 {name} はありません"),
+        }
+    }
+    eprintln!("[e2e] データフォルダ: {}", core::data_dir(dir).display());
 }
 
 fn exit_with(message: &str) -> ! {
@@ -200,7 +225,12 @@ fn clipboard_plugin<R: Runtime>() -> TauriPlugin<R> {
 ///   利用者がウィンドウの「×」を押したのと同じ扱いになる（WebDriver からは「×」を押せないため）
 fn control_plugin<R: Runtime>() -> TauriPlugin<R> {
     PluginBuilder::new("e2e-control")
+        // 起動に失敗したときに、どこまで進んだかをログから追えるようにする
+        .on_page_load(|webview, payload| {
+            eprintln!("[e2e] ページの読み込み（{}）: {:?} {}", webview.label(), payload.event(), payload.url());
+        })
         .setup(|app, _api| {
+            eprintln!("[e2e] 起動しました（pid {}）", std::process::id());
             if let Some(path) = core::file(PID_FILE) {
                 std::fs::write(path, std::process::id().to_string())?;
             }
@@ -236,6 +266,11 @@ pub fn plugins<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
         .plugin(control_plugin())
 }
 
+/// 起動時の処理（`lib.rs` の setup）が終わったことを、ログに残す。
+pub fn log_setup_done(main_shown: bool) {
+    eprintln!("[e2e] 起動時の処理が終わりました（メインウィンドウ: {}）", if main_shown { "表示" } else { "非表示" });
+}
+
 /// 外部ブラウザは開かず、開こうとした URL を `opened-urls.log` に記録する。
 pub fn record_opened_url(url: &str) {
     append_line(OPENED_URLS_FILE, url);
@@ -264,6 +299,11 @@ pub fn tune_tracker(tracker: &mut MeetingTracker) {
 pub fn simulated_detection() -> Option<(Option<Detection>, bool)> {
     let meeting = core::simulated_meeting()?;
     Some((meeting.map(|app| Detection { app, via_browser: false }), meeting.is_some()))
+}
+
+/// タスクトレイのアイコンを作れなかったことにするか。
+pub fn tray_unavailable() -> bool {
+    core::config().tray_unavailable
 }
 
 /// 起動してから最初に更新を確認するまでの時間。指定がなければ `None`（本来の値を使う）。

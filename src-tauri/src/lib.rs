@@ -63,9 +63,12 @@ pub fn run() {
             // Windows の起動時に自動で起動したときは、ウィンドウを出さずトレイに常駐する。
             // 更新による再起動では更新前と同じ引数で起動されるので、引数ではなく更新の種類で決める
             let autostart = std::env::args().any(|a| a == AUTOSTART_ARG);
-            if update::show_window_on_launch(autostart, restart) {
+            let show = update::show_window_on_launch(autostart, restart);
+            if show {
                 background::show_main(&handle);
             }
+            #[cfg(feature = "e2e")]
+            e2e::log_setup_done(show);
             Ok(())
         })
         // メインウィンドウを閉じてもトレイに残す（会議の検出と録音を続けるため）

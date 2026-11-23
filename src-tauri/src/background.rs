@@ -202,6 +202,11 @@ pub fn quit(app: &AppHandle) {
 }
 
 pub fn setup_tray(app: &AppHandle, settings: &Settings) -> tauri::Result<()> {
+    // E2E テスト用のビルドでだけ、トレイを作れない環境のふりができる（src/e2e.rs）
+    #[cfg(feature = "e2e")]
+    if crate::e2e::tray_unavailable() {
+        return Err(tauri::Error::Io(std::io::Error::other("E2E: タスクトレイは使えないことにしています")));
+    }
     let open = MenuItem::with_id(app, "open", "Kiroscribe を開く", true, None::<&str>)?;
     let auto = CheckMenuItem::with_id(
         app,

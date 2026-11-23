@@ -4,6 +4,12 @@
 
 const ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf";
 const REQUEST_TIMEOUT_MS = 60_000;
+/**
+ * セッションを作る（アプリを起動する）ときの待ち時間。
+ * ネイティブのドライバーは、アプリの画面を見つけられないとき、自分の時間切れ（60 秒ほど）のあとで理由を返す。
+ * その理由を受け取れるよう、それより長く待つ
+ */
+const SESSION_TIMEOUT_MS = 150_000;
 
 /** キーボードの特殊キー（WebDriver の仕様で決まっている文字コード） */
 export const Key = {
@@ -59,9 +65,13 @@ export class Session {
 
   /** アプリを起動してセッションを作る。application はアプリの実行ファイルのパス */
   static async create(baseUrl, { application, args = [] }) {
-    const value = await request(baseUrl, "POST", "/session", {
-      capabilities: { alwaysMatch: { "tauri:options": { application, args } } },
-    });
+    const value = await request(
+      baseUrl,
+      "POST",
+      "/session",
+      { capabilities: { alwaysMatch: { "tauri:options": { application, args } } } },
+      SESSION_TIMEOUT_MS,
+    );
     return new Session(baseUrl, value.sessionId, value.capabilities);
   }
 
@@ -217,6 +227,16 @@ export class Session {
 
   // ---- ウィンドウ ----
 
+  /** いまのウィンドウの位置と大きさ（{ x, y, width, height }。枠を含む外側の大きさ） */
+  windowRect() {
+    return this.command("GET", "/window/rect");
+  }
+
+  /** いまのウィンドウの大きさを変える（利用者がウィンドウの端をドラッグしたときと同じく、OS に頼む） */
+  setWindowSize(width, height) {
+    return this.command("POST", "/window/rect", { width, height });
+  }
+
   windowHandles() {
     return this.command("GET", "/window/handles");
   }
@@ -290,13 +310,13 @@ export class Element {
   }
 }
 
-async function request(baseUrl, method, path, body) {
+export async function request(baseUrl, method, path, body, timeout = REQUEST_TIMEOUT_MS) {
   const response = await fetch(baseUrl + path, {
     method,
     headers: { "content-type": "application/json; charset=utf-8" },
     body: body === undefined ? undefined : JSON.stringify(body),
     // ドライバーが応答しなくなっても、テスト全体が止まらないようにする
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeout),
   });
   const text = await response.text();
   let parsed;
