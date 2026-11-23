@@ -105,6 +105,20 @@ npm run test:e2e:installer    # 入れる → 更新する → 起動し直す �
 
 このテストは、PC の利用者の場所（`%LOCALAPPDATA%\Kiroscribe`）に本当にインストールし、最後にアンインストールします。Kiroscribe が入っている PC では、置き換えないよう、始める前に止まります（使い捨ての環境でだけ `-- --replace-installed` を付けます）。
 
+### OS の画面と本物のデバイスを使うテスト（Windows）
+
+WebDriver が届かないところは、次の方法で確かめます。どれも CI の Windows で走ります。
+
+- **OS の画面（UI オートメーション）**: 起動に失敗したときのダイアログ、タスクトレイのアイコンと右クリックのメニュー、ポップアップのドラッグは、Windows の UI オートメーションで画面の部品を読み、本物のマウスの操作で押します（`e2e/lib/uia.mjs`。Windows PowerShell 5.1 から呼ぶ）。
+- **本物の音声デバイス**: `e2e.yml` の「本物の音声デバイス」のジョブは、仮想のオーディオケーブル（VB-CABLE）を入れ、Windows のプライバシー設定でマイクを許可してから、`KIROSCRIBE_E2E_REAL_AUDIO=1` で `e2e/specs/14-real-audio.test.mjs`・`15-real-meeting.test.mjs` を走らせます。模擬の音声を切って（`config.json` の `audio` を `null`）、既定の出力に鳴らした音が、マイク（自分）と PC の音声（相手）として WASAPI から届くことを確かめます。デバイスを無効にして、抜いたときの知らせも確かめます。
+- **会議の検出**: `config.json` の `realMeetingDetection` で模擬をやめ、マイクを開いたまま待つだけのプログラム（`cargo build -p kiroscribe-core --example hold_mic`）を `Zoom.exe` などの名前に写して動かしたり、Edge で「Meet - …」の題のページにマイクを使わせたりして、Windows の記録から検出できることを確かめます。
+- **会議の検出の記録**: 設定の「会議の検出の記録を保存…」で書き出した記録に `description` と `expected` を書き足して `crates/core/tests/fixtures/meetings/` に置くと、回帰テストになります（同じフォルダの README.md）。
+
+### インターネットの先の本物を使うテスト
+
+- **ヘルプの取得元**: `KIROSCRIBE_LIVE_TESTS=1 cargo test -p kiroscribe-core --test live_github` で、本物の GitHub から使い方とリリースノートを読めることを確かめます（CI の `ci.yml` で毎回）。
+- **AI の API**: `KIROSCRIBE_LIVE_OPENAI_KEY`・`KIROSCRIBE_LIVE_ANTHROPIC_KEY` に API キーを入れて `cargo test -p kiroscribe-core --test live_api -- --nocapture` を走らせると、設定画面で選べるすべてのモデルに、アプリと同じ送り方でごく短い問い合わせを送ります（料金がかかります。1 回で数円）。CI では `live-api.yml` が、リポジトリの Secret（同じ名前）を登録してあるときだけ、手動と週に 1 回走らせます。テスト専用のキーを作り、使える金額に上限を付けて登録してください。
+
 ### 画面と本体の取り決め
 
 コマンドの引数・戻り値やイベントの内容を変えたときは、見本（`src/test/ipc-contract.generated.ts`）を `KIROSCRIBE_UPDATE_IPC_CONTRACT=1 cargo test -p kiroscribe --features e2e ipc_contract` で書き直し、`npm run typecheck` が通るよう画面側の型を合わせます。
