@@ -79,7 +79,7 @@ pub fn run() {
                 background::show_main(&handle);
             }
             #[cfg(feature = "e2e")]
-            e2e::log_setup_done(show);
+            e2e::log_setup_done(&version, show);
             Ok(())
         })
         // メインウィンドウを閉じてもトレイに残す（会議の検出と録音を続けるため）

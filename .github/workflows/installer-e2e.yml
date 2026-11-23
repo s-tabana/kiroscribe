@@ -1,0 +1,89 @@
+# Kiroscribe のインストールと更新の通しのテスト（Windows）
+#
+# 利用者と同じインストーラ（NSIS）でアプリを入れ、アプリ内更新で新しい版（本物のインストーラ）に更新して、
+# アプリが終了 → インストーラが入れ替え → 起動し直す、までを確かめる（e2e/installer/）。
+# - インストーラは E2E テスト用のビルド（cargo の feature `e2e`）で、バージョンだけを変えて 2 つ作る。
+#   署名はテストのたびに作る使い捨ての鍵で行い、本番の鍵（Secret）は使わない
+#   （フォークからのプルリクエストでも同じ内容が動く）。
+# - リリースのワークフロー（release.yml）からも呼ばれ、これが通らなければ公開しない。
+# - アクションは、タグではなくコミットのハッシュで固定している（タグは後から付け替えられるため）。
+#   行末のコメントがそのバージョンで、Dependabot がハッシュとコメントをまとめて更新する。
+name: installer-e2e
+
+on:
+  push:
+    branches:
+      - main
+      - next
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+# ビルドに時間がかかるため、実行中のものは止めずに順番待ちにする。
+# リリースから呼ばれたときは、呼んだワークフローの名前（release）で分け、push での実行と待ち合わせない
+concurrency:
+  group: installer-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# このワークフローに渡すトークンは、リポジトリの読み取りだけ
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    name: インストールと更新（Windows）
+    runs-on: windows-latest
+    # ふだんは 30 分ほど（ビルド 2 回とテスト）。止まったときに待ち続けないようにする
+    timeout-minutes: 90
+    steps:
+      # persist-credentials: false … トークンを .git/config に残さない（後のステップで動く依存関係のコードから読めないようにする）
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      # このアクションにはバージョンのタグがないので、master ブランチのコミットで固定し、
+      # ツールチェーンは入力で指定する（@stable と書くのと同じ動き）
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: 依存関係のインストール
+        run: npm ci
+
+      # tauri-driver は、WebDriver の命令を msedgedriver へ中継する（e2e.yml と同じ）
+      - name: tauri-driver のインストール
+        run: cargo install tauri-driver --locked --version 2.1.0
+
+      # msedgedriver は、このマシンの WebView2 と同じバージョンでないと接続できない（e2e.yml と同じ）
+      - name: msedgedriver の取得
+        shell: pwsh
+        working-directory: ${{ runner.temp }}
+        run: |
+          cargo install --git https://github.com/chippers/msedgedriver-tool --rev 8c4b34f51b45f5cf08013366d703de464ab871d1 --locked
+          & "$HOME/.cargo/bin/msedgedriver-tool.exe"
+          if (-not (Test-Path msedgedriver.exe)) { throw "msedgedriver.exe を取得できませんでした" }
+          "KIROSCRIBE_E2E_NATIVE_DRIVER=$((Get-Item msedgedriver.exe).FullName)" >> $env:GITHUB_ENV
+
+      # 古い版と新しい版のインストーラ（E2E テスト用のビルド、使い捨ての鍵で署名）
+      - name: テスト用のインストーラのビルド
+        run: npm run build:e2e:installer
+
+      # 使い捨ての環境なので、インストール済みの Kiroscribe があっても置き換えてよい（ふつうはない）
+      - name: インストールと更新のテスト
+        run: npm run test:e2e:installer -- --replace-installed
+
+      - name: 失敗したテストのスクリーンショットとログを保存
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer-e2e-artifacts
+          path: e2e/artifacts/
+          if-no-files-found: ignore
+          retention-days: 14

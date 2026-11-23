@@ -3,6 +3,9 @@
 //!
 //! 実際のアプリを起動して操作するテストでは、外部の API・音声デバイス・OS の機能を本物のまま使えない。
 //! 何をどう差し替えるかは、環境変数 [`DIR_ENV`] が指す「作業フォルダ」で決める。テスト 1 件につき 1 つ用意する。
+//! 環境変数がなければ、起動の引数 `--kiroscribe-e2e-dir=<作業フォルダ>`（[`DIR_ARG`]）を見る。
+//! アプリ内更新のあと、インストーラはアプリを同じ引数で起動し直すが、環境変数は引き継がれないことがあるため
+//! （管理者として動いたインストーラは、デスクトップの利用者の環境でアプリを起動する）。
 //!
 //! ```text
 //! <作業フォルダ>/
@@ -15,6 +18,7 @@
 //!   clipboard.txt   アプリがクリップボードへ書こうとした文字
 //!   opened-urls.log アプリが外部ブラウザで開こうとした URL
 //!   app.pid         起動したアプリのプロセス ID
+//!   launches.log    起動の記録（1 行 1 件の JSON。バージョン・プロセス ID・引数・ウィンドウを出したか）
 //!   close-window.txt ここにウィンドウのラベル（main など）を書くと、利用者が「×」を押したのと同じように閉じる
 //!   resize-window.txt ここに「ラベル 幅 高さ」（例: main 400 300）を書くと、そのウィンドウの大きさを変える
 //!   window-size.json 大きさを変えたあとの、ウィンドウの大きさと、最小の大きさ（OS に問い合わせた値）
@@ -26,6 +30,7 @@
 pub mod audio;
 pub mod window;
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -37,6 +42,9 @@ use crate::retry::RetryPolicy;
 
 /// 作業フォルダを指す環境変数。
 pub const DIR_ENV: &str = "KIROSCRIBE_E2E_DIR";
+
+/// 環境変数がないときに作業フォルダを指す、起動の引数（`--kiroscribe-e2e-dir=<作業フォルダ>`）。
+pub const DIR_ARG: &str = "--kiroscribe-e2e-dir";
 
 const CONFIG_FILE: &str = "config.json";
 const DATA_DIR: &str = "data";
@@ -103,15 +111,28 @@ struct State {
 
 static STATE: OnceLock<Result<State, String>> = OnceLock::new();
 
+/// 作業フォルダの指定を探す。環境変数を先に見て、なければ起動の引数（`--kiroscribe-e2e-dir=<パス>`）を見る。
+pub fn find_dir(env: Option<OsString>, args: impl IntoIterator<Item = OsString>) -> Option<PathBuf> {
+    if let Some(dir) = env.filter(|dir| !dir.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    let prefix = format!("{DIR_ARG}=");
+    args.into_iter().find_map(|arg| {
+        let arg = arg.into_string().ok()?;
+        let dir = arg.strip_prefix(&prefix)?;
+        (!dir.is_empty()).then(|| PathBuf::from(dir))
+    })
+}
+
 fn load_from_env() -> Result<State, String> {
-    let Some(dir) = std::env::var_os(DIR_ENV).map(PathBuf::from) else {
+    let Some(dir) = find_dir(std::env::var_os(DIR_ENV), std::env::args_os().skip(1)) else {
         return Ok(State {
             dir: None,
             config: Config::default(),
         });
     };
     if !dir.is_absolute() {
-        return Err(format!("{DIR_ENV} は絶対パスで指定してください（現在: {}）", dir.display()));
+        return Err(format!("作業フォルダ（{DIR_ENV}）は絶対パスで指定してください（現在: {}）", dir.display()));
     }
     std::fs::create_dir_all(&dir).map_err(|err| format!("{} を作成できません: {err}", dir.display()))?;
     let path = dir.join(CONFIG_FILE);
@@ -249,6 +270,31 @@ pub fn parse_meeting(text: &str) -> Option<MeetingApp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn args(list: &[&str]) -> Vec<OsString> {
+        list.iter().map(OsString::from).collect()
+    }
+
+    /// 環境変数を先に使い、なければ引数を使う（アプリ内更新のあと、インストーラが引数だけを引き継いで起動し直すため）。
+    /// [UPD-018]
+    #[test]
+    fn the_work_directory_comes_from_the_environment_or_the_arguments() {
+        let work = if cfg!(windows) { r"C:\work\e2e" } else { "/work/e2e" };
+        let other = if cfg!(windows) { r"C:\other" } else { "/other" };
+        assert_eq!(find_dir(None, args(&[])), None);
+        assert_eq!(find_dir(None, args(&["--autostart"])), None);
+        assert_eq!(find_dir(Some(work.into()), args(&[])), Some(PathBuf::from(work)));
+        let from_arg = format!("--kiroscribe-e2e-dir={work}");
+        assert_eq!(find_dir(None, args(&["--autostart", &from_arg])), Some(PathBuf::from(work)));
+        assert_eq!(
+            find_dir(Some(other.into()), args(&[&from_arg])),
+            Some(PathBuf::from(other)),
+            "環境変数があれば、そちらを使う"
+        );
+        assert_eq!(find_dir(Some("".into()), args(&[&from_arg])), Some(PathBuf::from(work)), "空の環境変数は無いのと同じ");
+        assert_eq!(find_dir(None, args(&["--kiroscribe-e2e-dir="])), None);
+        assert_eq!(find_dir(None, args(&["--kiroscribe-e2e-dir", work])), None, "= でつないだ形だけを受け付ける");
+    }
 
     #[test]
     fn config_reads_only_what_is_written() {

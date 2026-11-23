@@ -196,6 +196,17 @@ export class Workspace {
     }
   }
 
+  /**
+   * アプリの起動の記録（古い順）。1 件は { version, pid, exe, args, mainShown, dirFromEnv }。
+   * アプリ内更新のあと、インストーラが起動し直したアプリ（WebDriver の外で動く）も記録する
+   */
+  launches() {
+    return (this.#read("launches.log") ?? "")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  }
+
   /** 起動しているアプリのプロセス ID（まだ起動していなければ null） */
   pid() {
     const text = this.#read("app.pid");
@@ -228,7 +239,7 @@ export class App {
   }
 
   /** tauri-driver を起動し、その下でアプリを起動する。環境変数は tauri-driver → ネイティブのドライバー → アプリへ引き継がれる */
-  static async launch(workspace, { index = 1, waitForMain = true, args: appArgs = [] } = {}) {
+  static async launch(workspace, { index = 1, waitForMain = true, args: appArgs = [], binary = appBinary() } = {}) {
     const [port, nativePort] = [await freePort(), await freePort()];
     const logFile = workspace.file(`app-${index}.log`);
     const log = fs.openSync(logFile, "a");
@@ -254,11 +265,11 @@ export class App {
     let session;
     try {
       await Promise.race([waitForServer(baseUrl), failed]);
-      session = await Promise.race([Session.create(baseUrl, { application: appBinary(), args: appArgs }), failed]);
+      session = await Promise.race([Session.create(baseUrl, { application: binary, args: appArgs }), failed]);
     } catch (err) {
       driver.kill();
       throw new Error(
-        `アプリを起動できませんでした: ${err.message}\n` +
+        `アプリ（${binary}）を起動できませんでした: ${err.message}\n` +
           `（Windows では、msedgedriver と WebView2 のバージョンが合っていないと、ここで止まることがあります）\n` +
           tail(logFile),
       );
@@ -441,7 +452,8 @@ export class Context {
 
   /**
    * アプリを起動して、メインウィンドウの WebDriver のセッションを返す。
-   * options: { args?: アプリに渡す引数（例: ["--autostart"]）, waitForMain?: false でメイン画面の表示を待たない }
+   * options: { args?: アプリに渡す引数（例: ["--autostart"]）, waitForMain?: false でメイン画面の表示を待たない,
+   *            binary?: 起動する実行ファイル（既定は appBinary()。インストールしたアプリを起動するときに指定する） }
    */
   async launch(options) {
     this.launches += 1;
@@ -465,9 +477,9 @@ export class Context {
    * 同じ作業フォルダ（＝同じデータ）で、アプリをもう 1 つ直接起動する。終了するまで待って、終了コードを返す。
    * 多重起動の防止が働けば、2 つ目はすぐに終了する。
    */
-  async launchSecondInstance({ timeout = 30_000, args = [] } = {}) {
+  async launchSecondInstance({ timeout = 30_000, args = [], binary = appBinary() } = {}) {
     const log = fs.openSync(this.work.file("second-instance.log"), "a");
-    const child = spawn(appBinary(), args, { env: appEnvironment(this.work), stdio: ["ignore", log, log] });
+    const child = spawn(binary, args, { env: appEnvironment(this.work), stdio: ["ignore", log, log] });
     fs.closeSync(log);
     const exited = new Promise((resolve, reject) => {
       child.once("error", reject);

@@ -27,6 +27,7 @@ const PID_FILE: &str = "app.pid";
 const CLOSE_WINDOW_FILE: &str = "close-window.txt";
 const RESIZE_WINDOW_FILE: &str = "resize-window.txt";
 const WINDOW_SIZE_FILE: &str = "window-size.json";
+const LAUNCHES_FILE: &str = "launches.log";
 
 /// 作業フォルダごとに変えるアプリの識別子の先頭。製品の識別子（`dev.kiroscribe.desktop`）とは重ならない。
 const IDENTIFIER_PREFIX: &str = "dev.kiroscribe.e2e";
@@ -498,9 +499,22 @@ pub fn plugins<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
         .plugin(control_plugin())
 }
 
-/// 起動時の処理（`lib.rs` の setup）が終わったことを、ログに残す。
-pub fn log_setup_done(main_shown: bool) {
+/// 起動時の処理（`lib.rs` の setup）が終わったことを、ログと起動の記録（`launches.log`）に残す。
+/// 起動の記録は、アプリ内更新でインストーラが起動し直したアプリ（WebDriver の外で動く）の様子を、テストから確かめるために使う。
+pub fn log_setup_done(version: &str, main_shown: bool) {
     eprintln!("[e2e] 起動時の処理が終わりました（メインウィンドウ: {}）", if main_shown { "表示" } else { "非表示" });
+    append_line(LAUNCHES_FILE, &launch_record(version, main_shown).to_string());
+}
+
+fn launch_record(version: &str, main_shown: bool) -> Value {
+    json!({
+        "version": version,
+        "pid": std::process::id(),
+        "exe": std::env::current_exe().map(|path| path.display().to_string()).unwrap_or_default(),
+        "args": std::env::args().skip(1).collect::<Vec<_>>(),
+        "mainShown": main_shown,
+        "dirFromEnv": std::env::var_os(core::DIR_ENV).is_some_and(|dir| !dir.is_empty()),
+    })
 }
 
 /// 外部ブラウザは開かず、開こうとした URL を `opened-urls.log` に記録する。

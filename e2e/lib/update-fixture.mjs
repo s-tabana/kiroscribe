@@ -53,12 +53,20 @@ export function publishUpdate(server, dir, { version, signedBy, notes = "- 模�
   const file = path.join(dir, fileName);
   const bytes = updatePayload();
   fs.writeFileSync(file, bytes);
-  const platform = { signature: signFile(signedBy, file, version), url: `${server.url}/update/files/${fileName}` };
+  publishFile(server, { version, fileName, bytes, signature: signFile(signedBy, file, version), notes });
+  return { fileName, bytes };
+}
+
+/**
+ * 署名済みのファイルを、そのまま模擬サーバーに更新として公開する（latest.json と、ファイルの配布）。
+ * signature は latest.json の signature に書く文字列（.sig ファイルの中身）。どの環境向けにも同じファイルを配る
+ */
+export function publishFile(server, { version, fileName, bytes, signature, notes = "- 模擬サーバーの更新" }) {
+  const platform = { signature, url: `${server.url}/update/files/${encodeURIComponent(fileName)}` };
   const platforms = {};
   for (const os of ["linux", "windows", "darwin"]) {
     for (const arch of ["x86_64", "aarch64", "i686", "armv7"]) platforms[`${os}-${arch}`] = platform;
   }
   server.update.files.set(fileName, bytes);
   server.update.manifest = { version, notes, pub_date: "2026-12-01T00:00:00Z", platforms };
-  return { fileName, bytes };
 }

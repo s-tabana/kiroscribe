@@ -41,8 +41,15 @@ env:
   SUMS_FILE: release-assets/SHA256SUMS.txt
 
 jobs:
+  # 本物のインストーラでの、インストールとアプリ内更新の通しのテスト（installer-e2e.yml と同じ内容）。
+  # 署名鍵は使わない（使い捨ての鍵で署名する）。これが通らなければ、下のビルドと公開は始まらない
+  installer-e2e:
+    name: インストールと更新のテスト
+    uses: ./.github/workflows/installer-e2e.yml
+
   release:
     name: Windows（署名付きインストーラ・リリース）
+    needs: installer-e2e
     runs-on: windows-latest
     # 署名鍵を使い、Release を公開するジョブ。Environment に承認者を設定すると、承認されるまで始まらない
     environment: release
