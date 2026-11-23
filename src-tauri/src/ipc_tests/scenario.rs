@@ -279,6 +279,17 @@ fn ipc_contract_matches_the_frontend() {
         .unwrap_err();
     assert!(refused.contains(".md / .markdown / .txt"), "{refused}");
 
+    // ---- 会議の検出の記録（このテストでは検出を模擬しているので、記録は空）[MTG-026] ----
+    let record_path = fixture.dir.join("会議の検出の記録.json");
+    let entries = s.ok("save_meeting_record", json!({ "path": record_path }));
+    assert_eq!(entries, json!(0));
+    let record: Value = serde_json::from_str(&std::fs::read_to_string(&record_path).unwrap()).unwrap();
+    assert_eq!(record["format"], kiroscribe_core::meeting_record::FORMAT);
+    let refused = s
+        .call("save_meeting_record", json!({ "path": fixture.dir.join("記録.txt") }))
+        .unwrap_err();
+    assert_eq!(refused, "保存できるのは .json ファイルだけです");
+
     // ---- 文字起こし API がキーを拒否したら、画面に知らせる ----
     *fixture.api.transcription_status.lock().unwrap() = Some(401);
     let second = s.ok("create_note", json!({}))["id"].as_str().unwrap().to_string();

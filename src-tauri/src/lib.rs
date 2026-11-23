@@ -137,6 +137,7 @@ fn register_commands(builder: tauri::Builder<Runtime>) -> tauri::Builder<Runtime
             background::close_popup,
             background::open_note_from_popup,
             background::open_settings_from_popup,
+            meeting_watch::save_meeting_record,
             help::get_guide,
             help::get_release_notes,
             help::open_external,

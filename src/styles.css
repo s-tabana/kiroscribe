@@ -843,6 +843,18 @@ kbd {
   margin: 14px 0 0;
 }
 
+.about-record {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  margin-top: 8px;
+}
+
+.about-record p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .link-button {
   display: inline-flex;
   align-items: center;

@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::Local;
+use kiroscribe_core::meeting_record::MeetingRecorder;
 use kiroscribe_core::meetings::{observe, MeetingApp, MeetingEvent, MeetingTracker};
 use kiroscribe_core::notes::{Note, NotePatch};
 use kiroscribe_core::secrets::{require_api_key, Provider};
@@ -13,6 +14,7 @@ use tauri::{Emitter, Manager};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 use crate::background::{show_popup, PopupPayload};
+use crate::error::{CmdResult, CommandError};
 use crate::recording::{start_for_note, stop_now, RecorderState};
 use crate::runtime::AppHandle;
 use crate::state::AppState;
@@ -27,6 +29,8 @@ pub struct MeetingState {
     current: Mutex<Option<MeetingApp>>,
     /// 処理を 1 つずつ順に進めるための列
     queue: Mutex<Option<UnboundedSender<Job>>>,
+    /// 検出の記録（メモリーの中だけ。利用者が「会議の検出の記録を保存」で書き出す）
+    record: Mutex<MeetingRecorder>,
 }
 
 /// 順に処理すること。
@@ -91,7 +95,17 @@ pub fn spawn(app: AppHandle) {
                 let simulated: Option<(Option<kiroscribe_core::meetings::Detection>, bool)> = None;
                 let event = match simulated {
                     Some((detected, continuing)) => tracker.tick(detected, continuing, now_ms()),
-                    None => tracker.observe(&observe(), own_exe.as_deref(), now_ms()),
+                    None => {
+                        let now = now_ms();
+                        let observation = observe();
+                        let event = tracker.observe(&observation, own_exe.as_deref(), now);
+                        app.state::<MeetingState>()
+                            .record
+                            .lock()
+                            .unwrap()
+                            .record(now, &observation, event);
+                        event
+                    }
                 };
                 if let Some(event) = event {
                     submit(&app, event);
@@ -260,4 +274,29 @@ async fn on_ended(app: &AppHandle, meeting: MeetingApp) {
             title,
         },
     );
+}
+
+/// 会議の検出の記録を、保存ダイアログで選ばれた場所に JSON で書き出す。書き出した記録の件数を返す。
+/// 誤って他の種類のファイルを上書きしないよう、拡張子は .json だけを受け付ける。
+#[tauri::command(async)]
+pub fn save_meeting_record(app: AppHandle, path: String) -> CmdResult<usize> {
+    let path = std::path::PathBuf::from(path);
+    let is_json = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+    if !is_json {
+        return Err(CommandError("保存できるのは .json ファイルだけです".into()));
+    }
+    let own_exe = std::env::current_exe().ok().map(|p| p.to_string_lossy().to_string());
+    let record = app
+        .state::<MeetingState>()
+        .record
+        .lock()
+        .unwrap()
+        .export(&app.package_info().version.to_string(), own_exe.as_deref());
+    let json = serde_json::to_string_pretty(&record)
+        .map_err(|e| CommandError(format!("記録を書き出せませんでした: {e}")))?;
+    std::fs::write(&path, json).map_err(|e| CommandError(format!("ファイルを保存できませんでした: {e}")))?;
+    Ok(record.entries.len())
 }

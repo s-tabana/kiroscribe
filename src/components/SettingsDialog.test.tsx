@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { SettingsDialog } from "./SettingsDialog";
+import { SettingsDialog, meetingRecordFileName } from "./SettingsDialog";
 import { BackendContext } from "../lib/backend";
 import { createMemoryBackend, type MemoryBackend } from "../lib/memoryBackend";
 import { DEFAULT_SETTINGS } from "../lib/types";
@@ -357,5 +357,41 @@ describe("SettingsDialog: API キーの欄", () => {
     expect(input).toHaveValue("");
     expect(screen.queryByDisplayValue(/sk-saved/)).not.toBeInTheDocument();
     expect(document.body.textContent).not.toContain("sk-saved");
+  });
+});
+
+describe("SettingsDialog: 会議の検出の記録", () => {
+  it("[MTG-026] ［会議の検出の記録を保存…］で、保存ダイアログから記録を保存し、件数と保存した場所を表示する", async () => {
+    const user = userEvent.setup();
+    const { backend } = setup();
+    const saveRecord = vi
+      .spyOn(backend, "saveMeetingRecord")
+      .mockResolvedValue({ path: "C:\\Users\\me\\record.json", entries: 12 });
+
+    await user.click(await screen.findByRole("button", { name: "会議の検出の記録を保存…" }));
+
+    expect(saveRecord).toHaveBeenCalledWith(expect.stringMatching(/^kiroscribe-meeting-record-\d{8}-\d{4}\.json$/));
+    expect(await screen.findByText("会議の検出の記録を保存しました（12 件）: C:\\Users\\me\\record.json")).toBeInTheDocument();
+    // 何が入るかを、押す前に読める
+    expect(screen.getByText(/マイクを使ったアプリの名前と、マイクを使っているブラウザのタブの名前だけ/)).toBeInTheDocument();
+  });
+
+  it("[MTG-026] 保存ダイアログを取り消したら何も表示せず、保存できなかったら理由を表示する", async () => {
+    const user = userEvent.setup();
+    const { backend } = setup();
+    const saveRecord = vi.spyOn(backend, "saveMeetingRecord").mockResolvedValue(null);
+    const button = await screen.findByRole("button", { name: "会議の検出の記録を保存…" });
+
+    await user.click(button);
+    await waitFor(() => expect(saveRecord).toHaveBeenCalledOnce());
+    expect(screen.queryByText(/会議の検出の記録を保存しました/)).not.toBeInTheDocument();
+
+    saveRecord.mockRejectedValue("ファイルを保存できませんでした: アクセスが拒否されました。 (os error 5)");
+    await user.click(button);
+    expect(await screen.findByText("ファイルを保存できませんでした: アクセスが拒否されました。 (os error 5)")).toBeInTheDocument();
+  });
+
+  it("[MTG-026] 記録のファイル名には、保存した日付と時刻を付ける", () => {
+    expect(meetingRecordFileName(new Date(2026, 10, 23, 9, 4))).toBe("kiroscribe-meeting-record-20261123-0904.json");
   });
 });

@@ -2,6 +2,9 @@
 // 会議中かどうかは、作業フォルダの meeting.txt でテストが決める（ctx.work.setMeeting）。
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { test } from "../lib/app.mjs";
 import { barButton, closeSettings, noteTitles, openSettings, pressBarButton, saveSettings, sel, settingsCheck } from "../lib/ui.mjs";
 import { byText } from "../lib/webdriver.mjs";
@@ -254,3 +257,34 @@ test("[MTG-015] 自動録音を始められなかったときは、理由を知�
   const relaunched = await ctx.relaunch();
   await relaunched.waitForText('nav[aria-label="ノート一覧"]', "まだノートがありません");
 });
+
+test(
+  "[MTG-025][MTG-026] 設定の［会議の検出の記録を保存…］で、検出の記録を JSON で保存できる",
+  { config: { realMeetingDetection: true } },
+  async (ctx) => {
+    const session = await ctx.launch();
+    // 検出を何回か調べるのを待つ（製品と同じく、調べた様子を記録している）
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    const out = `${ctx.work.dir}${process.platform === "win32" ? "\\" : "/"}meeting-record.json`;
+    ctx.work.answerDialogs({ savePath: out });
+    await openSettings(session);
+    await session.click(byText("button", "会議の検出の記録を保存…"));
+    const shown = await session.waitForText(sel.settingsDialog, /会議の検出の記録を保存しました（\d+ 件）/);
+    assert.ok(shown.includes(out), shown);
+    const saveDialog = ctx.work.dialogs().find((d) => d.type === "save");
+    assert.match(saveDialog.options.defaultPath, /^kiroscribe-meeting-record-\d{8}-\d{4}\.json$/);
+
+    const record = JSON.parse(fs.readFileSync(out, "utf8"));
+    assert.equal(record.format, "kiroscribe-meeting-record/1");
+    assert.ok(record.entries.length >= 1, JSON.stringify(record));
+    assert.match(record.ownExe, /^kiroscribe(\.exe)?$/);
+    // フルパス（利用者の名前を含む）は残さない
+    for (const entry of record.entries) {
+      for (const user of entry.observation.micUsers) {
+        assert.ok(!/[\\/]/.test(user.app), `アプリのフルパスが記録に入っている: ${user.app}`);
+      }
+    }
+    assert.ok(!fs.readFileSync(out, "utf8").includes(path.basename(os.homedir())), "利用者のフォルダの名前が記録に入っている");
+    await closeSettings(session);
+  },
+);
