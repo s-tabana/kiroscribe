@@ -137,12 +137,14 @@ mod tests {
             .collect()
     }
 
+    // [TRN-007]
     #[test]
     fn downmix_averages_channels() {
         assert_eq!(downmix(&[1.0, 0.0, 0.5, 0.5], 2), vec![0.5, 0.5]);
         assert_eq!(downmix(&[0.3, 0.1], 1), vec![0.3, 0.1]);
     }
 
+    // [REC-012]
     #[test]
     fn rms_of_sine_is_amplitude_over_sqrt2() {
         let s = sine(440.0, 16_000, 1.0, 0.5);
@@ -150,6 +152,7 @@ mod tests {
         assert_eq!(rms(&[]), 0.0);
     }
 
+    // [TRN-007]
     #[test]
     fn downsample_48k_keeps_length_and_level() {
         let input = sine(440.0, 48_000, 1.0, 0.5);
@@ -161,6 +164,7 @@ mod tests {
         assert!((level - 0.5 / 2f32.sqrt()).abs() < 0.02, "rms = {level}");
     }
 
+    // [TRN-007]
     #[test]
     fn downsample_44_1k_non_integer_ratio() {
         let input = sine(300.0, 44_100, 2.0, 0.4);
@@ -170,6 +174,7 @@ mod tests {
         assert!((rms(&out[200..]) - 0.4 / 2f32.sqrt()).abs() < 0.02);
     }
 
+    // [TRN-007]
     #[test]
     fn frequencies_above_new_nyquist_are_removed() {
         // 16kHz では表せない 11kHz は、そのままだと 5kHz に折り返して聞こえてしまう
@@ -179,6 +184,7 @@ mod tests {
         assert!(rms(&out[100..]) < 0.01, "rms = {}", rms(&out[100..]));
     }
 
+    // [TRN-007]
     #[test]
     fn speech_band_passes_through() {
         let input = sine(3_000.0, 48_000, 0.5, 0.5);
@@ -187,6 +193,7 @@ mod tests {
         assert!((rms(&out[100..]) - 0.5 / 2f32.sqrt()).abs() < 0.02);
     }
 
+    // [TRN-007]
     #[test]
     fn same_rate_is_passthrough() {
         let mut r = Resampler::new(16_000, 16_000);

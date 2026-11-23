@@ -16,6 +16,9 @@ interface Notice {
   openSettings?: boolean;
 }
 
+/** 入力が止まってから、本文まで含めた検索を問い合わせるまでの時間 */
+const SEARCH_DELAY_MS = 150;
+
 function toNotice(err: unknown): Notice {
   const message = errorMessage(err);
   return { message, openSettings: message.includes("API キー") };
@@ -29,6 +32,8 @@ export function App() {
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [query, setQuery] = useState("");
+  /** メモの本文・議事録・文字起こしまで含めた検索の結果（どの検索の文字に対するものかと、当てはまるノート） */
+  const [found, setFound] = useState<{ query: string; ids: Set<string> } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpTab, setHelpTab] = useState<HelpTab | null>(null);
   const updater = useUpdater(backend);
@@ -46,6 +51,28 @@ export function App() {
       .catch((err) => setNotice(toNotice(err)))
       .finally(() => setLoading(false));
   }, [backend]);
+
+  // 検索: タイトルとプレビューは画面でその場で絞り込み（Sidebar）、メモの本文・議事録・文字起こしは本体に問い合わせる。
+  // ノートの内容が変わったときも問い合わせ直す
+  useEffect(() => {
+    const wanted = query.trim();
+    if (!wanted) {
+      setFound(null);
+      return;
+    }
+    let active = true;
+    const timer = setTimeout(() => {
+      backend
+        .searchNotes(wanted)
+        .then((ids) => active && setFound({ query: wanted, ids: new Set(ids) }))
+        // 問い合わせできないときは、タイトルとプレビューでの絞り込みだけにする
+        .catch(() => undefined);
+    }, SEARCH_DELAY_MS);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [backend, query, notes]);
 
   // 録音中に起きた問題（文字起こしの失敗・デバイスのエラーなど）を知らせる
   useEffect(() => backend.onRecordingError((e) => setNotice(toNotice(e.message))), [backend]);
@@ -150,6 +177,7 @@ export function App() {
         selectedId={selectedId}
         recordingNoteId={recordingNoteId}
         query={query}
+        foundIds={found && found.query === query.trim() ? found.ids : null}
         isPreview={backend.isPreview}
         updater={updater}
         updatedVersion={updatedVersion}

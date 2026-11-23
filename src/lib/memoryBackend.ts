@@ -417,6 +417,21 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
     async listNotes() {
       return [...notes.values()].sort((a, b) => b.createdAt - a.createdAt).map(toSummary);
     },
+    async searchNotes(query) {
+      const needle = query.trim().toLowerCase();
+      if (!needle) return [];
+      const contains = (text: string | null) => !!text && text.toLowerCase().includes(needle);
+      return [...notes.values()]
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .filter(
+          (note) =>
+            contains(note.title) ||
+            contains(note.userNotes) ||
+            contains(note.enhancedNotes) ||
+            (segments.get(note.id) ?? []).some((segment) => contains(segment.text)),
+        )
+        .map((note) => note.id);
+    },
     async createNote() {
       const t = now();
       const note: Note = {
@@ -436,11 +451,14 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
     },
     async updateNote(id, patch) {
       const note = find(id);
+      // 空（空白だけ）の議事録を保存したら「議事録なし」に戻す（本体の update_note と同じ）
+      const clearsMinutes = patch.enhancedNotes !== undefined && !patch.enhancedNotes.trim();
       const updated: Note = {
         ...note,
         title: patch.title ?? note.title,
         userNotes: patch.userNotes ?? note.userNotes,
-        enhancedNotes: patch.enhancedNotes ?? note.enhancedNotes,
+        enhancedNotes: clearsMinutes ? null : (patch.enhancedNotes ?? note.enhancedNotes),
+        enhancedAt: clearsMinutes ? null : note.enhancedAt,
         updatedAt: Math.max(now(), note.updatedAt),
       };
       notes.set(id, updated);
@@ -490,9 +508,15 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       return { ...recording };
     },
     async startRecording(noteId) {
+      // 確かめる順と文は、本体（Rust 側の start_for_note）に合わせる
+      if (recording.state === "recording" || recording.state === "paused") {
+        if (recording.noteId === noteId) return { ...recording };
+        throw "別のノートで録音中です。先にそちらの録音を停止してください";
+      }
+      if (recording.state === "finishing") {
+        throw "前の録音の文字起こしを仕上げています。少し待ってから開始してください";
+      }
       find(noteId);
-      if (recording.noteId === noteId && recording.state !== "finishing") return { ...recording };
-      if (recording.state !== "idle") throw "別のノートで録音中です。先にそちらの録音を停止してください";
       if (!keys.openai && !options.demo) {
         throw "API キーが設定されていません（OpenAI）。設定画面から入力してください";
       }
@@ -506,6 +530,8 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       });
     },
     async pauseRecording() {
+      // 本体と同じく、録音していない（仕上げ中を含む）ときだけエラーにする。一時停止中の一時停止は何も変えない
+      if (recording.state === "paused") return setRecording({ ...recording });
       if (recording.state !== "recording") throw "録音していません";
       stopDemo();
       ["me", "them"].forEach((speaker) => levelEvents.emit({ speaker: speaker as Speaker, level: 0 }));
@@ -517,6 +543,8 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       });
     },
     async resumeRecording() {
+      // 録音中の再開は何も変えない（本体と同じ）
+      if (recording.state === "recording") return setRecording({ ...recording });
       if (recording.state !== "paused" || !recording.noteId) throw "録音していません";
       if (options.demo) startDemo(recording.noteId);
       return setRecording({ ...recording, state: "recording", runningSince: now() });

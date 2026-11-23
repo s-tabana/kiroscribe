@@ -23,11 +23,12 @@ export function isMain(metaUrl) {
 
 /**
  * `--名前 値` の形の引数を読む。
- * spec は { 名前: { required?: boolean } }。知らない引数・足りない引数は UsageError にする。
+ * spec は { 名前: { required?: boolean, flag?: boolean } }。flag を付けたものは、値を取らない `--名前` だけの引数
+ * （付いていれば true）。知らない引数・足りない引数は UsageError にする。
  */
 export function readOptions(argv, spec, usage) {
   const options = Object.fromEntries(
-    Object.keys(spec).map((name) => [name, { type: "string" }]),
+    Object.keys(spec).map((name) => [name, { type: spec[name].flag ? "boolean" : "string" }]),
   );
   let values;
   try {

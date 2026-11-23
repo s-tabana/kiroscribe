@@ -12,13 +12,15 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::error::{api_error_message, CoreError, Result};
+use crate::error::{api_error_message, redact_api_keys, CoreError, Result};
 use crate::retry::{is_retryable, RetryPolicy};
 use crate::sse::SseParser;
 
 pub const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/v1";
 pub const ANTHROPIC_VERSION: &str = "2026-10-21";
 pub const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
+/// 1 回の呼び出し（応答の終わりまで）を打ち切るまでの時間
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -135,7 +137,7 @@ impl ClaudeClient {
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
-            .timeout(Duration::from_secs(600))
+            .timeout(REQUEST_TIMEOUT)
             .json(&self.request_body(req));
         if supports_server_fallback(&self.model) {
             request = request.header("anthropic-beta", FALLBACK_BETA);
@@ -199,10 +201,9 @@ impl ClaudeClient {
                         return Err(CoreError::Api {
                             service: "Anthropic",
                             status,
-                            message: data["error"]["message"]
-                                .as_str()
-                                .unwrap_or(kind)
-                                .to_string(),
+                            message: redact_api_keys(
+                                data["error"]["message"].as_str().unwrap_or(kind),
+                            ),
                         });
                     }
                     _ => {} // ping・thinking などは使わない
@@ -303,6 +304,7 @@ mod tests {
             .set_body_string(body)
     }
 
+    // [MIN-014][MIN-015][SEC-004]
     #[tokio::test]
     async fn streams_text_and_sends_expected_request() {
         let server = MockServer::start().await;
@@ -337,6 +339,7 @@ mod tests {
         assert!(!result.fell_back);
     }
 
+    // [MIN-015]
     #[test]
     fn fallbacks_only_for_supported_models() {
         let haiku = ClaudeClient::new("k", "claude-haiku-5-5");
@@ -346,6 +349,7 @@ mod tests {
         assert_eq!(opus.request_body(&request())["fallbacks"], "default");
     }
 
+    // [MIN-015]
     #[tokio::test]
     async fn mid_stream_fallback_continues_text() {
         let server = MockServer::start().await;
@@ -371,6 +375,7 @@ mod tests {
         assert_eq!(result.model.as_deref(), Some("claude-opus-4-8"));
     }
 
+    // [MIN-015]
     #[tokio::test]
     async fn refusal_is_an_error() {
         let server = MockServer::start().await;
@@ -401,6 +406,7 @@ mod tests {
         }
     }
 
+    // [MIN-016]
     #[tokio::test]
     async fn retries_before_any_text() {
         let server = MockServer::start().await;
@@ -417,6 +423,7 @@ mod tests {
         assert_eq!(result.text, "OK");
     }
 
+    // [MIN-016][ERR-007]
     #[tokio::test]
     async fn error_event_after_text_is_not_retried() {
         let server = MockServer::start().await;
@@ -438,6 +445,7 @@ mod tests {
         assert!(matches!(err, CoreError::Api { status: 529, .. }));
     }
 
+    // [ERR-003]
     #[tokio::test]
     async fn auth_errors_surface_message() {
         let server = MockServer::start().await;
@@ -457,6 +465,7 @@ mod tests {
         assert!(err.to_string().contains("invalid x-api-key"));
     }
 
+    // [MIN-005][CHT-006]
     #[tokio::test]
     async fn cancel_stops_streaming() {
         let server = MockServer::start().await;

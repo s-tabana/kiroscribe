@@ -12,6 +12,8 @@ interface SidebarProps {
   /** 録音中（または仕上げ中）のノート */
   recordingNoteId: string | null;
   query: string;
+  /** メモの本文・議事録・文字起こしまで含めた検索で当てはまったノート（結果がまだなければ null） */
+  foundIds: ReadonlySet<string> | null;
   isPreview: boolean;
   /** アプリ内更新の状態（新しいバージョンがあれば下部に知らせを出す） */
   updater: Updater;
@@ -27,10 +29,10 @@ interface SidebarProps {
 }
 
 export function Sidebar(props: SidebarProps) {
-  const { notes, selectedId, query } = props;
+  const { notes, selectedId, query, foundIds } = props;
   const groups = useMemo(
-    () => groupByDay(notes.filter((n) => matchesQuery(n, query))),
-    [notes, query],
+    () => groupByDay(notes.filter((n) => matchesQuery(n, query) || (foundIds?.has(n.id) ?? false))),
+    [notes, query, foundIds],
   );
 
   return (

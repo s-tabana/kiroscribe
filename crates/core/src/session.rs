@@ -6,7 +6,7 @@ use std::thread::JoinHandle;
 
 use crate::audio::capture;
 use crate::error::{CoreError, Result};
-use crate::recorder::{run_transcription_worker, spawn_source_thread, RecorderSink, SourceProcessor};
+use crate::recorder::{run_transcription_worker_shared, spawn_source_thread, RecorderSink, SourceProcessor};
 use crate::retry::RetryPolicy;
 use crate::transcribe::Transcribe;
 use crate::transcript::Speaker;
@@ -66,6 +66,8 @@ impl RecordingSession {
             .map_err(|_| CoreError::Audio("録音スレッドが異常終了しました".into()))??;
 
         let paused = Arc::new(AtomicBool::new(false));
+        // API キーの誤りは、音源ごとではなく録音 1 回につき 1 回だけ知らせる
+        let auth_failed = Arc::new(AtomicBool::new(false));
         let mut processor_threads = Vec::new();
         let mut workers = Vec::new();
         let mut speakers = Vec::new();
@@ -79,11 +81,12 @@ impl RecordingSession {
                 sink.clone(),
             );
             processor_threads.push(spawn_source_thread(processor, source.frames));
-            workers.push(runtime.spawn(run_transcription_worker(
+            workers.push(runtime.spawn(run_transcription_worker_shared(
                 job_rx,
                 transcriber.clone(),
                 sink.clone(),
                 RetryPolicy::default(),
+                auth_failed.clone(),
             )));
             speakers.push(source.speaker);
         }

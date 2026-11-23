@@ -19,7 +19,8 @@ const REPOSITORY: &str = "s-tabana/kiroscribe";
 const BRANCH: &str = "main";
 const GUIDE_PATH: &str = "docs/guide.md";
 const RELEASES_PER_PAGE: u32 = 20;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// 1 回の取得を打ち切るまでの時間
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// アプリに同梱する版（ビルドした時点の内容）
 const BUNDLED_GUIDE: &str = include_str!("../../../docs/guide.md");
@@ -416,6 +417,7 @@ mod tests {
 
     // ---- 使い方 ----
 
+    // [HLP-003][HLP-005][HLP-014]
     #[tokio::test]
     async fn guide_is_fetched_and_cached() {
         let server = MockServer::start().await;
@@ -436,6 +438,7 @@ mod tests {
         assert!(db.get_value(GUIDE_CACHE_KEY).unwrap().unwrap().contains("最新版"));
     }
 
+    // [HLP-005]
     #[tokio::test]
     async fn guide_falls_back_to_cache_when_fetch_fails() {
         let server = MockServer::start().await;
@@ -454,6 +457,7 @@ mod tests {
         assert_eq!(guide.fetched_at, Some(1_000), "前回取得した時刻を返す");
     }
 
+    // [HLP-005]
     #[tokio::test]
     async fn guide_falls_back_to_bundled_copy_without_cache() {
         let server = MockServer::start().await;
@@ -471,6 +475,7 @@ mod tests {
         assert_eq!(db.get_value(GUIDE_CACHE_KEY).unwrap(), None, "失敗は保存しない");
     }
 
+    // [HLP-005]
     #[tokio::test]
     async fn guide_fetch_failure_without_server_uses_bundled_copy() {
         // 接続できない（オフライン相当）
@@ -480,6 +485,7 @@ mod tests {
         assert_eq!(guide.source, ContentSource::Bundled);
     }
 
+    // [HLP-005]
     #[tokio::test]
     async fn empty_guide_is_treated_as_failure() {
         let server = MockServer::start().await;
@@ -487,6 +493,7 @@ mod tests {
         assert!(client(&server).fetch_guide().await.is_err());
     }
 
+    // [HLP-006]
     #[test]
     fn cache_from_another_app_version_is_not_used() {
         // 更新した直後は、同梱版のほうが古いキャッシュより新しい
@@ -503,6 +510,7 @@ mod tests {
         assert_eq!(resolve_releases(&db, "0.3.0", offline(), 2_000).source, ContentSource::Bundled);
     }
 
+    // [HLP-006]
     #[test]
     fn broken_cache_is_ignored() {
         let db = Database::open_in_memory().unwrap();
@@ -513,6 +521,7 @@ mod tests {
 
     // ---- リリースノート ----
 
+    // [HLP-004][HLP-014]
     #[tokio::test]
     async fn releases_are_fetched_without_drafts_and_prereleases() {
         let server = MockServer::start().await;
@@ -558,6 +567,7 @@ mod tests {
         assert!(user_agent.starts_with("Kiroscribe/"), "{user_agent}");
     }
 
+    // [HLP-005]
     #[tokio::test]
     async fn invalid_release_json_falls_back_to_cache_then_bundled() {
         let server = MockServer::start().await;
@@ -585,6 +595,7 @@ mod tests {
         assert_eq!(notes.releases.len(), 2);
     }
 
+    // [HLP-005]
     #[tokio::test]
     async fn missing_repository_or_rate_limit_falls_back_to_bundled_changelog() {
         let db = Database::open_in_memory().unwrap();
@@ -603,6 +614,7 @@ mod tests {
         }
     }
 
+    // [HLP-005]
     #[tokio::test]
     async fn empty_release_list_falls_back() {
         // リリースがまだ 1 つもない（または下書きだけ）なら、同梱の CHANGELOG を見せる
@@ -616,6 +628,7 @@ mod tests {
 
     // ---- CHANGELOG の分割 ----
 
+    // [HLP-009]
     #[test]
     fn changelog_is_split_by_version_sections() {
         let changelog = "\
@@ -673,6 +686,7 @@ mod tests {
         assert!(parse_changelog("# 変更履歴\n\nまだありません\n").is_empty());
     }
 
+    // [HLP-010]
     #[test]
     fn bundled_changelog_has_a_section_for_this_version() {
         // リリースノートで「現在のバージョン」を示せるよう、リリース前に CHANGELOG へ節を足しておく
@@ -687,6 +701,7 @@ mod tests {
 
     // ---- 外部リンク ----
 
+    // [SEC-008]
     #[test]
     fn only_https_urls_may_be_opened() {
         assert_eq!(

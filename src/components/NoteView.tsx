@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorMessage, useBackend } from "../lib/backend";
+import { currentEnhanceRun, startEnhanceRun } from "../lib/enhanceRuns";
 import type { Note, NotePatch, RecordingStatus, Segment } from "../lib/types";
 import { fullDateLabel } from "../lib/dates";
 import { UNTITLED } from "../lib/notes";
@@ -70,6 +71,8 @@ export function NoteView({
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   const onChangedRef = useRef(onChanged);
   onChangedRef.current = onChanged;
+  const minutesRef = useRef(minutes);
+  minutesRef.current = minutes;
 
   const status = recording.status;
   const recordingHere = status.noteId === noteId && status.state !== "idle";
@@ -84,8 +87,12 @@ export function NoteView({
         setNote(loaded);
         setTitle(loaded.title);
         setUserNotes(loaded.userNotes);
-        setMinutes(loaded.enhancedNotes);
-        setView(loaded.enhancedNotes !== null ? "minutes" : "notes");
+        // 中身のない議事録は「議事録なし」として扱う
+        const loadedMinutes = loaded.enhancedNotes?.trim() ? loaded.enhancedNotes : null;
+        setMinutes(loadedMinutes);
+        // 議事録の作成中に戻ってきたときは、議事録（作成中）の表示のままにする
+        const enhancing = currentEnhanceRun(backend, noteId) !== null;
+        setView(loadedMinutes !== null || enhancing ? "minutes" : "notes");
       })
       .catch((err) => !cancelled && setError(errorMessage(err)));
     return () => {
@@ -117,14 +124,43 @@ export function NoteView({
     };
   }, [backend, noteId]);
 
-  // 議事録の生成中は、届いた文字を表示に足していく
+  // 議事録の生成中は、届いた文字を表示に足していく（この画面が生成中の表示をしているときだけ）
   useEffect(
     () =>
       backend.onEnhanceDelta((e) => {
-        if (e.noteId === noteId) setStreaming((prev) => (prev ?? "") + e.delta);
+        if (e.noteId === noteId) setStreaming((prev) => (prev === null ? prev : prev + e.delta));
       }),
     [backend, noteId],
   );
+
+  // 議事録の作成中に別のノートへ移って、戻ってきたとき: 作成は裏で続いているので、それまでに届いた文章とともに
+  // 作成中の表示に戻し、終わったら結果を反映する（終わってから戻ったときは、上の読み込みで完成した議事録が出る）
+  useEffect(() => {
+    const run = currentEnhanceRun(backend, noteId);
+    if (!run) return;
+    let active = true;
+    setStreaming(run.text);
+    setView("minutes");
+    run.done
+      .then(
+        (saved) => {
+          if (!active) return;
+          setNote(saved);
+          setMinutes(saved.enhancedNotes);
+          setTitle(saved.title);
+        },
+        // 失敗の知らせは、作成を始めたときの処理（generate）が出す
+        () => {
+          if (active && minutesRef.current === null) setView("notes");
+        },
+      )
+      .finally(() => {
+        if (active) setStreaming(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [backend, noteId]);
 
   // このノートで録音が始まったら文字起こしを開く
   useEffect(() => {
@@ -171,7 +207,8 @@ export function NoteView({
     setView("minutes");
     setStreaming("");
     try {
-      const saved = await backend.enhanceNote(noteId);
+      // 作成はこの画面を離れても続く。結果は、戻ってきた画面からも受け取れるようにしておく
+      const saved = await startEnhanceRun(backend, noteId).done;
       setNote(saved);
       setMinutes(saved.enhancedNotes);
       setTitle(saved.title);
@@ -290,7 +327,14 @@ export function NoteView({
                 queue({ enhancedNotes: value });
               }}
               onToggleEdit={() => {
-                if (editingMinutes) void flush();
+                if (editingMinutes) {
+                  void flush();
+                  // 空（空白だけ）にして編集を終えたら「議事録なし」に戻す（保存の側でも議事録を消す）
+                  if (!minutes?.trim()) {
+                    setMinutes(null);
+                    setView("notes");
+                  }
+                }
                 setEditingMinutes((e) => !e);
               }}
               onRegenerate={() => void generate()}

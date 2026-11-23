@@ -89,6 +89,7 @@ mod tests {
         }
     }
 
+    // [ERR-006]
     #[test]
     fn delays_grow_exponentially_up_to_max() {
         let p = RetryPolicy::default();
@@ -96,6 +97,7 @@ mod tests {
         assert_eq!(secs, [1, 2, 4, 8, 8]);
     }
 
+    // [ERR-006][MIN-016]
     #[test]
     fn retryable_classification() {
         assert!(is_retryable(&CoreError::Http("timeout".into())));
@@ -106,6 +108,7 @@ mod tests {
         assert!(!is_retryable(&CoreError::MissingApiKey("OpenAI")));
     }
 
+    // [ERR-006]
     #[tokio::test]
     async fn succeeds_after_transient_failures() {
         let calls = AtomicU32::new(0);
@@ -128,6 +131,7 @@ mod tests {
         assert_eq!(retries, [1, 2]);
     }
 
+    // [ERR-006]
     #[tokio::test]
     async fn gives_up_after_max_attempts() {
         let calls = AtomicU32::new(0);
@@ -144,6 +148,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
+    // [ERR-006]
     #[tokio::test]
     async fn does_not_retry_permanent_errors() {
         let calls = AtomicU32::new(0);

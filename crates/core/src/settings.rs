@@ -126,12 +126,14 @@ impl Database {
 mod tests {
     use super::*;
 
+    // [SET-001]
     #[test]
     fn defaults_when_nothing_saved() {
         let db = Database::open_in_memory().unwrap();
         assert_eq!(db.load_settings().unwrap(), Settings::default());
     }
 
+    // [UPD-019][IPC-008]
     #[test]
     fn auto_update_is_off_by_default_and_can_be_turned_on() {
         assert!(!Settings::default().auto_update);
@@ -157,6 +159,7 @@ mod tests {
         assert!(!db.load_settings().unwrap().auto_update);
     }
 
+    // [SET-003][SET-004]
     #[test]
     fn save_and_load_roundtrip() {
         let db = Database::open_in_memory().unwrap();
@@ -172,6 +175,7 @@ mod tests {
         assert_eq!(db.load_settings().unwrap(), saved);
     }
 
+    // [SET-003]
     #[test]
     fn blank_values_fall_back_to_defaults() {
         let db = Database::open_in_memory().unwrap();
@@ -186,6 +190,7 @@ mod tests {
         assert_eq!(saved.input_device_id, None);
     }
 
+    // [SET-004][UPD-019]
     #[test]
     fn missing_fields_in_stored_json_use_defaults() {
         let db = Database::open_in_memory().unwrap();

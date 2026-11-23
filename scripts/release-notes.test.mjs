@@ -29,32 +29,32 @@ const CHANGELOG = `# 変更履歴
 - 最初のリリース
 `;
 
-test("指定したバージョンの節の本文だけを取り出す（見出し行は含めない）", () => {
+test("[REL-004] 指定したバージョンの節の本文だけを取り出す（見出し行は含めない）", () => {
   assert.equal(
     extractReleaseNotes(CHANGELOG, "0.2.0"),
     "### 新しい機能\n\n- **会議の自動検出**: 自動で録音します\n- アプリ内の更新\n\n### お知らせ\n\n- 名前を変えました\n",
   );
 });
 
-test("最後の節はファイルの終わりまでを取り出す", () => {
+test("[REL-004] 最後の節はファイルの終わりまでを取り出す", () => {
   assert.equal(extractReleaseNotes(CHANGELOG, "0.1.0"), "- 最初のリリース\n");
 });
 
-test("バージョンの先頭の v は無視する", () => {
+test("[REL-004] バージョンの先頭の v は無視する", () => {
   assert.equal(extractReleaseNotes(CHANGELOG, "v0.1.0"), "- 最初のリリース\n");
 });
 
-test("改行が CRLF でも同じ結果になる（Windows でのチェックアウト）", () => {
+test("[REL-004] 改行が CRLF でも同じ結果になる（Windows でのチェックアウト）", () => {
   const crlf = CHANGELOG.replaceAll("\n", "\r\n");
   assert.equal(extractReleaseNotes(crlf, "0.2.0"), extractReleaseNotes(CHANGELOG, "0.2.0"));
   assert.ok(!extractReleaseNotes(crlf, "0.2.0").includes("\r"));
 });
 
-test("節がなければ、見つかった節を添えてエラーにする", () => {
+test("[REL-004] 節がなければ、見つかった節を添えてエラーにする", () => {
   assert.throws(() => extractReleaseNotes(CHANGELOG, "0.3.0"), /0\.3\.0.*節がありません.*0\.2\.0、0\.1\.0/s);
 });
 
-test("前方一致では選ばない（0.2 や 0.2.0-beta.1 は 0.2.0 と別物）", () => {
+test("[REL-004] 前方一致では選ばない（0.2 や 0.2.0-beta.1 は 0.2.0 と別物）", () => {
   assert.throws(() => extractReleaseNotes(CHANGELOG, "0.2"), /節がありません/);
   assert.throws(() => extractReleaseNotes(CHANGELOG, "0.2.0-beta.1"), /節がありません/);
   const pre = "## 0.2.0-beta.1 (2026-11-01)\n\n- ベータ\n\n## 0.2.0 (2026-11-21)\n\n- 正式版\n";
@@ -62,19 +62,19 @@ test("前方一致では選ばない（0.2 や 0.2.0-beta.1 は 0.2.0 と別物�
   assert.equal(extractReleaseNotes(pre, "0.2.0-beta.1"), "- ベータ\n");
 });
 
-test("本文が空の節はエラーにする", () => {
+test("[REL-004] 本文が空の節はエラーにする", () => {
   const empty = "## 0.3.0 (2026-12-01)\n\n## 0.2.0 (2026-11-21)\n\n- 何か\n";
   assert.throws(() => extractReleaseNotes(empty, "0.3.0"), /本文がありません/);
 });
 
-test("日付なし・角かっこ付きの見出しも読める", () => {
+test("[REL-004] 日付なし・角かっこ付きの見出しも読める", () => {
   const other = "## [1.0.0] - 2027-01-01\n\n- 一\n\n## v0.9.0\n\n- 二\n";
   assert.equal(extractReleaseNotes(other, "1.0.0"), "- 一\n");
   assert.equal(extractReleaseNotes(other, "0.9.0"), "- 二\n");
   assert.deepEqual(listVersions(other), ["1.0.0", "0.9.0"]);
 });
 
-test("コードブロックの中の「## 」は節の区切りにしない", () => {
+test("[REL-004] コードブロックの中の「## 」は節の区切りにしない", () => {
   const withCode = "## 0.2.0 (2026-11-21)\n\n```md\n## 見出しの例\n```\n\n- 続き\n\n## 0.1.0 (2026-11-20)\n\n- 前\n";
   assert.equal(
     extractReleaseNotes(withCode, "0.2.0"),
@@ -82,7 +82,7 @@ test("コードブロックの中の「## 」は節の区切りにしない", ()
   );
 });
 
-test("コマンドとして実行すると、本文を標準出力かファイルに書く", () => {
+test("[REL-004] コマンドとして実行すると、本文を標準出力かファイルに書く", () => {
   const dir = mkdtempSync(join(tmpdir(), "kiroscribe-notes-"));
   try {
     const changelog = join(dir, "CHANGELOG.md");
@@ -107,7 +107,7 @@ test("コマンドとして実行すると、本文を標準出力かファイ�
   }
 });
 
-test("コマンドとして実行し、節がなければ終了コード 1 で何も出力しない", () => {
+test("[REL-004] コマンドとして実行し、節がなければ終了コード 1 で何も出力しない", () => {
   const dir = mkdtempSync(join(tmpdir(), "kiroscribe-notes-"));
   try {
     const changelog = join(dir, "CHANGELOG.md");
@@ -124,7 +124,7 @@ test("コマンドとして実行し、節がなければ終了コード 1 で�
   }
 });
 
-test("引数が足りなければ、使い方を添えて終了コード 1 にする", () => {
+test("[REL-004] 引数が足りなければ、使い方を添えて終了コード 1 にする", () => {
   const result = spawnSync(process.execPath, [SCRIPT], {
     encoding: "utf8",
     env: { ...process.env, GITHUB_ACTIONS: "" },
@@ -134,7 +134,7 @@ test("引数が足りなければ、使い方を添えて終了コード 1 に�
   assert.match(result.stderr, /使い方/);
 });
 
-test("GitHub Actions の中では、エラーを注釈（::error::）として出す", () => {
+test("[REL-004] GitHub Actions の中では、エラーを注釈（::error::）として出す", () => {
   const result = spawnSync(process.execPath, [SCRIPT], {
     encoding: "utf8",
     env: { ...process.env, GITHUB_ACTIONS: "true" },

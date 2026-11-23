@@ -106,6 +106,7 @@ impl Database {
 mod tests {
     use super::*;
 
+    // [TRN-011]
     #[test]
     fn segments_are_ordered_by_start_time_across_speakers() {
         let db = Database::open_in_memory().unwrap();
@@ -122,6 +123,7 @@ mod tests {
         assert_eq!(segments[1].speaker, Speaker::Me);
     }
 
+    // [NOTE-015]
     #[test]
     fn segments_are_deleted_with_note() {
         let db = Database::open_in_memory().unwrap();
@@ -131,6 +133,7 @@ mod tests {
         assert!(db.list_segments(&note.id).unwrap().is_empty());
     }
 
+    // [IPC-004]
     #[test]
     fn speaker_serializes_lowercase() {
         assert_eq!(serde_json::to_string(&Speaker::Them).unwrap(), "\"them\"");

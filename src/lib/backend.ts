@@ -38,6 +38,11 @@ export interface Backend {
   /** プレビュー実装かどうか（画面に注記を出すため） */
   readonly isPreview: boolean;
   listNotes(): Promise<NoteSummary[]>;
+  /**
+   * 検索の文字を、タイトル・自分のメモ・議事録・文字起こしのどれかに含むノートの ID を返す
+   * （大文字と小文字は区別しない）
+   */
+  searchNotes(query: string): Promise<string[]>;
   createNote(): Promise<Note>;
   getNote(id: string): Promise<Note>;
   updateNote(id: string, patch: NotePatch): Promise<Note>;
@@ -135,6 +140,7 @@ export function createTauriBackend(): Backend {
   return {
     isPreview: false,
     listNotes: () => invoke("list_notes"),
+    searchNotes: (query) => invoke("search_notes", { query }),
     createNote: () => invoke("create_note"),
     getNote: (id) => invoke("get_note", { id }),
     updateNote: (id, patch) => invoke("update_note", { id, patch }),
@@ -168,7 +174,11 @@ export function createTauriBackend(): Backend {
     async saveMarkdown(noteId, options, fileName) {
       const path = await save({
         defaultPath: fileName,
-        filters: [{ name: "Markdown", extensions: ["md"] }],
+        // 本体（save_markdown）が受け付ける拡張子は .md・.markdown・.txt
+        filters: [
+          { name: "Markdown", extensions: ["md"] },
+          { name: "テキスト", extensions: ["txt"] },
+        ],
       });
       if (!path) return null;
       await invoke("save_markdown", { noteId, options, path });

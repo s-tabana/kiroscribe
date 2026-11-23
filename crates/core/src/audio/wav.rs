@@ -28,6 +28,7 @@ pub fn encode_wav_mono_i16(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    // [TRN-008]
     #[test]
     fn header_and_samples() {
         let wav = encode_wav_mono_i16(&[0.0, 1.0, -1.0, 2.0], 16_000);

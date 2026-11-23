@@ -30,28 +30,28 @@ function makeRepo({ pkg = "0.2.0", cargo = "0.2.0", tauri = "../package.json" } 
   return root;
 }
 
-test("3 か所のバージョンが同じなら、そのバージョンを返す", () => {
+test("[REL-003][UPD-017] 3 か所のバージョンが同じなら、そのバージョンを返す", () => {
   assert.equal(checkVersion({ root: makeRepo() }), "0.2.0");
 });
 
-test("タグが「v + バージョン」なら通す", () => {
+test("[REL-003] タグが「v + バージョン」なら通す", () => {
   assert.equal(checkVersion({ root: makeRepo(), tag: "v0.2.0" }), "0.2.0");
 });
 
-test("タグとバージョンが違えばエラーにする", () => {
+test("[REL-003] タグとバージョンが違えばエラーにする", () => {
   const root = makeRepo();
   assert.throws(() => checkVersion({ root, tag: "v0.3.0" }), /タグは v0\.3\.0 です（v0\.2\.0 のはず）/);
   assert.throws(() => checkVersion({ root, tag: "0.2.0" }), /タグは 0\.2\.0 です/);
 });
 
-test("Cargo.toml を上げ忘れていればエラーにする", () => {
+test("[REL-003] Cargo.toml を上げ忘れていればエラーにする", () => {
   assert.throws(
     () => checkVersion({ root: makeRepo({ cargo: "0.1.0" }) }),
     /Cargo\.toml のバージョンは 0\.1\.0 です/,
   );
 });
 
-test("tauri.conf.json にバージョンを直接書いた場合も比べる", () => {
+test("[REL-003] tauri.conf.json にバージョンを直接書いた場合も比べる", () => {
   assert.equal(checkVersion({ root: makeRepo({ tauri: "0.2.0" }) }), "0.2.0");
   assert.throws(
     () => checkVersion({ root: makeRepo({ tauri: "0.1.0" }) }),
@@ -59,11 +59,11 @@ test("tauri.conf.json にバージョンを直接書いた場合も比べる", (
   );
 });
 
-test("tauri.conf.json にバージョンがなければ、Cargo.toml との一致だけを見る", () => {
+test("[REL-003] tauri.conf.json にバージョンがなければ、Cargo.toml との一致だけを見る", () => {
   assert.equal(checkVersion({ root: makeRepo({ tauri: null }) }), "0.2.0");
 });
 
-test("食い違いはまとめて知らせる", () => {
+test("[REL-003] 食い違いはまとめて知らせる", () => {
   const root = makeRepo({ cargo: "0.1.0", tauri: "0.1.5" });
   assert.throws(
     () => checkVersion({ root, tag: "v9.9.9" }),
@@ -74,7 +74,7 @@ test("食い違いはまとめて知らせる", () => {
   );
 });
 
-test("Cargo.toml は [workspace.package] の version だけを読む（依存の version は読まない）", () => {
+test("[REL-003] Cargo.toml は [workspace.package] の version だけを読む（依存の version は読まない）", () => {
   assert.equal(
     cargoVersion('[workspace.dependencies]\nserde = { version = "1" }\n\n[workspace.package]\r\nversion = "1.2.3" # 版\r\n'),
     "1.2.3",
@@ -83,7 +83,7 @@ test("Cargo.toml は [workspace.package] の version だけを読む（依存の
   assert.equal(cargoVersion('[dependencies]\nversion = "9"\n'), null);
 });
 
-test("コマンドとして実行すると、バージョンだけを標準出力に書く", () => {
+test("[REL-003] コマンドとして実行すると、バージョンだけを標準出力に書く", () => {
   const root = makeRepo();
   const ok = spawnSync(process.execPath, [SCRIPT, "--root", root, "--tag", "v0.2.0"], {
     encoding: "utf8",

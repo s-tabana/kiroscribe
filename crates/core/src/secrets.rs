@@ -349,11 +349,13 @@ mod tests {
         store.delete(Provider::OpenAi).unwrap();
     }
 
+    // [KEY-001][KEY-002]
     #[test]
     fn memory_store_behaviour() {
         exercise(&MemorySecretStore::default());
     }
 
+    // [KEY-005][KEY-006]
     #[test]
     fn file_store_behaviour_and_permissions() {
         let dir = tempfile::tempdir().unwrap();
@@ -378,6 +380,7 @@ mod tests {
 
     /// 本物の資格情報マネージャーを使う（Windows の CI で実行される）。
     /// 利用者のキーを上書きしないよう、テスト専用のサービス名を使う。
+    // [KEY-004]
     #[cfg(windows)]
     #[test]
     fn credential_manager_store_behaviour() {
@@ -393,6 +396,7 @@ mod tests {
         assert_eq!(store.get(Provider::OpenAi).unwrap(), None);
     }
 
+    // [DAT-008]
     #[test]
     fn migrate_copies_only_keys_missing_from_the_current_store() {
         let legacy = MemorySecretStore::default();
@@ -425,6 +429,7 @@ mod tests {
     }
 
     /// Windows 以外: 旧アプリのデータフォルダ（`dev.kiroku.desktop`）のファイルから引き継ぐ。
+    // [DAT-008]
     #[cfg(not(windows))]
     #[test]
     fn legacy_api_keys_move_from_the_legacy_data_dir() {
@@ -467,6 +472,7 @@ mod tests {
     }
 
     /// 本物の資格情報マネージャーで、サービス名をまたぐ引き継ぎを確かめる（Windows の CI で実行される）。
+    // [DAT-008]
     #[cfg(windows)]
     #[test]
     fn credential_manager_keys_move_between_services() {
@@ -492,6 +498,7 @@ mod tests {
         current.delete(Provider::OpenAi).unwrap();
     }
 
+    // [KEY-008][IPC-004]
     #[test]
     fn provider_serializes_lowercase() {
         assert_eq!(

@@ -38,7 +38,7 @@ async function about() {
 }
 
 describe("設定画面の「このアプリについて」", () => {
-  it("バージョンを表示する", async () => {
+  it("[SET-011] バージョンを表示する", async () => {
     renderWith(updateBackend(), <SettingsDialog onClose={() => undefined} />);
     const section = await about();
     expect(await within(section).findByText("Kiroscribe 0.2.0")).toBeInTheDocument();
@@ -48,7 +48,7 @@ describe("設定画面の「このアプリについて」", () => {
     expect(within(section).queryByText(UPDATE_TEXT)).not.toBeInTheDocument();
   });
 
-  it("更新を確認して、最新ならそう伝える", async () => {
+  it("[UPD-006] 更新を確認して、最新ならそう伝える", async () => {
     const user = userEvent.setup();
     const backend = updateBackend();
     const check = vi.spyOn(backend, "checkForUpdate");
@@ -61,7 +61,7 @@ describe("設定画面の「このアプリについて」", () => {
     expect(within(section).queryByRole("button", { name: "更新して再起動" })).not.toBeInTheDocument();
   });
 
-  it("新しいバージョンがあれば知らせ、確認のうえダウンロードの進み具合を表示して更新する", async () => {
+  it("[UPD-004][UPD-007][UPD-009][UPD-012] 新しいバージョンがあれば知らせ、確認のうえダウンロードの進み具合を表示して更新する", async () => {
     const user = userEvent.setup();
     const confirm = vi.fn(() => true);
     const backend = updateBackend(confirm);
@@ -94,7 +94,7 @@ describe("設定画面の「このアプリについて」", () => {
     expect(within(section).queryByText(UPDATE_TEXT)).not.toBeInTheDocument();
   });
 
-  it("確認できなかったら理由を表示する", async () => {
+  it("[UPD-006] 確認できなかったら理由を表示する", async () => {
     const user = userEvent.setup();
     const backend = updateBackend();
     backend.setUpdateCheckError("更新を確認できませんでした。インターネット接続を確認して、もう一度お試しください");
@@ -106,7 +106,7 @@ describe("設定画面の「このアプリについて」", () => {
     expect(within(section).getByRole("button", { name: "更新を確認" })).toBeEnabled();
   });
 
-  it("確認ダイアログで取り消したら更新しない", async () => {
+  it("[UPD-007] 確認ダイアログで取り消したら更新しない", async () => {
     const user = userEvent.setup();
     const backend = updateBackend(() => false);
     backend.simulateUpdate("0.3.0", { announce: true });
@@ -121,7 +121,7 @@ describe("設定画面の「このアプリについて」", () => {
 });
 
 describe("サイドバーの更新の知らせ（自動更新がオフ＝既定）", () => {
-  it("自動確認で新しいバージョンが見つかると表示し、［更新］で更新できる", async () => {
+  it("[UPD-004][UPD-007][UPD-020] 自動確認で新しいバージョンが見つかると表示し、［更新］で更新できる", async () => {
     const user = userEvent.setup();
     const backend = updateBackend();
     renderWith(backend, <App />);
@@ -148,7 +148,7 @@ describe("サイドバーの更新の知らせ（自動更新がオフ＝既定�
     expect(await backend.getAppVersion()).toBe("0.3.0");
   });
 
-  it("設定画面にも同じ状態を表示する", async () => {
+  it("[UPD-004] 設定画面にも同じ状態を表示する", async () => {
     const user = userEvent.setup();
     const backend = updateBackend();
     backend.simulateUpdate("0.3.0", { announce: true });
@@ -161,7 +161,7 @@ describe("サイドバーの更新の知らせ（自動更新がオフ＝既定�
     expect(within(section).getByRole("button", { name: "更新して再起動" })).toBeInTheDocument();
   });
 
-  it("録音中は更新を始めず、録音を止めるよう伝える", async () => {
+  it("[UPD-008] 録音中は更新を始めず、録音を止めるよう伝える", async () => {
     const user = userEvent.setup();
     const confirm = vi.fn(() => true);
     const backend = updateBackend(confirm);
@@ -194,7 +194,7 @@ describe("サイドバーの更新の知らせ（自動更新がオフ＝既定�
     expect((await backend.getRecordingStatus()).state).toBe("recording");
   });
 
-  it("ウィンドウを閉じている間に見つかった更新も、ウィンドウに戻ると分かる", async () => {
+  it("[UPD-016] ウィンドウを閉じている間に見つかった更新も、ウィンドウに戻ると分かる", async () => {
     const backend = updateBackend();
     // 閉じている間のイベントを受け取れなかった場合
     vi.spyOn(backend, "onUpdateStatus").mockReturnValue(() => undefined);
@@ -209,7 +209,7 @@ describe("サイドバーの更新の知らせ（自動更新がオフ＝既定�
     );
   });
 
-  it("会議検出のポップアップには出さない", async () => {
+  it("[POP-013] 会議検出のポップアップには出さない", async () => {
     const backend = updateBackend();
     backend.simulateUpdate("0.3.0", { announce: true });
     backend.setPopup({ kind: "recording", app: "Google Meet", noteId: "n1", title: "Google Meet 11/21 10:00" });
@@ -221,7 +221,7 @@ describe("サイドバーの更新の知らせ（自動更新がオフ＝既定�
 });
 
 describe("自動更新がオンのとき", () => {
-  it("見つけた更新をダウンロードしておき、ウィンドウを閉じると更新すると知らせる", async () => {
+  it("[UPD-021][UPD-023] 見つけた更新をダウンロードしておき、ウィンドウを閉じると更新すると知らせる", async () => {
     const user = userEvent.setup();
     const confirm = vi.fn(() => true);
     const backend = autoUpdateBackend(confirm);
@@ -249,7 +249,7 @@ describe("自動更新がオンのとき", () => {
     expect(await backend.takeUpdateNotice()).toBeNull();
   });
 
-  it("設定画面にも同じ状態を表示し、手動の確認で見つけた更新もダウンロードしておく", async () => {
+  it("[UPD-021][UPD-023] 設定画面にも同じ状態を表示し、手動の確認で見つけた更新もダウンロードしておく", async () => {
     const user = userEvent.setup();
     const backend = autoUpdateBackend();
     backend.simulateUpdate("0.3.0", { notes: NOTES });
@@ -263,7 +263,7 @@ describe("自動更新がオンのとき", () => {
     expect(within(section).getByText("0.3.0 の変更点")).toBeInTheDocument();
   });
 
-  it("ウィンドウを閉じると自動で更新し、次に開いたときに 1 回だけ知らせる", async () => {
+  it("[UPD-022][UPD-025] ウィンドウを閉じると自動で更新し、次に開いたときに 1 回だけ知らせる", async () => {
     const user = userEvent.setup();
     const confirm = vi.fn(() => true);
     const backend = autoUpdateBackend(confirm);
@@ -300,7 +300,7 @@ describe("自動更新がオンのとき", () => {
     expect(screen.queryByRole("status", { name: "更新の完了" })).not.toBeInTheDocument();
   });
 
-  it("更新の知らせからリリースノートを開ける。知らせは 1 回だけで、画面を作り直しても出ない", async () => {
+  it("[UPD-025] 更新の知らせからリリースノートを開ける。知らせは 1 回だけで、画面を作り直しても出ない", async () => {
     const user = userEvent.setup();
     const backend = autoUpdateBackend();
     backend.simulateUpdate("0.3.0", { announce: true });
@@ -327,7 +327,7 @@ describe("自動更新がオンのとき", () => {
     expect(screen.queryByRole("status", { name: "更新の完了" })).not.toBeInTheDocument();
   });
 
-  it("録音中はウィンドウを閉じても更新せず、録音を止めると更新する", async () => {
+  it("[UPD-022] 録音中はウィンドウを閉じても更新せず、録音を止めると更新する", async () => {
     const user = userEvent.setup();
     const backend = autoUpdateBackend();
     await backend.setApiKey("openai", "sk-test");
@@ -346,7 +346,7 @@ describe("自動更新がオンのとき", () => {
     expect(await backend.getAppVersion()).toBe("0.3.0");
   });
 
-  it("設定でオフにすると、待っている自動の更新をやめて、知らせるだけに戻る", async () => {
+  it("[UPD-026] 設定でオフにすると、待っている自動の更新をやめて、知らせるだけに戻る", async () => {
     const user = userEvent.setup();
     const backend = autoUpdateBackend();
     renderWith(backend, <App />);
@@ -372,5 +372,78 @@ describe("自動更新がオンのとき", () => {
     await user.click(within(section).getByLabelText(/新しいバージョンを自動でインストールする/));
     await user.click(screen.getByRole("button", { name: "設定を保存" }));
     await waitFor(() => expect(banner).toHaveTextContent(READY_TEXT));
+  });
+});
+
+describe("更新を始められないとき・失敗したとき", () => {
+  it("[UPD-008] AI が議事録や回答を作成している間は更新を始めない", async () => {
+    const user = userEvent.setup();
+    const backend = createMemoryBackend({
+      seed: true,
+      version: "0.2.0",
+      confirm: () => true,
+      streamDelayMs: 30,
+      updateStepDelayMs: 5,
+    });
+    await backend.setApiKey("anthropic", "sk-ant-test");
+    backend.simulateUpdate("0.3.0", { announce: true });
+    renderWith(backend, <App />);
+    await screen.findByDisplayValue("プロダクト定例");
+    const noteId = (await backend.listNotes())[0].id;
+
+    await user.click(screen.getByRole("button", { name: "議事録を作成" }));
+    await screen.findByRole("region", { name: "議事録" });
+    const banner = screen.getByRole("region", { name: "アプリの更新" });
+    await user.click(within(banner).getByRole("button", { name: "更新" }));
+
+    expect(await within(banner).findByRole("alert")).toHaveTextContent(
+      "AI が議事録や回答を作成しています。終わってから更新してください",
+    );
+    expect((await backend.getUpdateStatus()).phase).toBe("idle");
+    expect(await backend.getAppVersion()).toBe("0.2.0");
+    // 知らせは残り、あとで更新できる
+    expect(within(banner).getByRole("button", { name: "更新" })).toBeInTheDocument();
+    await backend.cancelAi(noteId, "enhance");
+    await waitFor(() => expect(screen.queryByRole("region", { name: "議事録" })).not.toBeInTheDocument());
+  });
+
+  it("[UPD-015] 更新に失敗したら理由を知らせ、新しいバージョンの知らせは残して、もう一度試せる", async () => {
+    const user = userEvent.setup();
+    const backend = updateBackend();
+    backend.simulateUpdate("0.3.0", { announce: true });
+    const install = vi
+      .spyOn(backend, "installUpdate")
+      .mockRejectedValueOnce("更新をダウンロードできませんでした。インターネット接続を確認して、もう一度お試しください");
+    renderWith(backend, <App />);
+    const banner = await screen.findByRole("region", { name: "アプリの更新" });
+
+    await user.click(await within(banner).findByRole("button", { name: "更新" }));
+    expect(await within(banner).findByRole("alert")).toHaveTextContent(
+      "更新をダウンロードできませんでした。インターネット接続を確認して、もう一度お試しください",
+    );
+    expect(within(banner).getByText(/新しいバージョン 0\.3\.0/)).toBeInTheDocument();
+
+    await user.click(within(banner).getByRole("button", { name: "更新" }));
+    expect(install).toHaveBeenCalledTimes(2);
+    await waitFor(async () => expect(await backend.getAppVersion()).toBe("0.3.0"), { timeout: 3000 });
+  });
+
+  it("[UPD-015] 設定画面でも、失敗の理由（署名を確認できなかった、など）を表示する", async () => {
+    const user = userEvent.setup();
+    const backend = updateBackend();
+    backend.simulateUpdate("0.3.0", { announce: true });
+    vi.spyOn(backend, "installUpdate").mockRejectedValueOnce(
+      "ダウンロードしたファイルの署名を確認できなかったため、更新を中止しました",
+    );
+    renderWith(backend, <SettingsDialog onClose={() => {}} />);
+    const section = await about();
+
+    await user.click(await within(section).findByRole("button", { name: "更新して再起動" }));
+
+    expect(
+      await within(section).findByText("ダウンロードしたファイルの署名を確認できなかったため、更新を中止しました"),
+    ).toBeInTheDocument();
+    expect(within(section).getByRole("button", { name: "更新して再起動" })).toBeInTheDocument();
+    expect(await backend.getAppVersion()).toBe("0.2.0");
   });
 });

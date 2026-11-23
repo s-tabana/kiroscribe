@@ -149,6 +149,12 @@ jobs:
       - name: 依存関係のインストール
         run: npm ci
 
+      # 仕様一覧（docs/spec/）の項目が、テストかリリース前のチェックリストに結び付いているか。
+      # いまは、未対応の一覧（docs/spec/pending.txt）に載っている項目を見逃す通常の検査にしている。
+      # 未対応が 0 件になったら `--strict` を付けて、テストのない仕様を出荷できないようにする
+      - name: 仕様とテストの対応の確認
+        run: node scripts/check-spec-coverage.mjs
+
       - name: リリース用スクリプトのテスト
         working-directory: scripts
         run: node --test

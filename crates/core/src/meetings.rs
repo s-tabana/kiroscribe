@@ -104,11 +104,64 @@ pub fn web_meeting(title: &str) -> Option<MeetingApp> {
     if t.contains("zoom") && (t.contains("meeting") || t.contains("ミーティング")) {
         return Some(MeetingApp::Zoom);
     }
-    // ブラウザ版 Discord（例:「Discord | #雑談 | 開発チーム」）。ブラウザがマイクを使っていれば通話中
-    if t.contains("discord") {
+    // ブラウザ版 Discord。ブラウザがマイクを使っていれば通話中
+    if is_discord_web_title(&t) {
         return Some(MeetingApp::Discord);
     }
     None
+}
+
+/// ブラウザ版 Discord の画面のタブ名か（小文字にしたタイトルを渡す）。
+///
+/// Discord の画面のタブ名は「Discord | #雑談 | 開発チーム」か「#雑談 | 開発チーム - Discord」の形で、
+/// 未読があると「(3) 」「• 」が前に付く。ウィンドウのタイトルでは、その後ろにブラウザの名前が付く。
+/// 「discord」を含むだけのタイトル（Discord についての記事・検索結果・ヘルプのページ）は、会議とみなさない。
+fn is_discord_web_title(lower_title: &str) -> bool {
+    let mut tab = strip_browser_name(lower_title.trim());
+    loop {
+        if let Some(after) = tab.strip_prefix('•') {
+            tab = after.trim_start();
+        } else if let Some(after) = unread_count_prefix(tab) {
+            tab = after.trim_start();
+        } else {
+            break;
+        }
+    }
+    tab.starts_with("discord | ") || tab.ends_with(" | discord") || tab.ends_with(" - discord")
+}
+
+/// ウィンドウのタイトルの末尾に付くブラウザの名前（小文字）。Edge は、名前の途中に見えない空白を入れることがある。
+const BROWSER_TITLE_SUFFIXES: &[&str] = &[
+    "google chrome",
+    "microsoft edge",
+    "microsoft\u{200b} edge",
+    "mozilla firefox",
+    "brave",
+    "vivaldi",
+    "opera",
+];
+
+/// ウィンドウのタイトルの末尾の「 - Google Chrome」「 — Mozilla Firefox」などを除いて、タブ名だけにする。
+fn strip_browser_name(lower_title: &str) -> &str {
+    let last_separator = [" - ", " — ", " – "]
+        .iter()
+        .filter_map(|separator| lower_title.rfind(separator).map(|at| (at, separator.len())))
+        .max();
+    match last_separator {
+        Some((at, len)) if BROWSER_TITLE_SUFFIXES.contains(&lower_title[at + len..].trim()) => {
+            lower_title[..at].trim_end()
+        }
+        _ => lower_title,
+    }
+}
+
+/// 先頭の「(3)」「(99+)」のような未読の数を除いた残りを返す。
+fn unread_count_prefix(title: &str) -> Option<&str> {
+    let inner = title.strip_prefix('(')?;
+    let close = inner.find(')')?;
+    let count = &inner[..close];
+    let is_count = !count.is_empty() && count.chars().all(|c| c.is_ascii_digit() || c == '+');
+    is_count.then(|| &inner[close + 1..])
 }
 
 /// 検出した会議。`via_browser` ならブラウザでの会議（タブのタイトルで判定した）。
@@ -133,10 +186,17 @@ fn active_mic_users<'a>(observation: &'a Observation, own_exe: Option<&str>) -> 
         .collect()
 }
 
-fn browser_in_use(active: &[&MicUser]) -> bool {
+/// いまマイクを使っているブラウザの実行ファイル名（小文字）。
+fn browsers_in_use(active: &[&MicUser]) -> Vec<String> {
     active
         .iter()
-        .any(|u| BROWSERS.contains(&exe_name(&u.id).as_str()))
+        .map(|u| exe_name(&u.id))
+        .filter(|exe| BROWSERS.contains(&exe.as_str()))
+        .collect()
+}
+
+fn browser_in_use(active: &[&MicUser]) -> bool {
+    !browsers_in_use(active).is_empty()
 }
 
 /// いま会議が始まっているかどうか。`own_exe` は自分自身（録音中の Kiroscribe）を除外するためのパス。
@@ -151,14 +211,16 @@ pub fn detect(observation: &Observation, own_exe: Option<&str>) -> Option<Detect
         });
     }
 
-    // ブラウザがマイクを使っているなら、ブラウザのウィンドウタイトル（表示中のタブ）を見る
-    if !browser_in_use(&active) {
+    // ブラウザがマイクを使っているなら、そのブラウザのウィンドウタイトル（表示中のタブ）を見る。
+    // マイクを使っているのとは別のブラウザのタブ名では、会議とみなさない
+    let mic_browsers = browsers_in_use(&active);
+    if mic_browsers.is_empty() {
         return None;
     }
     observation
         .windows
         .iter()
-        .filter(|w| BROWSERS.contains(&w.exe.as_str()))
+        .filter(|w| mic_browsers.contains(&w.exe.to_lowercase()))
         .find_map(|w| web_meeting(&w.title))
         .map(|app| Detection {
             app,
@@ -410,6 +472,7 @@ pub mod windows_observer {
         use super::*;
 
         /// 本物と同じ形のキーをテスト用の場所に作って読む
+        // [MTG-020]
         #[test]
         fn reads_consent_store_layout() {
             let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -438,6 +501,7 @@ pub mod windows_observer {
             assert!(users.iter().find(|u| u.id.starts_with("MSTeams")).unwrap().in_use);
         }
 
+        // [MTG-020]
         #[test]
         fn observe_does_not_fail() {
             // 実際のレジストリとウィンドウを読んでもパニックしない
@@ -475,6 +539,7 @@ mod tests {
         Some(Detection { app, via_browser })
     }
 
+    // [MTG-001][MTG-003]
     #[test]
     fn desktop_apps_using_mic_are_meetings() {
         let obs = |id: &str| Observation {
@@ -495,6 +560,7 @@ mod tests {
         assert_eq!(detect(&obs(r"C:\Program Files\Audacity\Audacity.exe"), None), None, "会議アプリ以外は無視");
     }
 
+    // [MTG-004]
     #[test]
     fn apps_not_using_mic_now_are_ignored() {
         let obs = Observation {
@@ -504,6 +570,7 @@ mod tests {
         assert_eq!(detect(&obs, None), None);
     }
 
+    // [MTG-002][MTG-003]
     #[test]
     fn browser_meetings_are_detected_by_window_title() {
         let base = |title: &str| Observation {
@@ -518,6 +585,7 @@ mod tests {
         assert_eq!(detect(&base("YouTube - Google Chrome"), None), None, "会議以外のサイトでのマイク使用は無視");
     }
 
+    // [MTG-004]
     #[test]
     fn browser_title_needs_browser_using_mic() {
         let obs = Observation {
@@ -527,6 +595,7 @@ mod tests {
         assert_eq!(detect(&obs, None), None, "Meet を開いているだけでは会議中としない");
     }
 
+    // [MTG-005]
     #[test]
     fn own_process_is_excluded() {
         let own = r"C:\Users\me\AppData\Local\Kiroscribe\kiroscribe.exe";
@@ -542,6 +611,7 @@ mod tests {
         assert_eq!(app(detect(&obs, Some(&own.to_uppercase()))), Some(MeetingApp::SlackHuddle));
     }
 
+    // [MTG-009]
     #[test]
     fn browser_meeting_continues_after_switching_tabs() {
         let meet = Detection { app: MeetingApp::GoogleMeet, via_browser: true };
@@ -560,6 +630,7 @@ mod tests {
         assert!(!still_active(&left, &meet, None));
     }
 
+    // [MTG-009]
     #[test]
     fn desktop_meeting_continues_only_while_that_app_uses_mic() {
         let zoom = Detection { app: MeetingApp::Zoom, via_browser: false };
@@ -571,6 +642,7 @@ mod tests {
         assert!(!still_active(&obs(false), &zoom, None), "ブラウザがマイクを使っていても Zoom の会議は終わり");
     }
 
+    // [MTG-007][MTG-008][MTG-009]
     #[test]
     fn tracker_follows_observations_end_to_end() {
         let mut t = MeetingTracker::default();
@@ -593,6 +665,7 @@ mod tests {
         assert_eq!(t.observe(&left, None, 84_000), Some(MeetingEvent::Ended(MeetingApp::GoogleMeet)));
     }
 
+    // [MTG-007]
     #[test]
     fn tracker_confirms_start_after_a_few_seconds() {
         let mut t = MeetingTracker::default();
@@ -604,6 +677,7 @@ mod tests {
         assert_eq!(t.tick(meet, true, 6_000), None, "開始は一度だけ");
     }
 
+    // [MTG-007]
     #[test]
     fn brief_mic_use_does_not_start() {
         let mut t = MeetingTracker::default();
@@ -614,6 +688,7 @@ mod tests {
         assert_eq!(t.tick(slack, false, 8_000), Some(MeetingEvent::Started(MeetingApp::SlackHuddle)));
     }
 
+    // [MTG-008]
     #[test]
     fn tracker_ends_after_grace_period() {
         let mut t = MeetingTracker::default();
@@ -630,6 +705,7 @@ mod tests {
         assert_eq!(t.tick(None, false, 50_000), None);
     }
 
+    // [MTG-001]
     #[test]
     fn exe_name_handles_both_separators() {
         assert_eq!(exe_name(r"C:\A\Slack.EXE"), "slack.exe");

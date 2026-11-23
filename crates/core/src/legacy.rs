@@ -138,6 +138,7 @@ mod tests {
         names
     }
 
+    // [DAT-004]
     #[test]
     fn legacy_paths_are_siblings_of_the_data_dir() {
         let data_dir = Path::new("/home/me/.local/share/dev.kiroscribe.desktop");
@@ -152,6 +153,7 @@ mod tests {
         assert_eq!(legacy_data_dir(Path::new("/")), None);
     }
 
+    // [DAT-004]
     #[test]
     fn copies_database_with_wal_and_shm_and_keeps_the_originals() {
         let root = tempfile::tempdir().unwrap();
@@ -182,6 +184,7 @@ mod tests {
         assert!(!migrate_database(&legacy_db, &new_db).unwrap());
     }
 
+    // [DAT-004]
     #[test]
     fn copies_only_the_database_when_there_is_no_wal() {
         let root = tempfile::tempdir().unwrap();
@@ -193,6 +196,7 @@ mod tests {
         assert_eq!(file_names(new_db.parent().unwrap()), ["kiroscribe.db"]);
     }
 
+    // [DAT-005]
     #[test]
     fn does_not_overwrite_an_existing_database() {
         let root = tempfile::tempdir().unwrap();
@@ -209,6 +213,7 @@ mod tests {
         assert_eq!(file_names(new_db.parent().unwrap()), ["kiroscribe.db"]);
     }
 
+    // [DAT-005]
     #[test]
     fn does_nothing_without_a_legacy_database() {
         let root = tempfile::tempdir().unwrap();
@@ -224,6 +229,7 @@ mod tests {
         assert!(!new_db.exists());
     }
 
+    // [DAT-007]
     #[test]
     fn failed_copy_leaves_nothing_behind_and_can_be_retried() {
         let root = tempfile::tempdir().unwrap();
@@ -255,6 +261,7 @@ mod tests {
     }
 
     /// 本物の SQLite で確かめる: 旧アプリが開いたまま（変更が WAL にだけある状態）でも、ノートが引き継がれる。
+    // [DAT-006]
     #[test]
     fn notes_survive_the_move_even_while_the_legacy_database_is_open() {
         let root = tempfile::tempdir().unwrap();

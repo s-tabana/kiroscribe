@@ -1,0 +1,11 @@
+{
+  "language": "ja",
+  "transcriptionModel": "gpt-4o-transcribe",
+  "claudeModel": "claude-opus-5-5",
+  "inputDeviceId": null,
+  "captureSystemAudio": true,
+  "myName": "",
+  "autoRecordMeetings": true,
+  "launchAtLogin": true,
+  "autoUpdate": false
+}

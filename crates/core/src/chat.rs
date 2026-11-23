@@ -70,6 +70,7 @@ impl Database {
 mod tests {
     use super::*;
 
+    // [CHT-011]
     #[test]
     fn chat_history_roundtrip_and_clear() {
         let db = Database::open_in_memory().unwrap();

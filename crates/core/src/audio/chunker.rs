@@ -295,12 +295,14 @@ mod tests {
         sample as f32 / RATE as f32
     }
 
+    // [TRN-002]
     #[test]
     fn silence_produces_nothing() {
         let mut c = Chunker::new(ChunkerConfig::default());
         assert!(run(&mut c, &silence(10.0)).is_empty());
     }
 
+    // [TRN-001][TRN-005]
     #[test]
     fn utterances_separated_by_silence_become_separate_chunks() {
         let mut audio = silence(1.0);
@@ -321,6 +323,7 @@ mod tests {
         assert!(chunks[1].speech_ms >= 1_900);
     }
 
+    // [TRN-004]
     #[test]
     fn long_speech_is_split_at_max_length() {
         let mut c = Chunker::new(ChunkerConfig::default());
@@ -335,6 +338,7 @@ mod tests {
         assert!((sec(chunks[2].end_sample()) - 60.0).abs() < 0.05);
     }
 
+    // [TRN-002]
     #[test]
     fn constant_tone_is_treated_as_background() {
         // 換気扇やBGMのように一定の音が続くだけでは発話とみなさない
@@ -343,6 +347,7 @@ mod tests {
         assert!(chunks.iter().map(|c| c.speech_ms).sum::<u32>() < 1_000);
     }
 
+    // [TRN-003]
     #[test]
     fn short_clicks_are_dropped() {
         let mut audio = silence(1.0);
@@ -352,6 +357,7 @@ mod tests {
         assert!(run(&mut c, &audio).is_empty());
     }
 
+    // [TRN-002]
     #[test]
     fn steady_background_noise_is_not_speech() {
         let mut seed = 42;
@@ -369,6 +375,7 @@ mod tests {
         assert!(chunks[0].speech_ms >= 1_300);
     }
 
+    // [REC-006][REC-009]
     #[test]
     fn flush_emits_speech_in_progress_and_reset_restarts_clock() {
         let mut c = Chunker::new(ChunkerConfig::default());

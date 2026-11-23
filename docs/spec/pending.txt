@@ -1,0 +1,159 @@
+# 未対応の一覧: 仕様一覧の項目のうち、求めるテストがまだそろっていないもの。
+#
+# scripts/check-spec-coverage.mjs は、ここに載っている行だけ「テストがない」ことを見逃す。
+# この一覧は、減らすだけにする。テストを書いたら行を消す（消し忘れると検査が失敗する）。
+# 検査を通すために行を足すことはしない（項目を足すときは、テストも一緒に足す）。
+#
+# 1 行に「ID 区分」。区分は次の 3 つ。「#」より後ろはコメント、「## 」の行は理由の見出し（集計に使う）。
+#   test   その ID を参照するテスト（e2e/ の外）が 1 つもない
+#   tauri  単体のテストはあるが、src-tauri/ の下のテスト（本体のコマンドの層）からの参照がない
+#   e2e    e2e/ の下のテストからの参照がない
+
+## E2E のテスト待ち
+# 種類に「E2E」がある項目。実際のアプリを起動して操作するテスト（e2e/）ができたら、ID を付けて消す。
+CHT-003 e2e
+DAT-001 e2e
+IPC-005 e2e
+IPC-007 e2e
+KEY-006 e2e
+KEY-009 e2e
+MIN-004 e2e
+MIN-018 e2e
+MIN-019 e2e
+MTG-011 e2e
+MTG-012 e2e
+MTG-016 e2e
+MTG-022 e2e
+NOTE-001 e2e
+NOTE-002 e2e
+NOTE-008 e2e
+NOTE-009 e2e
+NOTE-010 e2e
+NOTE-014 e2e
+NOTE-019 e2e
+NOTE-020 e2e
+POP-001 e2e
+POP-002 e2e
+POP-004 e2e
+POP-007 e2e
+POP-008 e2e
+POP-009 e2e
+REC-001 e2e
+REC-009 e2e
+REC-015 e2e
+REC-016 e2e
+SEC-002 e2e
+SEC-006 e2e
+SEC-011 e2e
+SEC-012 e2e
+SET-002 e2e
+SET-004 e2e
+SET-011 e2e
+SHR-007 e2e
+SHR-008 e2e
+SHR-012 e2e
+TRN-016 e2e
+TRN-019 e2e
+TRY-001 e2e
+TRY-006 e2e
+TRY-007 e2e
+TRY-008 e2e
+TRY-010 e2e
+UPD-004 e2e
+UPD-023 e2e
+UPD-025 e2e
+
+## 本体のコマンドの層のテスト待ち（テストがまだない）
+# Tauri のコマンド・イベント・起動の処理を通さないと確かめられない項目。
+REC-003 test
+REC-004 test
+REC-005 test
+REC-008 test
+REC-010 test
+REC-017 test
+TRN-017 test
+MIN-007 test
+CHT-009 test
+SHR-011 test
+MTG-012 test
+MTG-013 test
+MTG-017 test
+MTG-018 test
+TRY-005 test
+SET-005 test
+UPD-002 test
+UPD-011 test
+UPD-018 test
+DAT-009 test
+SEC-010 test
+SEC-013 test
+IPC-005 test
+IPC-006 test
+
+## 本体のコマンドの層のテスト待ち（部品や画面のテストはある）
+# 部品（crates/core）や画面（模擬のバックエンドが相手）のテストはあるが、本体のコマンドが同じ振る舞いをすることは確かめていない項目。
+NOTE-016 tauri
+REC-001 tauri
+REC-002 tauri
+REC-006 tauri
+REC-007 tauri
+REC-009 tauri
+MIN-003 tauri
+MIN-005 tauri
+MIN-006 tauri
+MIN-014 tauri
+MIN-017 tauri
+CHT-004 tauri
+CHT-006 tauri
+CHT-008 tauri
+SHR-010 tauri
+MTG-011 tauri
+MTG-014 tauri
+MTG-016 tauri
+KEY-001 tauri
+KEY-006 tauri
+UPD-006 tauri
+UPD-008 tauri
+UPD-015 tauri
+UPD-020 tauri
+UPD-021 tauri
+UPD-022 tauri
+UPD-026 tauri
+DAT-004 tauri
+SEC-001 tauri
+SEC-008 tauri
+IPC-004 tauri
+IPC-008 tauri
+
+## 画面と本体の取り決めの検査待ち
+# コマンドの名前・引数・戻り値の形を、画面と本体で突き合わせる検査ができたら消す。
+IPC-001 test
+IPC-002 test
+IPC-003 test
+IPC-007 test
+
+## src-tauri/ の既存のテストに ID を付ける
+# テストは src-tauri/src/ にあるが、ID のコメントがまだ付いていない項目。
+MIN-008 test
+CHT-007 test
+UPD-001 test
+UPD-005 test
+UPD-010 test
+UPD-013 test
+UPD-014 test
+UPD-024 test
+UPD-027 test
+UPD-028 test
+
+## 実装待ち
+# 仕様一覧に〔実装待ち〕の印がある項目（IPC-001 は上の節）。本体（src-tauri/）の実装とテストがそろったら、印と一緒に消す。
+CHT-005 test
+MTG-015 test
+MTG-019 test
+TRY-004 test
+NOTE-008 tauri
+TRN-014 tauri
+SHR-009 tauri
+MTG-010 tauri
+POP-011 tauri
+DAT-007 tauri

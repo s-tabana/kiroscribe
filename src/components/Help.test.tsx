@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../App";
 import { HelpDialog } from "./HelpDialog";
@@ -52,7 +52,7 @@ function renderWith(backend: Backend, ui: React.ReactElement) {
 }
 
 describe("ヘルプ画面", () => {
-  it("サイドバーから開き、使い方とリリースノートを切り替えられる", async () => {
+  it("[HLP-001][HLP-002][HLP-008][HLP-013] サイドバーから開き、使い方とリリースノートを切り替えられる", async () => {
     const user = userEvent.setup();
     renderWith(helpBackend(), <App />);
 
@@ -78,7 +78,7 @@ describe("ヘルプ画面", () => {
     expect(screen.queryByRole("dialog", { name: "ヘルプ" })).not.toBeInTheDocument();
   });
 
-  it("取得できなかったときは、表示している内容の出どころを知らせる", async () => {
+  it("[HLP-007] 取得できなかったときは、表示している内容の出どころを知らせる", async () => {
     const user = userEvent.setup();
     const backend = helpBackend();
     backend.setHelpSource("cache");
@@ -103,7 +103,7 @@ describe("ヘルプ画面", () => {
     expect(screen.getByRole("article", { name: "v0.2.0" })).toBeInTheDocument();
   });
 
-  it("リンクは外部ブラウザで開くコマンドを呼び、アプリの画面は遷移させない", async () => {
+  it("[HLP-011] リンクは外部ブラウザで開くコマンドを呼び、アプリの画面は遷移させない", async () => {
     const user = userEvent.setup();
     const backend = helpBackend();
     const openExternal = vi.spyOn(backend, "openExternal");
@@ -131,7 +131,7 @@ describe("ヘルプ画面", () => {
     expect(openExternal).toHaveBeenLastCalledWith(RELEASE_URL);
   });
 
-  it("リンクを開けなかったら理由を表示する", async () => {
+  it("[HLP-012] リンクを開けなかったら理由を表示する", async () => {
     const user = userEvent.setup();
     const backend = helpBackend();
     vi.spyOn(backend, "openExternal").mockRejectedValue("ブラウザを開けませんでした");
@@ -141,7 +141,7 @@ describe("ヘルプ画面", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("ブラウザを開けませんでした");
   });
 
-  it("設定画面のリンクからタブを指定して開く。Esc はヘルプだけを閉じる", async () => {
+  it("[HLP-001][SET-010] 設定画面のリンクからタブを指定して開く。Esc はヘルプだけを閉じる", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     renderWith(helpBackend(), <SettingsDialog onClose={onClose} />);
@@ -178,10 +178,74 @@ describe("ヘルプ画面", () => {
 });
 
 describe("議事録の Markdown", () => {
-  it("リンクと画像は無効のまま（ヘルプ用の指定をしない限り押せない）", () => {
+  it("[SEC-009] リンクと画像は無効のまま（ヘルプ用の指定をしない限り押せない）", () => {
     render(<Markdown text={"[資料](https://example.com/doc) を参照\n\n![図](https://example.com/a.png)"} />);
     expect(screen.getByText("資料")).toBeInTheDocument();
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  });
+});
+
+describe("ヘルプ画面: リリースの表示と閉じ方", () => {
+  it("[HLP-008] 本文のないリリースは「説明はありません」、リリースが 1 つもなければその旨を表示する", async () => {
+    const backend = helpBackend();
+    backend.setHelpContent({
+      releases: [{ tagName: "v0.3.0", version: "0.3.0", name: "Kiroscribe 0.3.0", publishedAt: null, body: "  ", htmlUrl: null }],
+    });
+    renderWith(backend, <HelpDialog initialTab="releases" onClose={() => {}} />);
+    const release = await screen.findByRole("article", { name: "Kiroscribe 0.3.0" });
+    expect(within(release).getByText("説明はありません")).toBeInTheDocument();
+    // 公開日と GitHub のリンクは、ないときは出さない
+    expect(release.querySelector("time")).toBeNull();
+    expect(within(release).queryByRole("button", { name: /GitHub/ })).not.toBeInTheDocument();
+    cleanup();
+
+    backend.setHelpContent({ releases: [] });
+    renderWith(backend, <HelpDialog initialTab="releases" onClose={() => {}} />);
+    expect(await screen.findByText("リリースノートはまだありません")).toBeInTheDocument();
+  });
+
+  it("[HLP-013] 画面の外側のクリックと × で閉じる（画面の中のクリックでは閉じない）", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    renderWith(helpBackend(), <HelpDialog onClose={onClose} />);
+    const dialog = await screen.findByRole("dialog", { name: "ヘルプ" });
+    await within(dialog).findByRole("heading", { name: "Kiroscribe の使い方" });
+
+    fireEvent.mouseDown(dialog);
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.mouseDown(dialog.parentElement as HTMLElement);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await user.click(within(dialog).getByRole("button", { name: "閉じる" }));
+    expect(onClose).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("表示する文章の安全性", () => {
+  it("[SEC-009] 埋め込まれた HTML やスクリプトは、要素として解釈しない", () => {
+    const text = [
+      "<script>window.__kiroscribePwned = true</script>",
+      "",
+      '<img src="x" onerror="window.__kiroscribePwned = true">',
+      "",
+      '<a href="https://example.com/">生の HTML のリンク</a>',
+      "",
+      '<iframe src="https://example.com/"></iframe>',
+      "",
+      "[スクリプトのリンク](javascript:alert(1))",
+      "",
+      "ふつうの文",
+    ].join("\n");
+    // リンクを押せるようにしたヘルプの表示でも、議事録・回答の表示でも同じ
+    for (const onOpenLink of [undefined, vi.fn()]) {
+      const { container } = render(<Markdown text={text} onOpenLink={onOpenLink} />);
+      expect(container.querySelector("script, img, iframe, a[href], [onerror]")).toBeNull();
+      expect(screen.queryByRole("link")).not.toBeInTheDocument();
+      expect(screen.getByText("ふつうの文")).toBeInTheDocument();
+      // 生の HTML は、文字として見えるだけ
+      expect(container.textContent).toContain("<script>");
+      cleanup();
+    }
+    expect((window as { __kiroscribePwned?: boolean }).__kiroscribePwned).toBeUndefined();
   });
 });

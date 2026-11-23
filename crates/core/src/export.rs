@@ -151,6 +151,7 @@ mod tests {
         transcript: true,
     };
 
+    // [SHR-004][SHR-006]
     #[test]
     fn exports_all_sections_in_order() {
         let n = note("定例", "- 日程", Some("## 決定事項\n- 12/5 リリース"));
@@ -161,6 +162,7 @@ mod tests {
         );
     }
 
+    // [SHR-004][SHR-005]
     #[test]
     fn minutes_only_and_fallback_to_notes() {
         let only_minutes = ExportOptions {
@@ -181,6 +183,7 @@ mod tests {
         assert!(md.contains("## 自分のメモ\n\n- メモ"));
     }
 
+    // [SHR-006]
     #[test]
     fn transcript_uses_default_speaker_label() {
         let n = note("定例", "", None);
@@ -197,6 +200,7 @@ mod tests {
         assert!(md.contains("**自分**: 12月5日です"));
     }
 
+    // [SHR-008]
     #[test]
     fn file_name_is_safe_for_windows() {
         assert_eq!(suggested_file_name(&note("定例 1/2: 予算?", "", None)), "2026-11-20 定例 1_2_ 予算_.md");

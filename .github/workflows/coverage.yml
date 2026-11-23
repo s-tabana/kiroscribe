@@ -1,0 +1,109 @@
+# テストの網羅率の計測
+# crates/core（Rust）と画面（vitest）のテストが、コードのどれだけを通っているかを測り、ジョブの Summary に出す。
+#
+# - 時間のかかる Windows のビルド（ci.yml）を遅くしないよう、別のワークフローにしている。
+# - いまは値を記録するだけで、値が下がっても失敗にはしない（しきい値は、値が落ち着いてから決める）。
+# - 測るのは crates/core と src/。Tauri アプリ本体（src-tauri/）は、ここでは測らない。
+# - Secret は使わない（フォークからのプルリクエストでも同じ内容が動く）。
+# - アクションは、タグではなくコミットのハッシュで固定している（タグは後から付け替えられるため）。
+#   行末のコメントがそのバージョンで、Dependabot がハッシュとコメントをまとめて更新する。
+name: coverage
+
+on:
+  push:
+    branches:
+      - main
+      - next
+  pull_request:
+  workflow_dispatch:
+
+# 同じブランチで新しい実行が始まったら、古いほうは止める（最新の結果だけあればよい）
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+# このワークフローに渡すトークンは、リポジトリの読み取りだけ
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust（crates/core）
+    runs-on: ubuntu-latest
+    steps:
+      # persist-credentials: false … トークンを .git/config に残さない
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # このアクションにはバージョンのタグがないので、master ブランチのコミットで固定し、
+      # ツールチェーンは入力で指定する（@stable と書くのと同じ動き）。llvm-tools は、網羅率の集計に使う
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      # crates/core を Linux でビルドするのに要るもの（音声の取り込みの ALSA、TLS の OpenSSL）
+      - name: ビルドに必要なパッケージのインストール
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libssl-dev pkg-config
+
+      # サードパーティ製のアクションを増やさないよう、cargo で直接入れる（数分かかる）
+      - name: cargo-llvm-cov のインストール
+        run: cargo install cargo-llvm-cov --locked
+
+      # Windows でだけ動くコード（資格情報マネージャー、会議の検出の OS の部分）は、ここでは通らない
+      # （shell: bash と明示しているのは、テストが失敗したときに、tee へのパイプで失敗が隠れないようにするため）
+      - name: 網羅率の計測
+        shell: bash
+        run: |
+          cargo llvm-cov --package kiroscribe-core --locked --summary-only | tee "$RUNNER_TEMP/rust-coverage.txt"
+          {
+            echo "### Rust（crates/core）の網羅率"
+            echo
+            echo '```text'
+            grep -E '^(Filename|TOTAL)' "$RUNNER_TEMP/rust-coverage.txt"
+            echo '```'
+            echo
+            echo "<details><summary>ファイルごと</summary>"
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP/rust-coverage.txt"
+            echo '```'
+            echo
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  web:
+    name: 画面（vitest）
+    runs-on: ubuntu-latest
+    steps:
+      # persist-credentials: false … トークンを .git/config に残さない
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 依存関係のインストール
+        run: npm ci
+
+      # 対象は src/ のうち、テストのファイルを除いたもの（指定は package.json の test:web:coverage）
+      # （shell: bash と明示しているのは、テストが失敗したときに、tee へのパイプで失敗が隠れないようにするため）
+      - name: 網羅率の計測
+        shell: bash
+        run: |
+          npm run test:web:coverage | tee "$RUNNER_TEMP/web-coverage.txt"
+          {
+            echo "### 画面（vitest）の網羅率"
+            echo
+            echo '```text'
+            grep -E '^(Statements|Branches|Functions|Lines) ' "$RUNNER_TEMP/web-coverage.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

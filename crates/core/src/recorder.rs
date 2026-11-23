@@ -26,6 +26,11 @@ pub trait RecorderSink: Send + Sync {
     fn on_level(&self, speaker: Speaker, level: f32);
     /// 録音は続けられるが知らせるべき問題。
     fn on_error(&self, message: String);
+    /// API キーの誤り（HTTP 401・403）で、文字起こしを続けられなくなった。録音 1 回につき 1 回だけ呼ばれる。
+    /// 既定では、ほかの問題と同じように知らせるだけ（録音を止めるのは、受け取る側の役目）。
+    fn on_auth_error(&self, message: String) {
+        self.on_error(message);
+    }
 }
 
 /// 取り込んだ音声のひとかたまり。`captured_at` は取り込み時点の時刻（UNIX ミリ秒、かたまりの末尾）。
@@ -208,15 +213,27 @@ fn clock_label(ms: i64) -> String {
 
 /// 1 音源ぶんの文字起こしを順番に処理する。ジョブの送信側がすべて閉じたら終了する。
 pub async fn run_transcription_worker(
-    mut jobs: mpsc::UnboundedReceiver<TranscribeJob>,
+    jobs: mpsc::UnboundedReceiver<TranscribeJob>,
     transcriber: Arc<dyn Transcribe>,
     sink: Arc<dyn RecorderSink>,
     policy: RetryPolicy,
 ) {
+    let auth_failed = Arc::new(AtomicBool::new(false));
+    run_transcription_worker_shared(jobs, transcriber, sink, policy, auth_failed).await;
+}
+
+/// [`run_transcription_worker`] と同じ。`auth_failed` は、同じ録音のほかの音源（自分・相手）のワーカーと共有する印で、
+/// どれかの音源で API キーの誤りが分かったら、知らせは 1 回だけ出し、どの音源も以降の発話を送らない。
+pub async fn run_transcription_worker_shared(
+    mut jobs: mpsc::UnboundedReceiver<TranscribeJob>,
+    transcriber: Arc<dyn Transcribe>,
+    sink: Arc<dyn RecorderSink>,
+    policy: RetryPolicy,
+    auth_failed: Arc<AtomicBool>,
+) {
     let mut context = String::new();
-    let mut auth_failed = false;
     while let Some(job) = jobs.recv().await {
-        if auth_failed {
+        if auth_failed.load(Ordering::SeqCst) {
             continue;
         }
         let prompt = (!context.is_empty()).then(|| context.clone());
@@ -235,10 +252,12 @@ pub async fn run_transcription_worker(
             }
             Err(err @ CoreError::Api { status: 401 | 403, .. }) => {
                 // キーが無効なら以降も失敗するので、一度だけ知らせて残りは送らない
-                auth_failed = true;
-                sink.on_error(format!(
-                    "文字起こしを停止しました。API キーを確認してください（{err}）"
-                ));
+                // （もう一方の音源が先に知らせていたら、重ねて知らせない）
+                if !auth_failed.swap(true, Ordering::SeqCst) {
+                    sink.on_auth_error(format!(
+                        "文字起こしを停止しました。API キーを確認してください（{err}）"
+                    ));
+                }
             }
             Err(err) => sink.on_error(format!(
                 "{}の発話（{}〜）を文字起こしできませんでした: {err}",
@@ -367,6 +386,7 @@ mod tests {
         }
     }
 
+    // [TRN-001][REC-012]
     #[test]
     fn utterances_become_jobs_with_wall_clock_times() {
         let mut h = harness(Speaker::Me);
@@ -385,6 +405,7 @@ mod tests {
         assert!(h.sink.levels.lock().unwrap().iter().any(|(_, l)| *l > 0.1));
     }
 
+    // [TRN-006]
     #[test]
     fn gaps_without_audio_are_filled_so_times_stay_real() {
         // ループバックは相手が無音のあいだデータが来ない。5 秒空いても時刻がずれないこと
@@ -399,6 +420,7 @@ mod tests {
         assert!((jobs[1].started_at - (T0 + 6_700)).abs() <= 120, "{}", jobs[1].started_at - T0);
     }
 
+    // [REC-006][REC-007]
     #[test]
     fn paused_audio_is_dropped_and_clock_restarts_on_resume() {
         let mut h = harness(Speaker::Me);
@@ -419,6 +441,7 @@ mod tests {
         assert!((jobs[0].started_at - resumed_at).abs() <= 60);
     }
 
+    // [TRN-006]
     #[test]
     fn processing_backlog_does_not_shift_times() {
         // 処理スレッドが遅れて、後からまとめて処理しても、時刻は取り込み時刻どおり
@@ -439,6 +462,7 @@ mod tests {
         assert!((jobs[0].started_at - (T0 + 700)).abs() <= 60, "{}", jobs[0].started_at - T0);
     }
 
+    // [REC-009]
     #[test]
     fn finish_flushes_speech_in_progress() {
         let mut h = harness(Speaker::Me);
@@ -465,6 +489,7 @@ mod tests {
         }
     }
 
+    // [TRN-010][TRN-011]
     #[tokio::test]
     async fn worker_transcribes_in_order_with_context() {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -490,6 +515,7 @@ mod tests {
         );
     }
 
+    // [TRN-014]
     #[tokio::test]
     async fn worker_reports_failures_and_stops_on_auth_error() {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -509,6 +535,7 @@ mod tests {
         assert!(errors[0].contains("API キーを確認"));
     }
 
+    // [TRN-013]
     #[tokio::test]
     async fn worker_retries_server_errors_then_reports() {
         let (tx, rx) = mpsc::unbounded_channel();

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../App";
 import { MeetingPopup } from "./MeetingPopup";
@@ -19,7 +19,7 @@ async function meetingBackend(): Promise<MemoryBackend> {
 }
 
 describe("会議検出のポップアップ", () => {
-  it("録音中の表示から停止でき、停止後は議事録の作成へ進める", async () => {
+  it("[POP-003][POP-004][POP-005][POP-008][REC-016] 録音中の表示から停止でき、停止後は議事録の作成へ進める", async () => {
     const user = userEvent.setup();
     const backend = await meetingBackend();
     const note = backend.simulateMeetingNote("Google Meet 11/20 15:04");
@@ -41,7 +41,7 @@ describe("会議検出のポップアップ", () => {
     expect(openNote).toHaveBeenCalledWith(note.id, true);
   });
 
-  it("会議の終了を知らせる（Rust 側からの更新を反映）", async () => {
+  it("[POP-002][POP-005][MTG-016] 会議の終了を知らせる（Rust 側からの更新を反映）", async () => {
     const backend = await meetingBackend();
     backend.setPopup({ kind: "recording", app: "Slack ハドル", noteId: "n1", title: "Slack ハドル 11/20 10:00" });
     renderWith(backend, <MeetingPopup />);
@@ -53,7 +53,7 @@ describe("会議検出のポップアップ", () => {
     expect(await screen.findByText("録音を停止しました。「Slack ハドル 11/20 10:00」に保存しています。")).toBeInTheDocument();
   });
 
-  it("API キーがないときは設定へ案内する", async () => {
+  it("[POP-006][POP-009][MTG-014] API キーがないときは設定へ案内する", async () => {
     const user = userEvent.setup();
     const backend = createMemoryBackend();
     backend.setPopup({ kind: "error", app: "Zoom", message: "OpenAI の API キーが設定されていないため、自動で録音できませんでした" });
@@ -64,7 +64,7 @@ describe("会議検出のポップアップ", () => {
     expect(openSettings).toHaveBeenCalled();
   });
 
-  it("閉じても録音は止めない", async () => {
+  it("[POP-010] 閉じても録音は止めない", async () => {
     const user = userEvent.setup();
     const backend = await meetingBackend();
     const note = backend.simulateMeetingNote("Zoom");
@@ -78,7 +78,7 @@ describe("会議検出のポップアップ", () => {
 });
 
 describe("メイン画面との連携", () => {
-  it("自動検出で作られたノートが一覧に加わり、ポップアップから開いて議事録を作れる", async () => {
+  it("[MTG-011][MIN-018][POP-007][POP-008] 自動検出で作られたノートが一覧に加わり、ポップアップから開いて議事録を作れる", async () => {
     const backend = await meetingBackend();
     renderWith(backend, <App />);
     await screen.findByDisplayValue("プロダクト定例");
@@ -102,7 +102,7 @@ describe("メイン画面との連携", () => {
 });
 
 describe("設定", () => {
-  it("自動検出と自動起動を切り替えて保存できる", async () => {
+  it("[SET-012] 自動検出と自動起動を切り替えて保存できる", async () => {
     const user = userEvent.setup();
     const backend = createMemoryBackend();
     renderWith(backend, <SettingsDialog onClose={() => {}} />);
@@ -118,5 +118,145 @@ describe("設定", () => {
       expect(saved.autoRecordMeetings).toBe(false);
       expect(saved.launchAtLogin).toBe(false);
     });
+  });
+});
+
+describe("会議検出のポップアップ: 表示が変わるとき・閉じるとき", () => {
+  /** ポップアップを描画し、最初の内容の読み込みを待つ（偽のタイマーを使うテスト用） */
+  async function renderPopup(backend: Backend) {
+    renderWith(backend, <MeetingPopup />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  }
+
+  it("[POP-004] 利用者が停止を押したときの仕上げ中は「録音を停止しました。文字起こしを仕上げています…」と表示する", async () => {
+    const user = userEvent.setup();
+    const backend = await meetingBackend();
+    const note = backend.simulateMeetingNote("Google Meet 11/20 15:04");
+    await backend.startRecording(note.id);
+    backend.setPopup({ kind: "recording", app: "Google Meet", noteId: note.id, title: note.title });
+    // 残りの文字起こしを待っている状態で止めておく
+    let finish!: () => void;
+    const stopped = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const stop = backend.stopRecording.bind(backend);
+    vi.spyOn(backend, "stopRecording").mockImplementation(async () => {
+      await stopped;
+      return stop();
+    });
+    renderWith(backend, <MeetingPopup />);
+    const popup = await screen.findByRole("alertdialog", { name: "会議の自動録音" });
+
+    await user.click(await within(popup).findByRole("button", { name: "停止" }));
+
+    expect(await within(popup).findByText("録音を停止しました。文字起こしを仕上げています…")).toBeInTheDocument();
+    expect(within(popup).queryByText(/会議が終わりました/)).not.toBeInTheDocument();
+    expect(within(popup).queryByRole("button", { name: "停止" })).not.toBeInTheDocument();
+
+    await act(async () => finish());
+    expect(
+      await within(popup).findByText("録音を停止しました。「Google Meet 11/20 15:04」に保存しています。"),
+    ).toBeInTheDocument();
+  });
+
+  it("[POP-004] 会議が終わって自動で止まるときの仕上げ中は「会議が終わりました。文字起こしを仕上げています…」と表示する", async () => {
+    const backend = await meetingBackend();
+    backend.setPopup({ kind: "recording", app: "Zoom", noteId: "n1", title: "Zoom 11/20 10:00" });
+    renderWith(backend, <MeetingPopup />);
+    await screen.findByText(/自動で録音・文字起こしを始めました/);
+
+    act(() => backend.setPopup({ kind: "finishing", app: "Zoom", noteId: "n1", title: "Zoom 11/20 10:00" }));
+
+    expect(await screen.findByText("会議が終わりました。文字起こしを仕上げています…")).toBeInTheDocument();
+    expect(screen.queryByText("録音を停止しました。文字起こしを仕上げています…")).not.toBeInTheDocument();
+  });
+
+  it("[POP-005] 停止の表示は、30 秒たつと自動で閉じる", async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = createMemoryBackend();
+      backend.setPopup({ kind: "stopped", app: "Zoom", noteId: "n1", title: "Zoom 11/20 10:00" });
+      await renderPopup(backend);
+      expect(screen.getByText("録音を停止しました。「Zoom 11/20 10:00」に保存しています。")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "ノートを開く" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "議事録を作成" })).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(29_000);
+      });
+      expect(backend.popupClosed).toBe(false);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(backend.popupClosed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("[POP-011] 録音中の表示とエラーの表示は、自動では閉じない", async () => {
+    vi.useFakeTimers();
+    try {
+      const payloads = [
+        { kind: "recording", app: "Zoom", noteId: "n1", title: "Zoom 11/20 10:00" },
+        { kind: "error", app: "Zoom", message: "マイクが見つかりません" },
+      ] as const;
+      for (const payload of payloads) {
+        const backend = createMemoryBackend();
+        backend.setPopup(payload);
+        await renderPopup(backend);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(10 * 60_000);
+        });
+        expect(backend.popupClosed).toBe(false);
+        expect(screen.getByRole("alertdialog", { name: "会議の自動録音" })).toBeInTheDocument();
+        cleanup();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("メイン画面との連携: ポップアップからの操作", () => {
+  it("[POP-007] 「ノートを開く」で、メインウィンドウがそのノートを開き、検索欄を空に戻す", async () => {
+    const user = userEvent.setup();
+    const backend = await meetingBackend();
+    const enhance = vi.spyOn(backend, "enhanceNote");
+    renderWith(backend, <App />);
+    await screen.findByDisplayValue("プロダクト定例");
+    const search = screen.getByLabelText("ノートを検索");
+    await user.type(search, "採用");
+    let note!: ReturnType<MemoryBackend["simulateMeetingNote"]>;
+    act(() => {
+      note = backend.simulateMeetingNote("Zoom 11/20 10:00");
+    });
+
+    await act(async () => {
+      await backend.openNoteFromPopup(note.id, false);
+    });
+
+    expect(await screen.findByDisplayValue("Zoom 11/20 10:00")).toBeInTheDocument();
+    expect(search).toHaveValue("");
+    expect(backend.popupClosed).toBe(true);
+    // 「ノートを開く」だけでは、議事録の作成は始めない
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(enhance).not.toHaveBeenCalled();
+  });
+
+  it("[POP-009] 「設定を開く」で、メインウィンドウに設定画面が開く", async () => {
+    const backend = await meetingBackend();
+    renderWith(backend, <App />);
+    await screen.findByDisplayValue("プロダクト定例");
+    expect(screen.queryByRole("dialog", { name: "設定" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      await backend.openSettingsFromPopup();
+    });
+
+    expect(await screen.findByRole("dialog", { name: "設定" })).toBeInTheDocument();
+    expect(backend.popupClosed).toBe(true);
   });
 });

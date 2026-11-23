@@ -74,6 +74,7 @@ fn parse_block(block: &str) -> Option<SseEvent> {
 mod tests {
     use super::*;
 
+    // [ERR-008]
     #[test]
     fn parses_events_split_across_chunks() {
         let raw = "event: message_start\ndata: {\"a\":1}\n\nevent: content_block_delta\ndata: {\"text\":\"こんにちは\"}\n\n";
@@ -99,6 +100,7 @@ mod tests {
         );
     }
 
+    // [ERR-008]
     #[test]
     fn handles_crlf_comments_and_multiline_data() {
         let mut parser = SseParser::default();

@@ -165,6 +165,7 @@ mod tests {
         }
     }
 
+    // [MIN-013]
     #[test]
     fn enhance_message_contains_notes_and_transcript() {
         let segments = [
@@ -187,6 +188,7 @@ mod tests {
         assert!(msg.contains("日時: 20"));
     }
 
+    // [MIN-002]
     #[test]
     fn enhance_requires_some_content() {
         let ctx = MeetingContext {
@@ -200,6 +202,7 @@ mod tests {
         assert!(enhance_user_message(&ctx).is_err());
     }
 
+    // [CHT-008][MIN-013]
     #[test]
     fn chat_prompt_includes_minutes_and_uses_default_speaker_name() {
         let segments = [segment(1, Speaker::Me, "見積もりは来週出します")];
@@ -217,6 +220,7 @@ mod tests {
         assert!(prompt.contains("<my_notes>\n（なし）\n</my_notes>"));
     }
 
+    // [MIN-006]
     #[test]
     fn split_title_extracts_leading_heading() {
         assert_eq!(

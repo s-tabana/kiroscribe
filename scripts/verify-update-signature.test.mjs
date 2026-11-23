@@ -22,7 +22,7 @@ const REAL = {
   keyId: "A22BC065DB3BD78B",
 };
 
-test("Tauri CLI が実際に書き出した署名を、対になる公開鍵で検証できる", () => {
+test("[REL-006] Tauri CLI が実際に書き出した署名を、対になる公開鍵で検証できる", () => {
   const sig = verifySignature(REAL.data, REAL.signature, REAL.pubkey);
   assert.equal(sig.algorithm, "ED");
   assert.equal(formatKeyId(sig.keyId), REAL.keyId);
@@ -31,12 +31,12 @@ test("Tauri CLI が実際に書き出した署名を、対になる公開鍵で�
   assert.match(sig.fields.timestamp, /^\d+$/);
 });
 
-test("Tauri CLI の署名でも、ファイルが 1 バイトでも違えば検証に失敗する", () => {
+test("[REL-006] Tauri CLI の署名でも、ファイルが 1 バイトでも違えば検証に失敗する", () => {
   const changed = Buffer.concat([REAL.data, Buffer.from("x")]);
   assert.throws(() => verifySignature(changed, REAL.signature, REAL.pubkey), /ファイルの中身と合いません/);
 });
 
-test("ビルド時の署名と同じく、ファイル名とバージョンを読み取れる", () => {
+test("[REL-006] ビルド時の署名と同じく、ファイル名とバージョンを読み取れる", () => {
   const key = createTestKey();
   const data = Buffer.from("installer bytes");
   const sigText = signForTest(key, data, { file: "Kiroscribe_0.2.0_x64-setup.exe", version: "0.2.0" });
@@ -49,7 +49,7 @@ test("ビルド時の署名と同じく、ファイル名とバージョンを�
   assert.deepEqual(parseSignature(`${sigText}\r\n`).fields, sig.fields);
 });
 
-test("別の鍵で署名されていれば、鍵の取り違えとして知らせる", () => {
+test("[REL-006] 別の鍵で署名されていれば、鍵の取り違えとして知らせる", () => {
   const signer = createTestKey();
   const embedded = createTestKey();
   const data = Buffer.from("installer bytes");
@@ -59,7 +59,7 @@ test("別の鍵で署名されていれば、鍵の取り違えとして知ら�
   );
 });
 
-test("鍵 ID だけが同じで鍵が違う場合も、検証に失敗する", () => {
+test("[REL-006] 鍵 ID だけが同じで鍵が違う場合も、検証に失敗する", () => {
   const signer = createTestKey();
   const other = createTestKey();
   const data = Buffer.from("installer bytes");
@@ -76,7 +76,7 @@ test("鍵 ID だけが同じで鍵が違う場合も、検証に失敗する", (
   );
 });
 
-test("trusted comment（ファイル名・バージョン）が書き換えられていれば失敗する", () => {
+test("[REL-006] trusted comment（ファイル名・バージョン）が書き換えられていれば失敗する", () => {
   const key = createTestKey();
   const data = Buffer.from("installer bytes");
   const sigText = signForTest(key, data, { file: "a.exe", version: "0.1.0" });
@@ -86,7 +86,7 @@ test("trusted comment（ファイル名・バージョン）が書き換えら�
   assert.throws(() => verifySignature(data, tampered, key.pubkey), /trusted comment が改変/);
 });
 
-test("形式の違う入力は、分かるメッセージで断る", () => {
+test("[REL-006] 形式の違う入力は、分かるメッセージで断る", () => {
   const key = createTestKey();
   const data = Buffer.from("x");
   assert.throws(() => verifySignature(data, "", key.pubkey), /署名.*base64/);
@@ -97,7 +97,7 @@ test("形式の違う入力は、分かるメッセージで断る", () => {
   );
 });
 
-test("コマンドとして実行すると、tauri.conf.json の公開鍵で検証する", () => {
+test("[REL-006] コマンドとして実行すると、tauri.conf.json の公開鍵で検証する", () => {
   const dir = mkdtempSync(join(tmpdir(), "kiroscribe-verify-"));
   try {
     const key = createTestKey();

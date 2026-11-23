@@ -21,7 +21,7 @@ export function toSummary(note: Note): NoteSummary {
     id: note.id,
     title: note.title,
     preview: makePreview(source),
-    hasEnhanced: note.enhancedNotes !== null,
+    hasEnhanced: !!note.enhancedNotes?.trim(),
     createdAt: note.createdAt,
     updatedAt: note.updatedAt,
   };
@@ -33,7 +33,10 @@ export function displayTitle(title: string): string {
   return title.trim() || UNTITLED;
 }
 
-/** サイドバーの検索。タイトルとプレビューの部分一致（大文字小文字を区別しない） */
+/**
+ * サイドバーの検索のうち、画面だけでその場で分かる分: タイトルとプレビューの部分一致（大文字小文字を区別しない）。
+ * メモの本文・議事録・文字起こしは、バックエンドの searchNotes で調べる
+ */
 export function matchesQuery(note: NoteSummary, query: string): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;

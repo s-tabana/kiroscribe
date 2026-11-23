@@ -106,6 +106,7 @@ impl Database {
 mod tests {
     use super::*;
 
+    // [DAT-001][DAT-002]
     #[test]
     fn migrations_apply_once_and_are_idempotent() {
         let dir = tempfile::tempdir().unwrap();
@@ -119,6 +120,7 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
     }
 
+    // [DAT-003]
     #[test]
     fn foreign_keys_are_enforced() {
         let db = Database::open_in_memory().unwrap();

@@ -124,12 +124,54 @@ impl Database {
                 id: row.get("id")?,
                 title: row.get("title")?,
                 preview: make_preview(source),
-                has_enhanced: enhanced.is_some(),
+                // 中身のない議事録は「議事録なし」として扱う
+                has_enhanced: enhanced.as_deref().is_some_and(|text| !text.trim().is_empty()),
                 created_at: row.get("created_at")?,
                 updated_at: row.get("updated_at")?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// 検索の文字を、タイトル・自分のメモ・議事録・文字起こしのどれかに含むノートの ID を、一覧と同じ並びで返す。
+    /// 大文字と小文字は区別しない。空（空白だけ）の文字では何も返さない。
+    pub fn search_notes(&self, query: &str) -> Result<Vec<String>> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let contains = |text: &str| text.to_lowercase().contains(&needle);
+
+        let mut ordered: Vec<String> = Vec::new();
+        let mut matched: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut notes = self.conn().prepare(
+            "SELECT id, title, user_notes, enhanced_notes FROM notes ORDER BY created_at DESC, rowid DESC",
+        )?;
+        let rows = notes.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, title, user_notes, enhanced) = row?;
+            if contains(&title) || contains(&user_notes) || enhanced.as_deref().is_some_and(contains) {
+                matched.insert(id.clone());
+            }
+            ordered.push(id);
+        }
+
+        let mut segments = self.conn().prepare("SELECT note_id, text FROM transcript_segments")?;
+        let rows = segments.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (note_id, text) = row?;
+            if !matched.contains(&note_id) && contains(&text) {
+                matched.insert(note_id);
+            }
+        }
+        Ok(ordered.into_iter().filter(|id| matched.contains(id)).collect())
     }
 
     pub fn update_note(&self, id: &str, patch: &NotePatch) -> Result<Note> {
@@ -141,17 +183,24 @@ impl Database {
             note.user_notes = user_notes.clone();
         }
         if let Some(enhanced) = &patch.enhanced_notes {
-            note.enhanced_notes = Some(enhanced.clone());
+            if enhanced.trim().is_empty() {
+                // 議事録を編集で空（空白だけ）にしたら、「議事録なし」の状態に戻す
+                note.enhanced_notes = None;
+                note.enhanced_at = None;
+            } else {
+                note.enhanced_notes = Some(enhanced.clone());
+            }
         }
         note.updated_at = now_ms().max(note.updated_at);
         self.conn().execute(
-            "UPDATE notes SET title = ?2, user_notes = ?3, enhanced_notes = ?4, updated_at = ?5
+            "UPDATE notes SET title = ?2, user_notes = ?3, enhanced_notes = ?4, enhanced_at = ?5, updated_at = ?6
              WHERE id = ?1",
             params![
                 note.id,
                 note.title,
                 note.user_notes,
                 note.enhanced_notes,
+                note.enhanced_at,
                 note.updated_at
             ],
         )?;
@@ -206,6 +255,7 @@ mod tests {
         Database::open_in_memory().unwrap()
     }
 
+    // [NOTE-001]
     #[test]
     fn create_and_get_note() {
         let db = db();
@@ -214,12 +264,14 @@ mod tests {
         assert_eq!(db.get_note(&note.id).unwrap(), note);
     }
 
+    // [NOTE-017]
     #[test]
     fn get_missing_note_is_not_found() {
         let err = db().get_note("nope").unwrap_err();
         assert!(matches!(err, CoreError::NoteNotFound(_)));
     }
 
+    // [NOTE-018]
     #[test]
     fn update_note_changes_only_given_fields() {
         let db = db();
@@ -251,6 +303,7 @@ mod tests {
         assert_eq!(db.get_note(&note.id).unwrap(), updated);
     }
 
+    // [NOTE-004][NOTE-007]
     #[test]
     fn list_notes_newest_first_with_preview() {
         let db = db();
@@ -274,6 +327,7 @@ mod tests {
         assert!(!list[1].has_enhanced);
     }
 
+    // [MIN-006][NOTE-007]
     #[test]
     fn save_enhanced_sets_title_only_when_empty() {
         let db = db();
@@ -295,6 +349,7 @@ mod tests {
         assert_eq!(list[0].preview, "B", "最新の議事録の本文がプレビューになる");
     }
 
+    // [NOTE-014][NOTE-017]
     #[test]
     fn delete_note_removes_it() {
         let db = db();
@@ -307,6 +362,7 @@ mod tests {
         ));
     }
 
+    // [NOTE-007]
     #[test]
     fn preview_truncates_long_lines() {
         let long = "あ".repeat(100);

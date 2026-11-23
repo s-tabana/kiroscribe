@@ -17,6 +17,8 @@ pub trait Transcribe: Send + Sync {
 }
 
 pub const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+/// 1 回の送信を打ち切るまでの時間
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub struct OpenAiTranscriber {
     client: reqwest::Client,
@@ -24,6 +26,7 @@ pub struct OpenAiTranscriber {
     api_key: String,
     model: String,
     language: Option<String>,
+    timeout: Duration,
 }
 
 #[derive(Deserialize)]
@@ -43,11 +46,18 @@ impl OpenAiTranscriber {
             api_key: api_key.to_string(),
             model: model.to_string(),
             language,
+            timeout: REQUEST_TIMEOUT,
         }
     }
 
     pub fn with_base_url(mut self, base_url: &str) -> Self {
         self.base_url = base_url.trim_end_matches('/').to_string();
+        self
+    }
+
+    /// 1 回の送信を打ち切るまでの時間を変える（テスト用。既定は [`REQUEST_TIMEOUT`]）。
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
         self
     }
 
@@ -71,7 +81,7 @@ impl OpenAiTranscriber {
             .post(format!("{}/audio/transcriptions", self.base_url))
             .bearer_auth(&self.api_key)
             .multipart(form)
-            .timeout(Duration::from_secs(90))
+            .timeout(self.timeout)
             .send()
             .await?;
         let status = response.status();
@@ -132,6 +142,7 @@ mod tests {
 
     use super::*;
 
+    // [TRN-008][TRN-009][SEC-004]
     #[tokio::test]
     async fn sends_multipart_and_returns_text() {
         let server = MockServer::start().await;
@@ -162,6 +173,7 @@ mod tests {
         assert!(body.contains("audio/wav"));
     }
 
+    // [TRN-009][TRN-010]
     #[tokio::test]
     async fn auto_language_is_not_sent() {
         let server = MockServer::start().await;
@@ -177,6 +189,7 @@ mod tests {
         assert!(!body.contains("name=\"prompt\""));
     }
 
+    // [ERR-003]
     #[tokio::test]
     async fn api_errors_carry_status_and_message() {
         let server = MockServer::start().await;
@@ -202,6 +215,7 @@ mod tests {
         }
     }
 
+    // [TRN-012]
     #[test]
     fn hallucinations_and_empty_results_are_dropped() {
         assert_eq!(clean_transcript("  "), None);
@@ -214,6 +228,7 @@ mod tests {
         );
     }
 
+    // [TRN-010]
     #[test]
     fn context_tail_keeps_last_chars() {
         assert_eq!(context_tail("あいうえお", 3), "うえお");

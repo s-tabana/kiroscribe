@@ -17,6 +17,8 @@ export function MeetingPopup() {
   const backend = useBackend();
   const [payload, setPayload] = useState<PopupPayload | null>(null);
   const [busy, setBusy] = useState(false);
+  /** このポップアップの「停止」で止めた（会議が終わって自動で止まったのではない） */
+  const [stoppedHere, setStoppedHere] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status] = useRecordingStatus(backend);
   const now = useNow(payload?.kind === "recording");
@@ -24,7 +26,10 @@ export function MeetingPopup() {
   useEffect(() => {
     let active = true;
     void backend.getPopupState().then((p) => active && p && setPayload(p));
-    const off = backend.onPopupUpdate((p) => setPayload(p));
+    const off = backend.onPopupUpdate((p) => {
+      setPayload(p);
+      setStoppedHere(false);
+    });
     return () => {
       active = false;
       off();
@@ -43,6 +48,7 @@ export function MeetingPopup() {
   const stop = async () => {
     if (payload.kind !== "recording") return;
     setBusy(true);
+    setStoppedHere(true);
     setPayload({ ...payload, kind: "finishing" });
     try {
       await backend.stopRecording();
@@ -97,7 +103,9 @@ export function MeetingPopup() {
       {payload.kind === "finishing" && (
         <p className="popup-message">
           <span className="spinner" aria-hidden="true" />
-          会議が終わりました。文字起こしを仕上げています…
+          {stoppedHere
+            ? "録音を停止しました。文字起こしを仕上げています…"
+            : "会議が終わりました。文字起こしを仕上げています…"}
         </p>
       )}
 
