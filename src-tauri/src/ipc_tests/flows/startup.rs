@@ -105,6 +105,7 @@ fn startup_continues_when_the_legacy_keys_cannot_be_read() {
 }
 
 /// 引き継ぎに失敗したら、空のデータベースでは始めずに起動を止める。直れば、次の起動で引き継げる。
+// [DAT-007]
 #[test]
 fn a_failed_takeover_stops_the_startup_and_can_be_retried() {
     let root = root("failed-takeover");
@@ -134,4 +135,22 @@ fn a_failed_takeover_stops_the_startup_and_can_be_retried() {
     assert!(reason.starts_with("データベース（"), "{reason}");
     assert!(reason.contains("を開けませんでした: "), "{reason}");
     assert_eq!(std::fs::read(&db_path).unwrap(), "データベースではない内容".as_bytes());
+}
+
+/// 起動時の失敗は、理由と、データを変えていないことを、利用者に知らせる文にする。
+// [DAT-007]
+#[test]
+fn a_startup_failure_is_explained_to_the_user() {
+    let root = root("explained");
+    let data_dir = current(&root);
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(data_dir.join(DB_FILE), "データベースではない内容").unwrap();
+    let reason = open_data(&data_dir).err().expect("起動を止める");
+
+    let message = crate::startup::failure_message(&reason);
+    assert!(message.starts_with("Kiroscribe を起動できませんでした。"), "{message}");
+    assert!(message.contains(&reason), "理由が入っていない: {message}");
+    assert!(message.contains(&data_dir.join(DB_FILE).display().to_string()), "どのファイルかが分からない: {message}");
+    assert!(message.contains("データは変更していません"), "{message}");
+    assert_eq!(crate::startup::FAILURE_TITLE, "Kiroscribe");
 }

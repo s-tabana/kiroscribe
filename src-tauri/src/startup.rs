@@ -7,6 +7,8 @@ use kiroscribe_core::secrets::{migrate_legacy_api_keys, platform_store, SecretSt
 use kiroscribe_core::settings::Settings;
 use kiroscribe_core::Database;
 
+use crate::runtime::AppHandle;
+
 /// データベースのファイル名（アプリのデータフォルダの中）。
 pub const DB_FILE: &str = "kiroscribe.db";
 
@@ -45,4 +47,39 @@ pub fn open_data(data_dir: &Path) -> Result<Opened, String> {
         }
     }
     Ok(Opened { db, settings, secrets })
+}
+
+/// 起動できなかったことを知らせるダイアログの題名。
+pub const FAILURE_TITLE: &str = "Kiroscribe";
+
+/// 起動できなかったことを、利用者に知らせる文。
+pub fn failure_message(reason: &str) -> String {
+    format!(
+        "Kiroscribe を起動できませんでした。\n\n{reason}\n\n\
+         データは変更していません。原因を取り除いてから、もう一度起動してください。"
+    )
+}
+
+/// 起動時の失敗を、理由を知らせるダイアログで伝えてから、アプリを終了する。
+/// リリース用のビルドにはコンソールがないので、ダイアログを出さないと、何も表示されないまま終了してしまう。
+pub fn report_failure(app: &AppHandle, reason: &str) {
+    let message = failure_message(reason);
+    eprintln!("{message}");
+    // E2E テスト用のビルドでは、OS のダイアログは出さずに、出そうとしたことを記録して終了する（src/e2e.rs）
+    #[cfg(feature = "e2e")]
+    {
+        let _ = app;
+        crate::e2e::record_message_dialog(FAILURE_TITLE, &message, "error");
+        std::process::exit(1);
+    }
+    #[cfg(not(feature = "e2e"))]
+    {
+        use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+        let handle = app.clone();
+        app.dialog()
+            .message(message)
+            .title(FAILURE_TITLE)
+            .kind(MessageDialogKind::Error)
+            .show(move |_| handle.exit(1));
+    }
 }

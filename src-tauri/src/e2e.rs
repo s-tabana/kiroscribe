@@ -250,6 +250,14 @@ fn message(message: String, title: Option<String>, kind: Option<String>, buttons
     answer
 }
 
+/// 本体が出そうとしたメッセージのダイアログ（起動できなかったときの知らせ）を、画面からのものと同じ形で記録する。
+pub fn record_message_dialog(title: &str, message: &str, kind: &str) {
+    append_line(
+        DIALOG_LOG_FILE,
+        &json!({ "type": "message", "message": message, "title": title, "kind": kind, "answer": "Ok" }).to_string(),
+    );
+}
+
 /// `plugin:dialog|save`（保存ダイアログ）の代わり。`dialogs.json` のパスを返す。
 #[tauri::command]
 fn save(options: Value) -> Option<String> {

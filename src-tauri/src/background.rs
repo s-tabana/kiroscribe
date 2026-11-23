@@ -61,6 +61,10 @@ impl BackgroundState {
 }
 
 pub fn show_main(app: &AppHandle) {
+    // 起動に失敗して、理由を知らせるダイアログを出しているあいだは、使えない画面を出さない
+    if app.try_state::<AppState>().is_none() {
+        return;
+    }
     if let Some(window) = app.get_webview_window(MAIN_LABEL) {
         let _ = window.unminimize();
         let _ = window.show();
