@@ -23,7 +23,10 @@ public static class KiroscribeWindow {
 }
 "@
 # 画面に見えているか（隠した内部用のウィンドウ（多重起動の判定・イベントの受け口など）を除く）
+# 見えていても、16 ピクセル四方以下のもの（Tao のイベントの受け口など、内部用のウィンドウ）は数えない
 function Is-Shown($el) {
+  $r = $el.Current.BoundingRectangle
+  if ($r.Width -le 16 -and $r.Height -le 16) { return $false }
   $hwnd = $el.Current.NativeWindowHandle
   if ($hwnd -eq 0) { return -not $el.Current.IsOffscreen }
   return [KiroscribeWindow]::IsWindowVisible([IntPtr]$hwnd)
@@ -132,6 +135,47 @@ public static class KiroscribeMouse {
 }
 "@
 $True_ = [System.Windows.Automation.Condition]::TrueCondition
+Add-Type @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class KiroscribeMenu {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern int GetMenuItemCount(IntPtr menu);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetMenuString(IntPtr menu, uint item, StringBuilder text, int max, uint flags);
+  [DllImport("user32.dll")] public static extern uint GetMenuState(IntPtr menu, uint item, uint flags);
+  [DllImport("user32.dll")] public static extern bool GetMenuItemRect(IntPtr hwnd, IntPtr menu, uint item, out RECT rect);
+}
+"@
+# 見えているポップアップのメニュー（#32768）を、Windows の API で直接読む（UI オートメーションでは項目が見えないことがある）。
+# 項目ごとに 名前・チェック・区切り線か・画面の位置 を返す。メニューが出ていなければ $null
+function Read-OpenMenu {
+  foreach ($w in $AE::RootElement.FindAll($Scope::Children, $True_)) {
+    if ($w.Current.ClassName -ne '#32768' -or -not (Is-Shown $w)) { continue }
+    $hwnd = [IntPtr]$w.Current.NativeWindowHandle
+    $menu = [KiroscribeMenu]::SendMessage($hwnd, 0x01E1, [IntPtr]::Zero, [IntPtr]::Zero)  # MN_GETHMENU
+    if ($menu -eq [IntPtr]::Zero) { continue }
+    $count = [KiroscribeMenu]::GetMenuItemCount($menu)
+    if ($count -le 0) { continue }
+    $items = @()
+    for ($i = 0; $i -lt $count; $i++) {
+      $sb = New-Object System.Text.StringBuilder 512
+      [KiroscribeMenu]::GetMenuString($menu, [uint32]$i, $sb, 512, 0x400) | Out-Null  # MF_BYPOSITION
+      $state = [KiroscribeMenu]::GetMenuState($menu, [uint32]$i, 0x400)
+      $rect = New-Object KiroscribeMenu+RECT
+      [KiroscribeMenu]::GetMenuItemRect([IntPtr]::Zero, $menu, [uint32]$i, [ref]$rect) | Out-Null
+      $items += [pscustomobject]@{
+        name = ($sb.ToString() -replace '&', '')
+        checked = (($state -band 0x8) -ne 0)
+        separator = (($state -band 0x800) -ne 0)
+        x = [int](($rect.Left + $rect.Right) / 2); y = [int](($rect.Top + $rect.Bottom) / 2)
+      }
+    }
+    return ,$items
+  }
+  return $null
+}
 function Named($name) { New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, $name) }
 function Taskbar { $AE::RootElement.FindFirst($Scope::Children, (New-Object System.Windows.Automation.PropertyCondition($AE::ClassNameProperty, 'Shell_TrayWnd'))) }
 function Click-Element($el, $right) {
@@ -218,27 +262,11 @@ Click-Element $icon ($env:KIROSCRIBE_TRAY_BUTTON -eq 'right')
  * メニューが出ていなければ null
  */
 export function openMenu(pid) {
-  const out = powershell(
+  const out = trayScript(
     `
-# メニューのウィンドウ（#32768）は、隠れたものが常にあるので、見えていて項目のあるものだけを読む
-$isItem = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::MenuItem)
-foreach ($w in $AE::RootElement.FindAll($Scope::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
-  if ($w.Current.ClassName -ne '#32768' -or $w.Current.IsOffscreen) { continue }
-  $found = $w.FindAll($Scope::Descendants, $isItem)
-  if ($found.Count -eq 0) { continue }
-  $items = @()
-  foreach ($e in $found) {
-    $checked = $null
-    $toggle = $null
-    if ($e.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$toggle)) {
-      $checked = ($toggle.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On)
-    }
-    $items += [pscustomobject]@{ name = $e.Current.Name; checked = $checked }
-  }
-  ConvertTo-Json -InputObject @($items) -Depth 3 -Compress
-  exit 0
-}
-'null'
+$items = Read-OpenMenu
+if ($null -eq $items) { 'null'; exit 0 }
+ConvertTo-Json -Compress -InputObject @($items | Where-Object { -not $_.separator } | ForEach-Object { [pscustomobject]@{ name = $_.name; checked = $_.checked } })
 `,
     { KIROSCRIBE_UIA_PID: String(pid) },
   );
@@ -249,12 +277,12 @@ foreach ($w in $AE::RootElement.FindAll($Scope::Children, [System.Windows.Automa
 export function chooseMenuItem(name) {
   const out = trayScript(
     `
-foreach ($w in $AE::RootElement.FindAll($Scope::Children, $True_)) {
-  if ($w.Current.ClassName -ne '#32768' -or $w.Current.IsOffscreen) { continue }
-  $item = $w.FindFirst($Scope::Descendants, (Named $env:KIROSCRIBE_MENU_ITEM))
-  if ($item -ne $null) { Click-Element $item $false; 'chosen'; exit 0 }
-}
-'missing'
+$items = Read-OpenMenu
+if ($null -eq $items) { 'missing'; exit 0 }
+$item = $items | Where-Object { $_.name -eq $env:KIROSCRIBE_MENU_ITEM } | Select-Object -First 1
+if ($null -eq $item) { 'missing'; exit 0 }
+[KiroscribeMouse]::Click($item.x, $item.y, $false)
+'chosen'
 `,
     { KIROSCRIBE_MENU_ITEM: name },
   );
