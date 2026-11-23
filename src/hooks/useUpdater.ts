@@ -50,6 +50,16 @@ export function useUpdater(backend: Backend): Updater {
     };
   }, [backend]);
 
+  // 前の操作の結果（失敗の理由など）は、次の更新が始まったら消す。更新は、サイドバーと設定画面のどちらからでも
+  // 始められ、自動でも始まるので、この画面の外で始まったときにも、古い失敗の文を残さない
+  const busy = status.phase !== "idle";
+  const version = status.available?.version ?? null;
+  useEffect(() => {
+    if (busy) setMessage(null);
+  }, [busy]);
+  // 見つかっているバージョンが変わった・なくなったときも、前のバージョンについての知らせは消す
+  useEffect(() => setMessage((current) => (current?.kind === "error" ? null : current)), [version]);
+
   const check = useCallback(async () => {
     setChecking(true);
     setMessage(null);

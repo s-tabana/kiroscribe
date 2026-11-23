@@ -428,6 +428,30 @@ describe("更新を始められないとき・失敗したとき", () => {
     await waitFor(async () => expect(await backend.getAppVersion()).toBe("0.3.0"), { timeout: 3000 });
   });
 
+  it("[UPD-015] 失敗の知らせは、次に更新を始めたとき（設定画面から始めたときも）に消える", async () => {
+    const user = userEvent.setup();
+    const backend = updateBackend();
+    backend.simulateUpdate("0.3.0", { announce: true });
+    vi.spyOn(backend, "installUpdate").mockRejectedValueOnce(
+      "更新をダウンロードできませんでした。インターネット接続を確認して、もう一度お試しください",
+    );
+    renderWith(backend, <App />);
+    const banner = await screen.findByRole("region", { name: "アプリの更新" });
+    await user.click(await within(banner).findByRole("button", { name: "更新" }));
+    expect(await within(banner).findByRole("alert")).toHaveTextContent("更新をダウンロードできませんでした");
+
+    // 設定画面の［更新して再起動］から、もう一度始める
+    await user.click(screen.getByRole("button", { name: "設定" }));
+    const section = await about();
+    await user.click(await within(section).findByRole("button", { name: "更新して再起動" }));
+
+    // サイドバーの知らせは、ダウンロードの表示に変わり、前の失敗の文は残らない
+    expect(await within(banner).findByRole("progressbar", { name: "更新のダウンロード" })).toBeInTheDocument();
+    expect(within(banner).queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(banner).queryByText(/更新をダウンロードできませんでした/)).not.toBeInTheDocument();
+    await waitFor(async () => expect(await backend.getAppVersion()).toBe("0.3.0"), { timeout: 3000 });
+  });
+
   it("[UPD-015] 設定画面でも、失敗の理由（署名を確認できなかった、など）を表示する", async () => {
     const user = userEvent.setup();
     const backend = updateBackend();
