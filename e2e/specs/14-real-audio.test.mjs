@@ -145,10 +145,14 @@ test("[REC-021] 録音中に音声デバイスで問題が起きても、エラ�
     // 開いているデバイスを使えなくする（USB のマイクを抜いたときと同じく、アプリにはデバイスのエラーが届く）
     setAudioServiceRunning(false);
     await toastText(session, "の音声デバイスでエラーが発生しました", { timeout: 30_000 });
-    assert.equal(ctx.app.isRunning(), true, "デバイスがなくなって、アプリが落ちた");
+    assert.equal(ctx.app.isRunning(), true, "デバイスの問題で、アプリが落ちた");
     await dismissToast(session);
     await pressBarButton(session, "停止");
-    await session.$(`xpath://*[@aria-label="録音"]//button[normalize-space(.)="録音を再開"]`, { timeout: 30_000 });
+    // 止まると、録音していない状態に戻る（文字起こしがまだなければ「録音を開始」、あれば「録音を再開」）
+    await session.$(
+      `xpath://*[@aria-label="録音"]//button[normalize-space(.)="録音を開始" or normalize-space(.)="録音を再開"]`,
+      { timeout: 30_000 },
+    );
   } finally {
     setAudioServiceRunning(true);
     await sleep(3_000);
