@@ -48,6 +48,13 @@ pub fn prepare<R: Runtime>(context: &mut Context<R>) {
         core::update_endpoint(),
         core::config().update_pubkey.as_deref(),
     );
+    // Windows のドライバー（msedgedriver）が環境変数で渡すウェブビューの引数を、ウィンドウの設定に入れる
+    if let Some(args) = browser_args() {
+        eprintln!("[e2e] ウェブビューの追加の引数: {args}");
+        for window in &mut context.config_mut().app.windows {
+            window.additional_browser_args = Some(args.clone());
+        }
+    }
     if core::config().main_visible_at_start {
         for window in &mut context.config_mut().app.windows {
             window.visible = true;
@@ -56,13 +63,69 @@ pub fn prepare<R: Runtime>(context: &mut Context<R>) {
     log_environment(dir);
 }
 
+/// ウェブビュー（WebView2）に追加の引数を渡すための環境変数。Windows のドライバー（msedgedriver）は、
+/// これでデバッグ用のポートを開かせて（`--remote-debugging-port=0`）、アプリの画面につなぐ。
+const BROWSER_ARGS_ENV: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+
+/// Tauri（wry）が、指定のないときにウェブビューへ渡す引数。
+/// 製品のビルドでは wry がこのとおりに渡す（wry の `webview2` の実装と、製品の起動引数で確認した値）。
+const DEFAULT_BROWSER_ARGS: &str =
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required";
+
+/// E2E テストのときにウェブビューへ渡す引数。環境変数に引数がなければ `None`（製品と同じく、wry の既定に任せる）。
+///
+/// wry は、既定の引数をウェブビューの「オプション」として必ず渡す。WebView2 は、オプションの引数があると環境変数の
+/// 引数を使わないので、そのままではドライバーの引数（デバッグ用のポートなど）が届かず、WebDriver でつながらない。
+/// そこで、既定の引数と環境変数の引数を合わせたものを、こちらから明示して渡す。
+/// 同じデータフォルダを使うウェブビューは引数をそろえる必要があるので、ポップアップにも同じものを渡す。
+pub fn browser_args() -> Option<String> {
+    let from_env = std::env::var(BROWSER_ARGS_ENV).ok()?;
+    (!from_env.trim().is_empty()).then(|| merge_browser_args(DEFAULT_BROWSER_ARGS, &from_env))
+}
+
+/// 2 組の引数を 1 つにまとめる。`--disable-features=` と `--enable-features=` は、複数あると最後の 1 つしか
+/// 効かないので、値（機能名の一覧）を 1 つにまとめる。それ以外は、同じものを除いて、出てきた順に並べる。
+fn merge_browser_args(defaults: &str, extra: &str) -> String {
+    const LISTS: [&str; 2] = ["--disable-features=", "--enable-features="];
+    let mut features: [Vec<&str>; 2] = [Vec::new(), Vec::new()];
+    let mut list_position: [Option<usize>; 2] = [None, None];
+    let mut merged: Vec<String> = Vec::new();
+    for arg in defaults.split_whitespace().chain(extra.split_whitespace()) {
+        match LISTS.iter().position(|prefix| arg.starts_with(prefix)) {
+            Some(list) => {
+                for feature in arg[LISTS[list].len()..].split(',').filter(|feature| !feature.is_empty()) {
+                    if !features[list].contains(&feature) {
+                        features[list].push(feature);
+                    }
+                }
+                if list_position[list].is_none() {
+                    // あとで、まとめた値に置き換える
+                    list_position[list] = Some(merged.len());
+                    merged.push(String::new());
+                }
+            }
+            None => {
+                if !merged.iter().any(|known| known == arg) {
+                    merged.push(arg.to_string());
+                }
+            }
+        }
+    }
+    for list in 0..LISTS.len() {
+        if let Some(position) = list_position[list] {
+            merged[position] = format!("{}{}", LISTS[list], features[list].join(","));
+        }
+    }
+    merged.join(" ")
+}
+
 /// WebDriver でつながらないときに原因を追えるよう、起動のしかたをログに残す。
 /// Windows のドライバー（msedgedriver）は、環境変数でウェブビューにデバッグ用のポートを開かせる。
 fn log_environment(dir: &Path) {
     let args: Vec<String> = std::env::args().skip(1).collect();
     eprintln!("[e2e] 引数: {args:?}");
     for name in [
-        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+        BROWSER_ARGS_ENV,
         "WEBVIEW2_USER_DATA_FOLDER",
         "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER",
         "TAURI_WEBVIEW_AUTOMATION",
@@ -314,6 +377,39 @@ pub fn update_first_check_delay() -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ドライバーが環境変数で渡す引数は、Tauri の既定の引数と合わせて 1 つにする。
+    #[test]
+    fn driver_arguments_are_merged_with_the_defaults() {
+        // msedgedriver が実際に渡す引数（抜粋）
+        let from_driver = "--allow-pre-commit-input --disable-features=IgnoreDuplicateNavs,Prewarm --enable-automation \
+                           --remote-debugging-port=0 --test-type=webdriver";
+        let merged = merge_browser_args(DEFAULT_BROWSER_ARGS, from_driver);
+        assert_eq!(
+            merged,
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,IgnoreDuplicateNavs,Prewarm \
+             --autoplay-policy=no-user-gesture-required --allow-pre-commit-input --enable-automation \
+             --remote-debugging-port=0 --test-type=webdriver"
+        );
+        // --disable-features は 1 つだけ（複数あると、最後の 1 つしか効かない）
+        assert_eq!(merged.matches("--disable-features=").count(), 1);
+        for kept in ["msSmartScreenProtection", "Prewarm", "--remote-debugging-port=0", "--autoplay-policy=no-user-gesture-required"] {
+            assert!(merged.contains(kept), "{kept} がなくなっている: {merged}");
+        }
+
+        // 同じ引数・同じ機能名は 1 回だけ。--enable-features も同じようにまとめる
+        assert_eq!(
+            merge_browser_args(
+                "--disable-features=A,B --enable-features=X --flag",
+                "--flag --enable-features=Y,X --disable-features=B,C --other=1"
+            ),
+            "--disable-features=A,B,C --enable-features=X,Y --flag --other=1"
+        );
+        // 片方にしかないときは、そのまま
+        assert_eq!(merge_browser_args(DEFAULT_BROWSER_ARGS, ""), DEFAULT_BROWSER_ARGS);
+        assert_eq!(merge_browser_args("", "  --remote-debugging-port=0  "), "--remote-debugging-port=0");
+        assert_eq!(merge_browser_args("--a", "--enable-features=X"), "--a --enable-features=X");
+    }
 
     #[test]
     fn identifier_depends_on_the_directory() {

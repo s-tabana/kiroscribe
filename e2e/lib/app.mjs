@@ -350,9 +350,20 @@ export function appEnvironment(workspace) {
   return env;
 }
 
+/**
+ * tauri-driver とアプリのログから、読むところだけを残す。
+ * tauri-driver は、ネイティブのドライバーが待ち受けを始める前の問い合わせのたびに、長いスタックトレースを出す
+ */
+export function cleanLog(text) {
+  return text
+    .split("\n")
+    .filter((line) => !/^\s+\d+: |^\s+at |^Stack backtrace:|^Caused by:|^\s*$/.test(line))
+    .join("\n");
+}
+
 function tail(file, lines = 30) {
   try {
-    const text = fs.readFileSync(file, "utf8").trimEnd();
+    const text = cleanLog(fs.readFileSync(file, "utf8")).trimEnd();
     return text ? `--- ${path.basename(file)} の末尾 ---\n${text.split("\n").slice(-lines).join("\n")}` : "";
   } catch {
     return "";
@@ -452,6 +463,8 @@ export class Context {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "error.txt"), `${error?.stack ?? error}\n`);
 
+    // ジョブのログだけでも様子が分かるよう、画面に出ている文字とログの末尾を、エラーの文にも付ける
+    const summary = [];
     const session = this.app?.session;
     if (session) {
       try {
@@ -459,13 +472,23 @@ export class Context {
         for (const [index, handle] of handles.entries()) {
           await session.switchToWindow(handle);
           const name = handle === this.app.mainHandle ? "main" : `window-${index}`;
+          const text = await session
+            .execute("return document.body ? document.body.innerText : ''")
+            .catch((err) => `（読めません: ${err.message}）`);
+          summary.push(`--- ウィンドウ ${name}（${await session.url().catch(() => "?")}）に出ている文字 ---`);
+          summary.push(String(text).replace(/\n{2,}/g, "\n").trim().slice(0, 1200));
           fs.writeFileSync(path.join(dir, `${name}.png`), await session.screenshot());
           fs.writeFileSync(path.join(dir, `${name}.html`), await session.source());
         }
       } catch (err) {
+        summary.push(`（画面の様子を取れませんでした: ${err?.message ?? err}）`);
         fs.writeFileSync(path.join(dir, "screenshot-error.txt"), `${err?.stack ?? err}\n`);
       }
     }
+    summary.push(tail(this.work.file(`app-${this.launches}.log`), 40));
+    const recent = this.server.requests.slice(-12).map((request) => `${request.method} ${request.path}`);
+    summary.push(`--- 模擬サーバーが受けた最後のリクエスト（全 ${this.server.requests.length} 件） ---\n${recent.join("\n")}`);
+    this.failureSummary = summary.filter(Boolean).join("\n");
     // アプリと tauri-driver のログ、アプリとやり取りしたファイル（データフォルダは除く）
     for (const entry of fs.readdirSync(this.work.dir, { withFileTypes: true })) {
       if (entry.isFile()) fs.copyFileSync(this.work.file(entry.name), path.join(dir, entry.name));
@@ -522,6 +545,8 @@ export function test(name, options, fn) {
     } catch (error) {
       const dir = await context.saveArtifacts(error).catch((err) => `（保存できませんでした: ${err.message}）`);
       error.message += `\n調べるための材料: ${dir}`;
+      // ジョブのログだけでも様子が分かるよう、画面に出ていた文字とログの末尾を出す
+      console.error(`\n===== 失敗: ${name} =====\n${error.message}\n${context.failureSummary ?? ""}\n=====`);
       throw error;
     } finally {
       await context.dispose();

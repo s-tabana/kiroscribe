@@ -4,7 +4,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { appBinary, appEnvironment, freePort, tauriDriverBinary } from "./app.mjs";
+import { appBinary, appEnvironment, cleanLog, freePort, tauriDriverBinary } from "./app.mjs";
 import { request, waitForServer } from "./webdriver.mjs";
 
 const IS_WINDOWS = process.platform === "win32";
@@ -71,7 +71,7 @@ export function processSnapshot() {
 /** ファイルの中身（長ければ、先頭の head 行と末尾の tail 行だけ） */
 export function fileExcerpt(file, { head = 0, tail = 300 } = {}) {
   try {
-    const all = fs.readFileSync(file, "utf8").trimEnd().split("\n");
+    const all = cleanLog(fs.readFileSync(file, "utf8")).trimEnd().split("\n");
     if (all.length <= head + tail) return all.join("\n");
     const skipped = all.length - head - tail;
     return [...all.slice(0, head), `（途中の ${skipped} 行は省略）`, ...all.slice(-tail)].join("\n");

@@ -99,7 +99,8 @@ pub fn show_popup(app: &AppHandle, payload: PopupPayload) {
         })
         .unwrap_or((80.0, 80.0));
 
-    let built = WebviewWindowBuilder::new(app, POPUP_LABEL, WebviewUrl::App("index.html#/popup".into()))
+    #[allow(unused_mut)]
+    let mut builder = WebviewWindowBuilder::new(app, POPUP_LABEL, WebviewUrl::App("index.html#/popup".into()))
         .title("Kiroscribe")
         .inner_size(POPUP_WIDTH, POPUP_HEIGHT)
         .position(x, y)
@@ -107,8 +108,13 @@ pub fn show_popup(app: &AppHandle, payload: PopupPayload) {
         .decorations(false)
         .always_on_top(true)
         .skip_taskbar(true)
-        .focused(false)
-        .build();
+        .focused(false);
+    // E2E テスト用のビルドでだけ、メインウィンドウと同じウェブビューの引数を渡す（src/e2e.rs の browser_args）
+    #[cfg(feature = "e2e")]
+    if let Some(args) = crate::e2e::browser_args() {
+        builder = builder.additional_browser_args(&args);
+    }
+    let built = builder.build();
     if let Err(err) = built {
         eprintln!("ポップアップを表示できませんでした: {err}");
     }
