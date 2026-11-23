@@ -60,15 +60,30 @@ jobs:
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      # Tauri のビルドに要るものと、E2E に要るもの（webkit2gtk-driver = WebKitWebDriver、xvfb = 仮想の画面、
-      # dbus = 多重起動の防止が使うセッション）
+      # Tauri のビルドに要るものと、E2E に要るもの（WebKitWebDriver、xvfb = 仮想の画面、
+      # dbus = 多重起動の防止が使うセッション）。
+      # WebKitWebDriver のパッケージは、Ubuntu の版によって名前が違う
+      # （新しい版は webkitgtk-webdriver、24.04 までは webkit2gtk-driver）ので、あるほうを入れる。
+      # 入れたあと、実行ファイルの場所を確かめて、E2E の起動スクリプトに渡す
       - name: システムの依存関係（Linux）
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev libasound2-dev \
-            webkit2gtk-driver xvfb dbus
+            xvfb dbus
+          sudo apt-get install -y --no-install-recommends webkitgtk-webdriver \
+            || sudo apt-get install -y --no-install-recommends webkit2gtk-driver
+          driver="$(command -v WebKitWebDriver || true)"
+          if [ -z "$driver" ]; then
+            driver="$(dpkg -L webkitgtk-webdriver webkit2gtk-driver 2>/dev/null | grep -m1 '/WebKitWebDriver$' || true)"
+          fi
+          if [ -z "$driver" ] || [ ! -x "$driver" ]; then
+            echo "::error title=WebKitWebDriver がありません::パッケージを入れましたが、WebKitWebDriver の実行ファイルが見つかりません。"
+            exit 1
+          fi
+          echo "WebKitWebDriver: $driver"
+          echo "KIROSCRIBE_E2E_NATIVE_DRIVER=$driver" >> "$GITHUB_ENV"
 
       - name: 依存関係のインストール
         run: npm ci

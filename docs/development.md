@@ -88,7 +88,7 @@ npm run test:e2e                          # すべて走らせる（数分）。
 cargo test -p kiroscribe --features e2e   # コマンドとイベントの形を、画面側の型と突き合わせる
 ```
 
-ほかに、Linux では `webkit2gtk-driver` と `xvfb`、Windows では WebView2 と同じバージョンの `msedgedriver.exe`（PATH に置くか、環境変数 `KIROSCRIBE_E2E_NATIVE_DRIVER` で場所を指定）が要ります。失敗したテストのスクリーンショットとログは `e2e/artifacts/` に残ります。`cargo build` や `cargo test` のあとは、`target/debug/` のアプリが E2E テスト用でなくなっていることがあるので、`npm run build:e2e` をやり直してください。
+ほかに、Linux では WebKitWebDriver（Ubuntu のパッケージは `webkitgtk-webdriver`。24.04 までは `webkit2gtk-driver`）と `xvfb`、Windows では WebView2 と同じバージョンの `msedgedriver.exe`（PATH に置くか、環境変数 `KIROSCRIBE_E2E_NATIVE_DRIVER` で場所を指定）が要ります。失敗したテストのスクリーンショットとログは `e2e/artifacts/` に残ります。`cargo build` や `cargo test` のあとは、`target/debug/` のアプリが E2E テスト用でなくなっていることがあるので、`npm run build:e2e` をやり直してください。
 
 コマンドの引数・戻り値やイベントの内容を変えたときは、見本（`src/test/ipc-contract.generated.ts`）を `KIROSCRIBE_UPDATE_IPC_CONTRACT=1 cargo test -p kiroscribe --features e2e ipc_contract` で書き直し、`npm run typecheck` が通るよう画面側の型を合わせます。
 

@@ -50,7 +50,7 @@ if (!process.env.KIROSCRIBE_E2E_NATIVE_DRIVER) {
     fail(
       IS_WINDOWS
         ? "msedgedriver.exe が PATH にありません。WebView2 と同じバージョンのものを入れてください（docs/development.md）"
-        : "WebKitWebDriver が PATH にありません。Debian/Ubuntu では webkit2gtk-driver パッケージを入れてください",
+        : "WebKitWebDriver が PATH にありません。Debian/Ubuntu では webkitgtk-webdriver（24.04 までは webkit2gtk-driver）パッケージを入れてください",
     );
   }
 }
