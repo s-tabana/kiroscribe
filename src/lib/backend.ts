@@ -120,6 +120,8 @@ export interface Backend {
   takeUpdateNotice(): Promise<string | null>;
   /** 閉じていたメインウィンドウが表示された */
   onMainShown(cb: () => void): Unsubscribe;
+  /** 設定が、設定画面の外（タスクトレイのメニュー）で変わった。保存後の設定が渡る */
+  onSettingsChanged(cb: (settings: Settings) => void): Unsubscribe;
 }
 
 /** Tauri のイベント購読を、同期的に解除できる形にする */
@@ -203,6 +205,7 @@ export function createTauriBackend(): Backend {
     onUpdateStatus: (cb) => subscribe("update-status", cb),
     takeUpdateNotice: () => invoke("take_update_notice"),
     onMainShown: (cb) => subscribe("main-shown", () => cb()),
+    onSettingsChanged: (cb) => subscribe("settings-changed", cb),
   };
 }
 

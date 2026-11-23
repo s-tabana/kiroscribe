@@ -21,6 +21,8 @@ pub const EVENT_OPEN_NOTE: &str = "open-note";
 pub const EVENT_OPEN_SETTINGS: &str = "open-settings";
 /// メインウィンドウを表示した（閉じてトレイにいた間の知らせを、画面が出せるように）
 pub const EVENT_MAIN_SHOWN: &str = "main-shown";
+/// 設定が、設定画面の外（タスクトレイのメニュー）で変わった（開いている設定画面が追従できるように）
+pub const EVENT_SETTINGS_CHANGED: &str = "settings-changed";
 /// Windows 起動時の自動起動で付ける引数。付いていればウィンドウを出さずトレイで起動する
 pub const AUTOSTART_ARG: &str = "--autostart";
 
@@ -226,6 +228,8 @@ pub(crate) fn toggle_auto_record(app: &AppHandle) -> CmdResult<()> {
         db.save_settings(settings)?
     };
     apply_settings(app, &settings);
+    // 開いている設定画面の表示を合わせる（古い表示のまま保存されて、切り替えが元に戻らないように）
+    let _ = app.emit(EVENT_SETTINGS_CHANGED, &settings);
     crate::meeting_watch::settings_changed(app, !settings.auto_record_meetings, &settings);
     Ok(())
 }

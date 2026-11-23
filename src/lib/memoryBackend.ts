@@ -52,6 +52,8 @@ export interface MemoryBackend extends Backend {
   emitError(noteId: string, message: string): void;
   /** 会議の自動検出を再現する（テスト・プレビュー用） */
   simulateMeetingNote(title: string): Note;
+  /** タスクトレイのメニューの「会議を検出したら自動で録音」を選んだことにする */
+  toggleAutoRecordFromTray(): Promise<void>;
   requestOpenNote(request: OpenNoteRequest): void;
   setPopup(payload: PopupPayload | null): void;
   readonly popupClosed: boolean;
@@ -241,6 +243,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
   /** 自動で更新したあと、次にウィンドウを開いたときに知らせるバージョン */
   let updatedNotice: string | null = null;
   const mainShownEvents = new Emitter<void>();
+  const settingsEvents = new Emitter<Settings>();
   const UPDATE_BYTES = 8_400_000;
   const updateStep = () =>
     new Promise((resolve) => setTimeout(resolve, options.updateStepDelayMs ?? (options.demo ? 220 : 0)));
@@ -751,6 +754,11 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       return version;
     },
     onMainShown: (cb) => mainShownEvents.on(() => cb()),
+    onSettingsChanged: (cb) => settingsEvents.on(cb),
+    async toggleAutoRecordFromTray() {
+      settings = { ...settings, autoRecordMeetings: !settings.autoRecordMeetings };
+      settingsEvents.emit({ ...settings });
+    },
     simulateUpdate(version, { notes, announce } = {}) {
       published = { version, notes: notes ?? null, publishedAt: now() };
       if (!announce) return;

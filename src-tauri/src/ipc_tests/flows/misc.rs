@@ -122,3 +122,26 @@ fn quitting_stops_the_recording_and_waits_for_the_last_transcript() {
     use tauri::Manager;
     assert!(h.app.state::<crate::background::BackgroundState>().is_quitting());
 }
+
+/// トレイのメニューの「会議を検出したら自動で録音」は、設定を入れ替えて保存し、開いている画面に知らせる。
+// [TRY-004]
+#[test]
+fn the_tray_toggle_saves_the_setting_and_tells_the_windows() {
+    let h = Harness::new();
+    assert!(h.settings().auto_record_meetings, "最初はオン");
+    h.save_settings(|settings| settings.my_name = "田中".into());
+
+    crate::background::toggle_auto_record(h.app.handle()).unwrap();
+    assert!(!h.settings().auto_record_meetings, "オフにして保存する");
+    assert_eq!(h.ok("get_settings", json!({}))["autoRecordMeetings"], false);
+    // 開いている設定画面が追従できるよう、保存した設定をそのまま知らせる
+    let told = h.events("settings-changed");
+    assert_eq!(told.len(), 1, "設定画面の「設定を保存」では知らせない（知らせるのは、画面の外で変わったとき）");
+    assert_eq!(told[0], h.ok("get_settings", json!({})));
+    assert_eq!(told[0]["myName"], "田中", "ほかの設定は変えない");
+
+    crate::background::toggle_auto_record(h.app.handle()).unwrap();
+    assert!(h.settings().auto_record_meetings);
+    assert_eq!(h.events("settings-changed").len(), 2);
+    assert_eq!(h.events("settings-changed")[1]["autoRecordMeetings"], true);
+}

@@ -57,14 +57,38 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
       .catch((err) => setDeviceError(errorMessage(err)));
   }, [backend]);
 
+  /** 保存されている設定（画面の外で変わったときに、どの項目が変わったかを知るため） */
+  const saved = useRef<Settings | null>(null);
+
   useEffect(() => {
     Promise.all([backend.getSettings(), backend.getApiKeyStatus()])
       .then(([s, k]) => {
+        saved.current = s;
         setSettings(s);
         setKeys(k);
       })
       .catch((err) => setMessage({ kind: "error", text: errorMessage(err) }));
   }, [backend]);
+
+  // 設定画面を開いている間に、タスクトレイのメニューで設定が変わったら、変わった項目だけを表示に反映する
+  // （反映しないと、古い表示のまま「設定を保存」を押したときに、トレイでの切り替えが元に戻ってしまう）。
+  // この画面で書きかけている、ほかの項目は変えない
+  useEffect(
+    () =>
+      backend.onSettingsChanged((next) => {
+        const before = saved.current;
+        saved.current = next;
+        setSettings((shown) => {
+          if (!shown || !before) return next;
+          const merged = { ...shown };
+          for (const key of Object.keys(next) as (keyof Settings)[]) {
+            if (before[key] !== next[key]) Object.assign(merged, { [key]: next[key] });
+          }
+          return merged;
+        });
+      }),
+    [backend],
+  );
 
   useEffect(() => {
     panelRef.current?.focus();
@@ -85,7 +109,9 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
     if (!settings) return;
     setSaving(true);
     try {
-      setSettings(await backend.saveSettings(settings));
+      const stored = await backend.saveSettings(settings);
+      saved.current = stored;
+      setSettings(stored);
       setMessage({ kind: "ok", text: "設定を保存しました" });
     } catch (err) {
       setMessage({ kind: "error", text: errorMessage(err) });

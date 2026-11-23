@@ -121,6 +121,44 @@ describe("設定", () => {
   });
 });
 
+describe("トレイのメニューでの切り替えと、開いている設定画面", () => {
+  it("[TRY-004] 設定画面を開いている間にトレイで自動検出を切り替えると、表示も切り替わり、保存しても元に戻らない", async () => {
+    const user = userEvent.setup();
+    const backend = createMemoryBackend();
+    renderWith(backend, <SettingsDialog onClose={() => {}} />);
+    const auto = await screen.findByLabelText(/会議を検出したら自動で録音/);
+    expect(auto).toBeChecked();
+    // 設定画面で、ほかの項目を書きかけている
+    await user.type(screen.getByLabelText("議事録での自分の呼び名"), "田中");
+    await user.click(screen.getByLabelText(/相手の声（PC から流れる音声）も取り込む/));
+
+    // トレイのメニューで「会議を検出したら自動で録音」を切り替える
+    await act(async () => {
+      await backend.toggleAutoRecordFromTray();
+    });
+    expect((await backend.getSettings()).autoRecordMeetings).toBe(false);
+    await waitFor(() => expect(auto).not.toBeChecked());
+    // 書きかけの項目は、そのまま残る
+    expect(screen.getByLabelText("議事録での自分の呼び名")).toHaveValue("田中");
+    expect(screen.getByLabelText(/相手の声（PC から流れる音声）も取り込む/)).not.toBeChecked();
+
+    // そのまま「設定を保存」を押しても、トレイでの切り替えは元に戻らない
+    await user.click(screen.getByRole("button", { name: "設定を保存" }));
+    await screen.findByText("設定を保存しました");
+    const saved = await backend.getSettings();
+    expect(saved.autoRecordMeetings).toBe(false);
+    expect(saved.myName).toBe("田中");
+    expect(saved.captureSystemAudio).toBe(false);
+
+    // 設定画面で切り替えたあとにトレイで同じ値になっても、表示は食い違わない
+    await act(async () => {
+      await backend.toggleAutoRecordFromTray();
+    });
+    await waitFor(() => expect(auto).toBeChecked());
+    expect((await backend.getSettings()).autoRecordMeetings).toBe(true);
+  });
+});
+
 describe("会議検出のポップアップ: 表示が変わるとき・閉じるとき", () => {
   /** ポップアップを描画し、最初の内容の読み込みを待つ（偽のタイマーを使うテスト用） */
   async function renderPopup(backend: Backend) {

@@ -201,6 +201,11 @@ fn ipc_contract_matches_the_frontend() {
     assert_eq!(status["anthropic"], true);
     assert!(!status.to_string().contains("sk-ant-test"), "キーの値は画面に返さない");
 
+    // ---- トレイのメニューでの切り替え（開いている設定画面に、変わった設定を知らせる）----
+    crate::background::toggle_auto_record(app.handle()).unwrap();
+    crate::background::toggle_auto_record(app.handle()).unwrap();
+    assert_eq!(events_named(&events, "settings-changed").last(), Some(&settings));
+
     // ---- 録音（模擬の音声 → 文字起こし） ----
     let devices = s.ok("list_audio_devices", json!({}));
     assert_eq!(devices[0]["isDefault"], true);
