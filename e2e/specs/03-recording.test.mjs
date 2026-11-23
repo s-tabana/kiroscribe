@@ -1,18 +1,36 @@
 // 手動の録音: 模擬の音声が「自分」「相手」として文字起こしされ、一時停止・停止できる。
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { test } from "../lib/app.mjs";
 import { describeWav } from "../lib/mock-server.mjs";
-import { createNote, dismissToast, noteTitles, pressBarButton, sel, toastText, utterances } from "../lib/ui.mjs";
+import {
+  barButton,
+  createNote,
+  dismissToast,
+  noteTitles,
+  openNote,
+  openTranscript,
+  pressBarButton,
+  sel,
+  toastText,
+  utteranceCount,
+  utterances,
+} from "../lib/ui.mjs";
 
-const barButton = (text) => `xpath://*[@aria-label="録音"]//button[normalize-space(.)="${text}"]`;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const timer = `${sel.recordingBar} [role="timer"]`;
+const transcriptList = ".transcript-list";
 
-test("録音を開始すると文字起こしが「自分」「相手」で表示され、停止できる。録音中のノートは削除できない", async (ctx) => {
-  const session = await ctx.launch();
+test("[REC-001][REC-009][REC-015][TRN-016][NOTE-019][SEC-011] 録音を開始すると文字起こしが「自分」「相手」で表示され、停止・再開でき、再起動後も残る。録音中のノートは削除できない", async (ctx) => {
+  let session = await ctx.launch();
   await createNote(session, { title: "録音のテスト" });
 
   await pressBarButton(session, "録音を開始");
-  await session.waitForText(`${sel.recordingBar} [role="timer"]`, "録音中");
+  // 状態が「録音中」になり、経過時間が進む
+  const first = await session.waitForText(timer, "録音中");
+  await session.waitUntil(async () => (await session.text(timer)) !== first, { message: "経過時間が進む" });
   // 文字起こしのパネルが開き、一覧には録音中の印が出る
   await session.$('aside[aria-label="文字起こし"]');
   await session.$(`${sel.noteItems} [aria-label="録音中"]`);
@@ -42,12 +60,30 @@ test("録音を開始すると文字起こしが「自分」「相手」で表�
   await pressBarButton(session, "再開");
   await session.waitForText(`${sel.recordingBar} [role="timer"]`, "録音中");
 
-  // 停止（残りの文字起こしを待ってから終わる）
+  // 録音中に別のノートを開いても、録音は続く。そのノートには、録音中の発話を表示しない
+  await createNote(session, { title: "別のノート" });
+  await session.waitForText(sel.recordingBar, "別のノートで録音中");
+  const sentBefore = ctx.server.transcriptions.length;
+  await session.waitUntil(() => ctx.server.transcriptions.length > sentBefore, { timeout: 30_000, message: "録音は続いている" });
+  assert.equal(await utteranceCount(session), 0, "ほかのノートの発話が表示されている");
+  await session.click(barButton("そのノートを開く"));
+  await session.waitUntil(async () => (await (await session.$(sel.title)).value()) === "録音のテスト", {
+    message: "録音中のノートに戻る",
+  });
+
+  // 停止: 残りの文字起こしがすべて終わるまで「文字起こしを仕上げています…」と表示し、終わると録音していない状態に戻る
+  ctx.server.openai.delayMs = 1_500;
   await pressBarButton(session, "停止");
+  await session.waitForText(sel.recordingBar, "文字起こしを仕上げています…");
   await session.$(barButton("録音を再開"), { timeout: 30_000 });
+  ctx.server.openai.delayMs = 0;
   assert.equal(await session.exists(`${sel.noteItems} [aria-label="録音中"]`), false);
   const shown = await utterances(session);
   assert.ok(shown.length >= 2, "停止後も文字起こしが残っている");
+  // 届いた発話は 1 回ずつ表示される（文字起こしの API が返した数と同じ）
+  const afterFirstRecording = await utteranceCount(session);
+  assert.equal(afterFirstRecording, ctx.server.transcriptions.length, "発話の数が、文字起こしの数と合わない");
+  const firstText = shown[0].text.split("\n")[0];
 
   // API に送った内容: 16kHz・モノラルの WAV、モデルと言語の指定
   assert.ok(ctx.server.transcriptions.length >= 2);
@@ -59,18 +95,123 @@ test("録音を開始すると文字起こしが「自分」「相手」で表�
     assert.equal(files.file.filename, "audio.wav");
     const wav = describeWav(files.file.data);
     assert.deepEqual([wav.channels, wav.sampleRate, wav.bitsPerSample], [1, 16_000, 16]);
-    assert.ok(wav.seconds >= 1 && wav.seconds <= 26, `発話の長さ: ${wav.seconds} 秒`);
+    // 停止のときに話している途中だった発話は、短いまま送られる（声の部分が 0.4 秒に満たない音は送らない）
+    assert.ok(wav.seconds >= 0.4 && wav.seconds <= 26, `発話の長さ: ${wav.seconds} 秒`);
   }
   // 2 回目以降は、直前の発話を文脈として渡す
   assert.ok(ctx.server.transcriptions.some((request) => request.multipart.fields.prompt?.includes("模擬の文字起こし")));
 
+  // 音声は、文字起こしのために OpenAI へ送るだけ: ほかの宛先には何も送らず、ファイルとしても保存しない
+  const withBody = ctx.server.requests.filter((request) => request.body.length > 0);
+  assert.ok(withBody.length > 0);
+  assert.deepEqual([...new Set(withBody.map((request) => request.path))], ["/openai/v1/audio/transcriptions"]);
+  for (const file of ctx.work.dataFiles()) {
+    assert.doesNotMatch(path.basename(file), /\.(wav|mp3|m4a|ogg|webm|flac|pcm)$/i, "音声のファイルが保存されている");
+    const head = Buffer.alloc(12);
+    let fd;
+    try {
+      fd = fs.openSync(file, "r");
+      fs.readSync(fd, head, 0, 12, 0);
+    } catch (err) {
+      // ウェブビューが排他的に開いているファイル（Windows）は読めない
+      if (!["EBUSY", "EPERM", "EACCES"].includes(err.code)) throw err;
+      continue;
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+    assert.notEqual(head.toString("latin1", 0, 4), "RIFF", `${file} が音声（WAV）のファイルになっている`);
+  }
+
+  // 文字起こしのあるノートでは、開始のボタンが「録音を再開」になる。押すと同じノートで録音が始まり、発話は後ろに加わる
+  await pressBarButton(session, "録音を再開");
+  await session.waitForText(timer, "録音中");
+  await session.waitUntil(async () => (await utteranceCount(session)) > afterFirstRecording, {
+    timeout: 30_000,
+    message: "新しい発話が加わる",
+  });
+  assert.equal((await utterances(session))[0].text.split("\n")[0], firstText, "前の録音の発話が、先頭に残っている");
+  assert.deepEqual(await noteTitles(session), ["別のノート", "録音のテスト"], "録音を再開しても、ノートは増えない");
+  await pressBarButton(session, "停止");
+  await session.$(barButton("録音を再開"), { timeout: 30_000 });
+  const total = await utteranceCount(session);
+
+  // 再起動しても、文字起こしは残っている
+  session = await ctx.relaunch();
+  await openNote(session, "録音のテスト");
+  await openTranscript(session);
+  await session.waitUntil(async () => (await utteranceCount(session)) === total, { message: "再起動後も文字起こしがある" });
+
+  // 録音していたあいだに開いていた別のノートには、発話は入っていない
+  await openNote(session, "別のノート");
+  await openTranscript(session);
+  await session.waitForText(".transcript-list", "録音を開始すると、会話の文字起こしがここに表示されます。");
+  assert.equal(await utteranceCount(session), 0);
+  await openNote(session, "録音のテスト");
+
   // 停止後は削除できる
+  ctx.work.answerDialogs({ confirm: true });
   await session.click('button[aria-label="ノートを削除"]');
-  await session.waitUntil(async () => (await noteTitles(session)).length === 0, { message: "ノートが消える" });
+  await session.waitUntil(async () => (await noteTitles(session)).join() === "別のノート", { message: "ノートが消える" });
+});
+
+test("[TRN-019] 新しい発話が届いたとき、末尾を見ていれば自動でスクロールし、上を読んでいるときは動かさない", async (ctx) => {
+  let session = await ctx.launch();
+  await createNote(session, { title: "長い会議" });
+  // 画面に収まらない数の発話を、あらかじめ入れておく（アプリを止めているあいだに、データベースへ直接入れる）
+  await ctx.stop();
+  await ctx.work.withDatabase((db) => {
+    const { id } = db.prepare("SELECT id FROM notes").get();
+    const insert = db.prepare(
+      "INSERT INTO transcript_segments (note_id, speaker, started_at, ended_at, text) VALUES (?, ?, ?, ?, ?)",
+    );
+    const start = Date.now() - 3_600_000;
+    for (let i = 0; i < 60; i += 1) {
+      // 2 分おきにして、発話ごとに別のまとまりにする
+      insert.run(id, i % 2 === 0 ? "me" : "them", start + i * 120_000, start + i * 120_000 + 5_000, `前の録音の発話 ${i + 1}`);
+    }
+  });
+  session = await ctx.launch();
+
+  await pressBarButton(session, "録音を再開");
+  await session.$(transcriptList);
+  const scroll = () =>
+    session.execute(`
+      const list = document.querySelector(${JSON.stringify(transcriptList)});
+      return { top: list.scrollTop, fromBottom: list.scrollHeight - list.scrollTop - list.clientHeight, height: list.clientHeight, full: list.scrollHeight };
+    `);
+  await session.waitUntil(async () => (await utteranceCount(session)) >= 60, { message: "前の録音の発話が表示される" });
+  const initial = await scroll();
+  assert.ok(initial.full > initial.height * 2, `スクロールが要るだけの発話がない: ${JSON.stringify(initial)}`);
+
+  // 末尾を見ているとき: 新しい発話が届くと、末尾までスクロールする
+  await session.waitUntil(async () => (await scroll()).fromBottom < 2, { message: "開いたときは末尾を表示する" });
+  let count = await utteranceCount(session);
+  await session.waitUntil(async () => (await utteranceCount(session)) > count, { timeout: 30_000, message: "新しい発話が届く" });
+  await session.waitUntil(async () => (await scroll()).fromBottom < 2, { message: "新しい発話に合わせて末尾までスクロールする" });
+
+  // 上のほうを読んでいるとき: 新しい発話が届いても、スクロール位置を動かさない
+  await session.execute(`document.querySelector(${JSON.stringify(transcriptList)}).scrollTop = 120`);
+  await session.waitUntil(async () => (await scroll()).top === 120, { message: "上へスクロールする" });
+  await sleep(200); // スクロールの知らせが届くまで
+  count = await utteranceCount(session);
+  await session.waitUntil(async () => (await utteranceCount(session)) > count + 1, { timeout: 30_000, message: "新しい発話が届く" });
+  assert.equal((await scroll()).top, 120, "読んでいる位置が動いた");
+
+  // 末尾の近く（下から 48px 以内）まで戻ると、また自動でスクロールする
+  await session.execute(`
+    const list = document.querySelector(${JSON.stringify(transcriptList)});
+    list.scrollTop = list.scrollHeight - list.clientHeight - 30;
+  `);
+  await sleep(200);
+  count = await utteranceCount(session);
+  await session.waitUntil(async () => (await utteranceCount(session)) > count, { timeout: 30_000, message: "新しい発話が届く" });
+  await session.waitUntil(async () => (await scroll()).fromBottom < 2, { message: "末尾の近くにいれば、末尾までスクロールする" });
+  await pressBarButton(session, "停止");
+  await session.$(barButton("録音を再開"), { timeout: 30_000 });
 });
 
 test(
-  "相手の声を取り込めないときは、マイクだけで録音を続けて、そのことを知らせる",
+  "[REC-018] 相手の声を取り込めないときは、マイクだけで録音を続けて、そのことを知らせる",
   { config: { audio: { mic: "speech", system: null } } },
   async (ctx) => {
     const session = await ctx.launch();
@@ -100,7 +241,7 @@ test("文字起こしの API がキーを拒否したら、文字起こしを止
   await session.$(sel.settingsDialog);
 });
 
-test("文字起こしの API の一時的なエラー（429・500）は、再試行して成功すれば表に出さない", async (ctx) => {
+test("[TRN-013] 文字起こしの API の一時的なエラー（429・500）は、再試行して成功すれば表に出さない", async (ctx) => {
   ctx.server.openai.failure = { status: 500, times: 1 };
   const session = await ctx.launch();
   await createNote(session, { title: "再試行" });

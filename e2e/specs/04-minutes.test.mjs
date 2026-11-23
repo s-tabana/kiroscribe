@@ -3,16 +3,18 @@
 import assert from "node:assert/strict";
 import { test } from "../lib/app.mjs";
 import { ANTHROPIC_KEY, createGate } from "../lib/mock-server.mjs";
-import { createNote, dismissToast, noteTitles, pressBarButton, sel, toastText } from "../lib/ui.mjs";
+import { createNote, dismissToast, noteTitles, openNote, pressBarButton, sel, toastText } from "../lib/ui.mjs";
 
 const streaming = `${sel.minutes}[aria-busy="true"]`;
 const finished = `${sel.minutes}[aria-busy="false"]`;
 const enhanceButton = 'xpath://*[@aria-label="録音"]//button[normalize-space(.)="議事録を作成"]';
 
-test("［議事録を作成］で、議事録がストリーミングで表示され、保存される", async (ctx) => {
-  // 前半を送ったところで止めておき、途中の表示を確かめてから残りを送る
+test("[MIN-004][MIN-006][NOTE-019] ［議事録を作成］で、議事録がストリーミングで表示され、保存される", async (ctx) => {
+  // 文字が届く前と、前半を送ったところで止めておき、途中の表示を確かめてから残りを送る
+  const before = createGate();
   const gate = createGate();
   ctx.server.anthropic.reply = () => ({
+    before: before.promise,
     chunks: ["# 模擬の議事録\n\n", "## 決定事項\n", "- リリースは 12/5\n"],
     hold: gate.promise,
     tail: ["\n## ToDo\n", "- 田中: 資料を送る\n"],
@@ -22,8 +24,14 @@ test("［議事録を作成］で、議事録がストリーミングで表示�
   await createNote(session, { memo: "- リリース日を決める" });
 
   await pressBarButton(session, "議事録を作成");
-  // 生成の途中: 届いたところまでが表示され、まだ後半はない
+  // 文字が届く前
+  await session.waitForText(streaming, "メモと文字起こしを読んでいます…");
+  before.open();
+  // 生成の途中: 届いたところまでが表示され、まだ後半はない。先頭のタイトル行は表示しない
   const partial = await session.waitForText(streaming, "リリースは 12/5");
+  assert.ok(partial.includes("議事録を作成しています…"), partial);
+  assert.ok(!partial.includes("メモと文字起こしを読んでいます…"), partial);
+  assert.ok(!partial.includes("模擬の議事録"), "作成中の表示に、タイトル行が出ている");
   assert.ok(!partial.includes("資料を送る"), "途中の表示に、まだ届いていない部分が出ている");
   await session.$(`xpath://section[@aria-label="議事録"]//button[normalize-space(.)="中止"]`);
   gate.open();
@@ -58,7 +66,7 @@ test("［議事録を作成］で、議事録がストリーミングで表示�
   assert.equal(ctx.server.messages.length, 1, "保存済みの議事録を表示するだけで、API は呼ばない");
 });
 
-test("議事録の作成は途中で中止でき、中止したものは保存されない", async (ctx) => {
+test("[MIN-005] 議事録の作成は途中で中止でき、中止したものは保存されない", async (ctx) => {
   const gate = createGate();
   ctx.server.anthropic.reply = () => ({ chunks: ["# 途中のタイトル\n\n", "書きかけの議事録"], hold: gate.promise });
   try {
@@ -120,7 +128,7 @@ const failures = [
   },
 ];
 
-test("議事録の API がエラーを返したら、原因の分かるメッセージが出て、メモはそのまま残る", async (ctx) => {
+test("[MIN-017][ERR-003] 議事録の API がエラーを返したら、原因の分かるメッセージが出て、メモはそのまま残る", async (ctx) => {
   const session = await ctx.launch();
   await createNote(session, { title: "エラーのテスト", memo: "- メモ" });
 
@@ -145,10 +153,60 @@ test("議事録の API がエラーを返したら、原因の分かるメッセ
   await session.waitForText(finished, "直ったあとの議事録");
 });
 
-test("メモも文字起こしもないノートでは、議事録を作成するボタンが出ない", async (ctx) => {
+test("[MIN-001] メモも文字起こしもないノートでは、議事録を作成するボタンが出ない", async (ctx) => {
   const session = await ctx.launch();
   await createNote(session, { title: "空のノート" });
   await session.$('xpath://*[@aria-label="録音"]//button[normalize-space(.)="録音を開始"]');
   assert.equal(await session.exists(enhanceButton), false);
   assert.equal(ctx.server.messages.length, 0);
+});
+
+test("[MIN-019] 議事録の作成中に別のノートへ移っても作成は続き、戻ると途中の文章とともに作成中の表示になる", async (ctx) => {
+  const first = createGate();
+  const second = createGate();
+  let calls = 0;
+  ctx.server.anthropic.reply = () => {
+    calls += 1;
+    const gate = calls === 1 ? first : second;
+    return { chunks: [`# 議事録 ${calls}\n\n`, "## 決定事項\n", `- ${calls} つ目の前半\n`], hold: gate.promise, tail: [`- ${calls} つ目の後半\n`] };
+  };
+  try {
+    const session = await ctx.launch();
+    await createNote(session, { title: "ほかのノート", memo: "- 別のメモ" });
+    await createNote(session, { title: "作成中に戻る", memo: "- メモ A" });
+    await createNote(session, { title: "終わってから戻る", memo: "- メモ B" });
+
+    // 1 つ目: 作成中に別のノートへ移り、作成中のうちに戻る
+    await openNote(session, "作成中に戻る");
+    await pressBarButton(session, "議事録を作成");
+    await session.waitForText(streaming, "1 つ目の前半");
+    await openNote(session, "ほかのノート");
+    assert.equal(await session.exists(sel.minutes), false, "別のノートに、作成中の議事録が出ている");
+    assert.equal(await (await session.$(sel.memo)).value(), "- 別のメモ");
+    await openNote(session, "作成中に戻る");
+    // 戻ると、それまでに届いた文章とともに、作成中の表示になる
+    const resumed = await session.waitForText(streaming, "1 つ目の前半");
+    assert.ok(resumed.includes("議事録を作成しています…"), resumed);
+    assert.ok(!resumed.includes("1 つ目の後半"));
+    first.open();
+    // 終わると、完成した議事録に切り替わる
+    await session.waitForText(finished, "1 つ目の後半");
+
+    // 2 つ目: 作成中に別のノートへ移り、作成が終わってから戻る
+    await openNote(session, "終わってから戻る");
+    await pressBarButton(session, "議事録を作成");
+    await session.waitForText(streaming, "2 つ目の前半");
+    await openNote(session, "ほかのノート");
+    second.open();
+    // 別のノートを開いているあいだに作成が終わり、保存される（一覧のプレビューが議事録の内容に変わる）
+    await session.waitForText('nav[aria-label="ノート一覧"]', "2 つ目の前半");
+    assert.equal(await session.exists(sel.toast), false);
+    await openNote(session, "終わってから戻る");
+    const done = await session.waitForText(finished, "2 つ目の後半");
+    assert.ok(done.includes("2 つ目の前半"), done);
+    assert.equal(ctx.server.messages.length, 2, "戻ったときに作り直していない");
+  } finally {
+    first.open();
+    second.open();
+  }
 });

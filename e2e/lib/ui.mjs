@@ -18,7 +18,11 @@ export const sel = {
   minutes: 'section[aria-label="議事録"]',
   updateBanner: 'section[aria-label="アプリの更新"]',
   popup: '[role="alertdialog"][aria-label="会議の自動録音"]',
+  updatedNotice: 'section[aria-label="更新の完了"]',
 };
+
+/** 録音バーのボタンを指すセレクター */
+export const barButton = (text) => `xpath://*[@aria-label="録音"]//button[normalize-space(.)="${text}"]`;
 
 /** サイドバーに出ているノートのタイトル（上から順） */
 export async function noteTitles(session) {
@@ -106,4 +110,52 @@ export async function utterances(session) {
       text: Array.from(u.querySelectorAll(".utterance-bubble p")).map((p) => p.textContent).join("\\n"),
     }));
   `);
+}
+
+/** 選択メニュー（select）で、値が value の項目を選ぶ（利用者が選んだときと同じく、変更のイベントが起きる） */
+export async function selectOption(session, selector, value) {
+  await session.$(selector);
+  const chosen = await session.execute(
+    `
+    const xpath = arguments[0].startsWith("xpath:") ? arguments[0].slice(6) : null;
+    const select = xpath
+      ? document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue
+      : document.querySelector(arguments[0]);
+    if (!Array.from(select.options).some((option) => option.value === arguments[1])) return null;
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(select, arguments[1]);
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    return select.value;
+  `,
+    selector,
+    value,
+  );
+  if (chosen !== value) throw new Error(`選択メニュー（${selector}）に、値 ${value} の項目がありません`);
+}
+
+/** 設定画面の、ラベルが label の欄の入力部品（input・select）を指すセレクター */
+export function settingsField(label, tag = "*") {
+  return `xpath:${SETTINGS_XPATH}//label[span[normalize-space(.)="${label}"]]/${tag}[self::input or self::select]`;
+}
+
+/** 設定画面の、説明が text で始まるチェックボックスを指すセレクター */
+export function settingsCheck(text) {
+  return `xpath:${SETTINGS_XPATH}//label[contains(@class, "check")][span[starts-with(normalize-space(.), "${text}")]]/input`;
+}
+
+/** 設定画面の「設定を保存」を押して、保存されるまで待つ */
+export async function saveSettings(session) {
+  await session.click(`xpath:${SETTINGS_XPATH}//footer//button[normalize-space(.)="設定を保存"]`);
+  await session.waitForText(`${sel.settingsDialog} .modal-footer [role="status"]`, "設定を保存しました");
+}
+
+/** 文字起こしのパネルに出ている発話の数（まとまりではなく、発話 1 件ずつ） */
+export async function utteranceCount(session) {
+  return session.execute(`return document.querySelectorAll(".transcript-list .utterance-bubble p").length`);
+}
+
+/** 文字起こしのパネルを開く（すでに開いていれば何もしない） */
+export async function openTranscript(session) {
+  const toggle = 'button[title="文字起こしを表示"]';
+  if ((await (await session.$(toggle)).attribute("aria-pressed")) !== "true") await session.click(toggle);
+  await session.$(".transcript-list");
 }

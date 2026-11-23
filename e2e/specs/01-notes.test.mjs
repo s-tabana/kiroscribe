@@ -1,29 +1,59 @@
 // ノートの作成・編集・検索・削除と、再起動後も残っていること。
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { test } from "../lib/app.mjs";
-import { createNote, noteTitles, openNote, pressBarButton, sel, utterances, waitSaved } from "../lib/ui.mjs";
+import { barButton, createNote, noteTitles, openNote, pressBarButton, sel, utterances, waitSaved } from "../lib/ui.mjs";
+import { Key } from "../lib/webdriver.mjs";
 
-test("起動するとメイン画面が出て、ノートを作成・編集・検索・削除でき、再起動後も残っている", async (ctx) => {
+const noteList = 'nav[aria-label="ノート一覧"]';
+
+test("[NOTE-001][NOTE-008][NOTE-009][NOTE-014][NOTE-019][NOTE-020][DAT-001][TRY-007] 起動するとメイン画面が出て、ノートを作成・編集・検索・削除でき、再起動後も残っている", async (ctx) => {
   let session = await ctx.launch();
 
-  // 初回起動: ノートはまだない
+  // ふつうに起動すると、メインウィンドウが決まった大きさで表示される
   assert.equal(await session.title(), "Kiroscribe");
-  await session.waitForText("main", "最初の会議ノートを作りましょう");
-  await session.waitForText('nav[aria-label="ノート一覧"]', "まだノートがありません");
+  assert.equal(await ctx.app.isMainVisible(), true);
+  const innerSize = () => session.execute("return [window.innerWidth, window.innerHeight]");
+  const [screenWidth, screenHeight] = await session.execute("return [screen.availWidth, screen.availHeight]");
+  if (screenWidth >= 1240 && screenHeight >= 820) {
+    assert.deepEqual(await innerSize(), [1240, 820], "メインウィンドウの大きさ");
+  }
+  // 幅 860px・高さ 560px より小さくはできない
+  await session.setWindowSize(400, 300).catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const [minWidth, minHeight] = await innerSize();
+  assert.ok(minWidth >= 860 && minHeight >= 560, `小さくしすぎている: ${minWidth}x${minHeight}`);
+  await session.setWindowSize(1240, 820).catch(() => {});
 
-  // 作成（入力は自動で保存される）
+  // 初回起動: ノートはまだない。データベースは、アプリのデータフォルダの中にできる
+  await session.waitForText("main", "最初の会議ノートを作りましょう");
+  await session.waitForText(noteList, "まだノートがありません");
+  assert.ok(fs.existsSync(path.join(ctx.work.dataDir, "kiroscribe.db")), "データフォルダに kiroscribe.db がない");
+
+  // 作成: 空のノートが一覧の先頭に加わり、開いて、タイトル欄にカーソルが入る（createNote が確かめる）。
+  // 入力は自動で保存され、保存されると一覧のタイトルとプレビューが変わる
   await createNote(session, { title: "週次定例", memo: "- リリース日を決める" });
-  await createNote(session, { title: "採用面談", memo: "候補者 A と話した" });
-  assert.deepEqual(await noteTitles(session), ["採用面談", "週次定例"], "新しいノートが上");
+  await session.click(sel.newNote);
+  await session.waitUntil(async () => (await noteTitles(session)).join() === "無題のノート,週次定例", {
+    message: "新しいノートが、空のタイトルで一覧の先頭に加わる",
+  });
+  await (await session.$(sel.title)).type("採用面談");
+  await session.waitForText(sel.saveState, "保存しました");
+  await session.waitUntil(async () => (await noteTitles(session)).join() === "採用面談,週次定例", {
+    message: "保存されると、一覧のタイトルが変わる",
+  });
+  await (await session.$(sel.memo)).type("候補者 A と話した");
+  await waitSaved(session);
   await session.waitForText(`${sel.noteItems}[aria-current="page"]`, "候補者 A と話した", { timeout: 5_000 });
 
-  // 検索（タイトルと本文の先頭）
+  // 検索（タイトルと、プレビューに出ている本文の先頭）
   const search = await session.$(sel.search);
   await search.type("リリース");
   await session.waitUntil(async () => (await noteTitles(session)).join() === "週次定例", { message: "検索で絞り込まれる" });
   await search.fill("どこにもない言葉");
-  await session.waitForText('nav[aria-label="ノート一覧"]', "一致するノートがありません");
+  await session.waitForText(noteList, "一致するノートがありません");
   await search.fill("");
   await session.waitUntil(async () => (await noteTitles(session)).length === 2, { message: "検索を消すと全件に戻る" });
 
@@ -41,25 +71,75 @@ test("起動するとメイン画面が出て、ノートを作成・編集・�
   ctx.work.answerDialogs({ confirm: false });
   await session.click('button[aria-label="ノートを削除"]');
   await session.waitUntil(() => ctx.work.dialogs().length === 1, { message: "削除の確認が出る" });
-  assert.match(ctx.work.dialogs()[0].message, /このノートを削除しますか？/);
+  assert.equal(
+    ctx.work.dialogs()[0].message,
+    "このノートを削除しますか？\nメモ・文字起こし・議事録もすべて削除され、元に戻せません。",
+  );
   assert.equal(ctx.work.dialogs()[0].title, "ノートの削除");
   assert.equal(ctx.work.dialogs()[0].kind, "warning");
   assert.equal((await noteTitles(session)).length, 2);
+  assert.equal(await (await session.$(sel.title)).value(), "採用面談", "取り消したら、開いているノートもそのまま");
 
-  // 「はい」なら消える
+  // 「はい」なら消えて、一覧で次にあったノートが開く
   ctx.work.answerDialogs({ confirm: true });
   await session.click('button[aria-label="ノートを削除"]');
   await session.waitUntil(async () => (await noteTitles(session)).join() === "週次定例（11 月）", {
     message: "削除したノートが一覧から消える",
   });
+  await session.waitUntil(async () => (await (await session.$(sel.title)).value()) === "週次定例（11 月）", {
+    message: "削除したあと、次のノートが開く",
+  });
 
-  // 再起動しても残っている
+  // 再起動しても残っている。起動すると、いちばん新しいノートが開く
+  await createNote(session, { title: "あとから作ったノート", memo: "新しいメモ" });
   session = await ctx.relaunch();
-  await session.waitUntil(async () => (await noteTitles(session)).join() === "週次定例（11 月）", {
+  await session.waitUntil(async () => (await noteTitles(session)).join() === "あとから作ったノート,週次定例（11 月）", {
     message: "再起動後もノートがある",
   });
-  assert.equal(await (await session.$(sel.title)).value(), "週次定例（11 月）");
+  assert.equal(await (await session.$(sel.title)).value(), "あとから作ったノート");
+  assert.equal(await (await session.$(sel.memo)).value(), "新しいメモ");
+  await openNote(session, "週次定例（11 月）");
   assert.equal(await (await session.$(sel.memo)).value(), "- リリース日を決める\n- 担当を決める");
+});
+
+test("[NOTE-001][NOTE-002][NOTE-010] 新しいノートは Ctrl+N でも作れ、検索は空に戻る。書きかけの入力は、ノートを切り替えるときに保存される", async (ctx) => {
+  let session = await ctx.launch();
+  await createNote(session, { title: "一つ目", memo: "最初のメモ" });
+
+  // 検索欄に入力があるとき、新しいノートを作ると、検索は空に戻る（作ったノートが絞り込みで隠れない）
+  const search = await session.$(sel.search);
+  await search.type("一つ目");
+  await session.waitUntil(async () => (await noteTitles(session)).join() === "一つ目", { message: "検索で絞り込まれる" });
+  await session.click(sel.newNote);
+  await session.waitUntil(async () => (await noteTitles(session)).join() === "無題のノート,一つ目", {
+    message: "新しいノートが一覧の先頭に出る",
+  });
+  assert.equal(await (await session.$(sel.search)).value(), "", "検索欄が空に戻っていない");
+  await (await session.$(sel.title)).type("二つ目");
+  await waitSaved(session);
+
+  // Ctrl+N でも、同じように新しいノートができて、タイトル欄にカーソルが入る
+  await (await session.$(sel.memo)).type(`${Key.Control}n`);
+  await session.waitUntil(async () => (await noteTitles(session)).join() === "無題のノート,二つ目,一つ目", {
+    message: "Ctrl+N で新しいノートができる",
+  });
+  await session.waitUntil(
+    () => session.execute(`const t = document.querySelector(${JSON.stringify(sel.title)}); return t.value === "" && document.activeElement === t`),
+    { message: "新しいノートのタイトル欄にカーソルが入る" },
+  );
+  assert.equal(await (await session.$(sel.memo)).value(), "", "Ctrl+N の n が、メモに入力されている");
+  await (await session.$(sel.title)).type("三つ目");
+  await waitSaved(session);
+
+  // 書きかけの入力は、0.5 秒の自動保存を待たずに別のノートへ切り替えても、保存される
+  await openNote(session, "一つ目");
+  await (await session.$(sel.memo)).type(" と、切り替える直前に書いた分");
+  await session.click(`xpath://nav[@aria-label="ノート一覧"]//button[.//span[normalize-space(.)="二つ目"]]`);
+  await session.waitUntil(async () => (await (await session.$(sel.title)).value()) === "二つ目", { message: "ノートが切り替わる" });
+  await session.waitForText(noteList, "最初のメモ と、切り替える直前に書いた分");
+  session = await ctx.relaunch();
+  await openNote(session, "一つ目");
+  assert.equal(await (await session.$(sel.memo)).value(), "最初のメモ と、切り替える直前に書いた分");
 });
 
 test("[NOTE-008] 検索は、メモの本文・議事録・文字起こしに含まれる言葉でもノートを見つける", async (ctx) => {
@@ -82,7 +162,7 @@ test("[NOTE-008] 検索は、メモの本文・議事録・文字起こしに含
     message: "発話が表示される",
   });
   await pressBarButton(session, "停止");
-  await session.$('xpath://*[@aria-label="録音"]//button[normalize-space(.)="録音を再開"]', { timeout: 30_000 });
+  await session.$(barButton("録音を再開"), { timeout: 30_000 });
   assert.match((await utterances(session))[0].text, /^模擬の文字起こし \d+。/);
 
   // 議事録の 2 行目にだけ言葉があるノート（プレビューに出るのは 1 行目の「一次面接は通過」）
@@ -101,7 +181,7 @@ test("[NOTE-008] 検索は、メモの本文・議事録・文字起こしに含
   // タイトルやプレビューで見つかるノートと、本体に問い合わせて見つかるノートは、一覧の並びのまま一緒に出る
   await expectFound("面接", ["採用面談"], "プレビューと議事録の両方に当てはまるノートは 1 回だけ出る");
   await search.fill("どこにもない言葉");
-  await session.waitForText('nav[aria-label="ノート一覧"]', "一致するノートがありません");
+  await session.waitForText(noteList, "一致するノートがありません");
   await search.fill("");
   await session.waitUntil(async () => (await noteTitles(session)).length === 3, { message: "検索を消すと全件に戻る" });
 });

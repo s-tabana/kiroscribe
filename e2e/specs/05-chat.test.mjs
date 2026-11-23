@@ -19,10 +19,16 @@ async function chatMessages(session) {
   `);
 }
 
-test("AI チャットで質問すると回答がストリーミングで表示され、履歴が残る", async (ctx) => {
-  // 前半を送ったところで止めておき、途中の表示を確かめてから残りを送る
+test("[CHT-003][CHT-008][NOTE-019] AI チャットで質問すると回答がストリーミングで表示され、履歴が残る", async (ctx) => {
+  // 文字が届く前と、前半を送ったところで止めておき、途中の表示を確かめてから残りを送る
+  const before = createGate();
   const gate = createGate();
-  ctx.server.anthropic.reply = () => ({ chunks: ["リリースは ", "12/5 に"], hold: gate.promise, tail: ["決まりました。"] });
+  ctx.server.anthropic.reply = () => ({
+    before: before.promise,
+    chunks: ["リリースは ", "12/5 に"],
+    hold: gate.promise,
+    tail: ["決まりました。"],
+  });
   let session = await ctx.launch();
   await createNote(session, { title: "週次定例", memo: "- リリースは 12/5" });
 
@@ -31,6 +37,13 @@ test("AI チャットで質問すると回答がストリーミングで表示�
   await (await session.$(chatInput)).type("決まったことは？");
   await session.click('button[aria-label="送信"]');
 
+  // 送った直後: 入力欄が空になり、質問と「考えています…」が出る
+  await session.waitUntil(async () => (await chatMessages(session)).at(-1)?.text === "考えています…", {
+    message: "回答を待つあいだの表示",
+  });
+  assert.deepEqual((await chatMessages(session))[0], { from: "user", text: "決まったことは？" });
+  assert.equal(await (await session.$(chatInput)).value(), "", "送ったあと、入力欄が空になっていない");
+  before.open();
   // 回答の途中: 質問が出て、回答は届いたところまで
   await session.waitUntil(async () => (await chatMessages(session)).at(-1)?.text === "リリースは 12/5 に", {
     message: "回答が途中まで表示される",
@@ -77,7 +90,7 @@ test("AI チャットで質問すると回答がストリーミングで表示�
   assert.match(ctx.work.dialogs().at(-1).message, /AI チャットの履歴を消去しますか？/);
 });
 
-test("AI チャットの API がエラーを返したら、メッセージが出て、質問は入力欄に戻る", async (ctx) => {
+test("[CHT-005][ERR-002] AI チャットの API がエラーを返したら、メッセージが出て、質問は入力欄に戻る", async (ctx) => {
   ctx.server.anthropic.reply = () => ({ status: 401 });
   const session = await ctx.launch();
   await createNote(session, { title: "週次定例", memo: "- メモ" });

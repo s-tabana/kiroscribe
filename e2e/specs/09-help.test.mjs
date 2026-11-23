@@ -27,7 +27,7 @@ function bundledGuideHeading() {
   return /^#\s+(.+)$/m.exec(guide)[1].trim();
 }
 
-test("ヘルプに、オンラインの使い方とリリースノートが表示される。リンクは外部ブラウザで開く", async (ctx) => {
+test("[HLP-003][HLP-004][HLP-005][HLP-011][HLP-014] ヘルプに、オンラインの使い方とリリースノートが表示される。リンクは外部ブラウザで開く", async (ctx) => {
   ctx.server.github.guide = "# 模擬の使い方\n\n模擬サーバーから取得した内容です。\n\n[公式サイト](https://example.com/kiroscribe)\n";
   const session = await ctx.launch();
 
@@ -66,7 +66,7 @@ test("ヘルプに、オンラインの使い方とリリースノートが表�
   await session.waitForText(notice, "保存済みの内容を表示しています");
 });
 
-test("オンラインの内容を一度も取得できていないときは、アプリに同梱の使い方とリリースノートが表示される", async (ctx) => {
+test("[HLP-005][HLP-007] オンラインの内容を一度も取得できていないときは、アプリに同梱の使い方とリリースノートが表示される", async (ctx) => {
   ctx.server.github.guide = null;
   ctx.server.github.releases = null;
   const session = await ctx.launch();

@@ -16,17 +16,19 @@ async function openShare(session) {
   await session.$(popover);
 }
 
-test("共有: Markdown をコピーでき、選んだ場所にファイルとして保存できる", async (ctx) => {
+test("[SHR-007][SHR-008][SHR-012] 共有: Markdown をコピーでき、選んだ場所にファイルとして保存できる", async (ctx) => {
   const session = await ctx.launch();
   await createNote(session, { title: "週次定例", memo: "- リリース日を決める" });
 
-  // 議事録がまだなければ、メモを書き出す
+  // 議事録がまだなければ、メモを書き出す。書いたばかりで、まだ自動で保存されていない入力も、書き出しに入る
+  await (await session.$(sel.memo)).type("\n- 書いた直後の行");
   await openShare(session);
   await session.click(shareButton("Markdown をコピー"));
   await session.waitForText(shareStatus, "Markdown をコピーしました");
   const notesOnly = ctx.work.clipboard();
   assert.match(notesOnly, /^# 週次定例\n/);
   assert.ok(notesOnly.includes("- リリース日を決める"));
+  assert.ok(notesOnly.includes("- 書いた直後の行"), `保存の前の入力が、書き出しに入っていない:\n${notesOnly}`);
   await session.click("button.share-trigger"); // 閉じる
   await session.waitGone(popover);
 
@@ -48,7 +50,7 @@ test("共有: Markdown をコピーでき、選んだ場所にファイルとし
   assert.equal(fs.readFileSync(out, "utf8"), minutesOnly);
   const dialog = ctx.work.dialogs().at(-1);
   assert.equal(dialog.type, "save");
-  assert.match(dialog.options.defaultPath, /週次定例.*\.md$/);
+  assert.match(dialog.options.defaultPath, /^\d{4}-\d{2}-\d{2} 週次定例\.md$/, "ファイル名の初期値は「日付 タイトル.md」");
   assert.deepEqual(dialog.options.filters[0], { name: "Markdown", extensions: ["md"] }, "保存ダイアログの既定の種類は Markdown");
 
   // メモも含めて保存

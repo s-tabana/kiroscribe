@@ -23,6 +23,8 @@ function wav(seconds = 0.5, sampleRate = 16_000) {
   return buffer;
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 let server;
 before(async () => {
   server = await startMockServer();
@@ -191,6 +193,51 @@ test("Messages: 応答を途中で止めておき、合図のあとに残りを�
   assert.deepEqual(text, ["書きかけ", "の続き"]);
   assert.ok(events.some((event) => event.type === "ping"));
   assert.equal(events.at(-1).type, "message_stop");
+});
+
+test("Messages: 最初の文字の前でも止めておける。silent なら、止めているあいだ何も送らない", async () => {
+  const before = createGate();
+  const hold = createGate();
+  server.anthropic.reply = () => ({ before: before.promise, chunks: ["前半"], hold: hold.promise, silent: true, tail: ["後半"] });
+  const response = await message(messageBody);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let received = "";
+  /** ms ミリ秒のあいだに届いた分を読む（読みかけの read() は 1 つだけにする） */
+  let pending = null;
+  const pump = async (ms) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      pending ??= reader.read();
+      const next = await Promise.race([pending, sleep(deadline - Date.now()).then(() => null)]);
+      if (next === null) return;
+      pending = null;
+      if (next.done) return;
+      received += decoder.decode(next.value, { stream: true });
+    }
+  };
+  await pump(300);
+  assert.ok(received.includes("message_start") && !received.includes("前半"), received);
+  const pings = received.split("event: ping").length - 1;
+  before.open();
+  await pump(300);
+  assert.ok(received.includes("前半") && !received.includes("後半"), received);
+  assert.equal(received.split("event: ping").length - 1, pings, "silent なのに、止めているあいだに ping を送っている");
+  hold.open();
+  await pump(1_000);
+  assert.ok(received.includes("後半") && received.includes("message_stop"), received);
+});
+
+test("文字起こし: 応答を遅らせられる", async () => {
+  server.openai.delayMs = 300;
+  try {
+    const started = Date.now();
+    const response = await transcribe();
+    assert.equal(response.status, 200);
+    assert.ok(Date.now() - started >= 280, "遅らせていない");
+  } finally {
+    server.openai.delayMs = 0;
+  }
 });
 
 test("Messages: キーが違えば 401、HTTP のエラーも返せる", async () => {

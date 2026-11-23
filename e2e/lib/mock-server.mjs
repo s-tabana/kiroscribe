@@ -127,14 +127,29 @@ function sseEvent(res, data) {
 
 /**
  * Messages API のストリーミングの応答を書く。
- * reply: { chunks: string[], delayMs?, stopReason?, errorAfter?: { type, message }, hold?: Promise, tail?: string[] }
+ * reply: { chunks: string[], delayMs?, stopReason?, errorAfter?: { type, message }, before?: Promise, hold?: Promise,
+ *          silent?: boolean, tail?: string[] }
  * - errorAfter: chunks を送ったあと、ストリームの途中でエラーのイベントを送る
- * - hold: chunks を送ったあと、この Promise が終わるまで応答を進めずに待つ（ping だけ送り続ける）。
+ * - before: 最初の文字（chunks）を送る前に、この Promise が終わるまで待つ（文字が届く前の表示を確かめるため）
+ * - hold: chunks を送ったあと、この Promise が終わるまで応答を進めずに待つ。
  *   途中までの表示や、中止の操作を、時間に頼らずに確かめるために使う
+ * - silent: 待っているあいだ（before・hold）、ping も送らない（何も届かない時間を作る）。
+ *   指定しなければ、本物の API と同じように ping を送り続ける
  * - tail: hold が終わったあとに送る残りの文字
  */
 async function streamMessage(res, model, reply) {
-  const { chunks = [], delayMs = 0, stopReason = "end_turn", errorAfter = null, hold = null, tail = [] } = reply;
+  const { chunks = [], delayMs = 0, stopReason = "end_turn", errorAfter = null, before = null, hold = null, silent = false, tail = [] } = reply;
+  /** gate が終わるまで待つ（相手が接続を切ったら、そこでやめる） */
+  const waitFor = async (gate) => {
+    let released = false;
+    gate.then(() => {
+      released = true;
+    });
+    while (!released && !res.destroyed) {
+      if (!silent) sseEvent(res, { type: "ping" });
+      await sleep(silent ? 20 : 100);
+    }
+  };
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
   sseEvent(res, {
     type: "message_start",
@@ -151,22 +166,14 @@ async function streamMessage(res, model, reply) {
   });
   sseEvent(res, { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
   sseEvent(res, { type: "ping" });
+  if (before) await waitFor(before);
   for (const text of chunks) {
     if (delayMs) await sleep(delayMs);
     if (res.destroyed) return;
     sseEvent(res, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } });
   }
   if (hold) {
-    // 止めているあいだも、本物の API と同じように ping は送り続ける
-    // （アプリは、次のデータが届いたときに中止の指示を確かめる）
-    let released = false;
-    hold.then(() => {
-      released = true;
-    });
-    while (!released && !res.destroyed) {
-      sseEvent(res, { type: "ping" });
-      await sleep(100);
-    }
+    await waitFor(hold);
     for (const text of tail) {
       if (res.destroyed) return;
       sseEvent(res, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } });
@@ -202,6 +209,8 @@ export class MockServer {
       text: (n) => `模擬の文字起こし ${n}。`,
       /** 次の何回かを失敗させる: { status, body?, times } */
       failure: null,
+      /** 応答を返すまでの時間（ミリ秒）。文字起こしを待っているあいだの表示を確かめるために使う */
+      delayMs: 0,
       calls: 0,
     };
 
@@ -345,9 +354,11 @@ export class MockServer {
     return sendJson(res, 404, { message: `模擬サーバーにない宛先です: ${route}` });
   }
 
-  #transcription(record, res) {
+  async #transcription(record, res) {
     const { openai } = this;
     openai.calls += 1;
+    const call = openai.calls;
+    if (openai.delayMs) await sleep(openai.delayMs);
     if (record.headers.authorization !== `Bearer ${openai.apiKey}`) {
       return sendJson(res, 401, OPENAI_ERRORS[401]);
     }
@@ -363,7 +374,7 @@ export class MockServer {
     if (!describeWav(file.data)) {
       return sendJson(res, 400, openaiError("Invalid file format."));
     }
-    return sendJson(res, 200, { text: openai.text(openai.calls, record) });
+    return sendJson(res, 200, { text: openai.text(call, record) });
   }
 
   async #message(record, res) {

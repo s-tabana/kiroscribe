@@ -9,59 +9,6 @@
 #   tauri  単体のテストはあるが、src-tauri/ の下のテスト（本体のコマンドの層）からの参照がない
 #   e2e    e2e/ の下のテストからの参照がない
 
-## E2E のテスト待ち
-# 種類に「E2E」がある項目。実際のアプリを起動して操作するテスト（e2e/）ができたら、ID を付けて消す。
-CHT-003 e2e
-DAT-001 e2e
-IPC-005 e2e
-IPC-007 e2e
-KEY-006 e2e
-KEY-009 e2e
-MIN-004 e2e
-MIN-018 e2e
-MIN-019 e2e
-MTG-011 e2e
-MTG-012 e2e
-MTG-016 e2e
-MTG-022 e2e
-NOTE-001 e2e
-NOTE-002 e2e
-NOTE-009 e2e
-NOTE-010 e2e
-NOTE-014 e2e
-NOTE-019 e2e
-NOTE-020 e2e
-POP-001 e2e
-POP-002 e2e
-POP-004 e2e
-POP-007 e2e
-POP-008 e2e
-POP-009 e2e
-REC-001 e2e
-REC-009 e2e
-REC-015 e2e
-REC-016 e2e
-SEC-002 e2e
-SEC-006 e2e
-SEC-011 e2e
-SEC-012 e2e
-SET-002 e2e
-SET-004 e2e
-SET-011 e2e
-SHR-007 e2e
-SHR-008 e2e
-SHR-012 e2e
-TRN-016 e2e
-TRN-019 e2e
-TRY-001 e2e
-TRY-006 e2e
-TRY-007 e2e
-TRY-008 e2e
-TRY-010 e2e
-UPD-004 e2e
-UPD-023 e2e
-UPD-025 e2e
-
 ## 実装待ち
 # 仕様一覧に〔実装待ち〕の印がある項目。本体（src-tauri/）の実装とテストがそろったら、印と一緒に消す。
 CHT-005 test

@@ -178,6 +178,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build
 
+      # E2E テスト用の差し替え口（cargo の feature `e2e`）は、配布するビルドには入れない
+      - name: 配布するビルドに E2E テスト用のコードがないことの確認
+        run: node e2e/check-release-binary.mjs target/release/kiroscribe.exe
+
       - name: 署名の確認と latest.json の作成
         id: assets
         shell: bash

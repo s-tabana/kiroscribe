@@ -85,10 +85,12 @@ it("[NOTE-014] 確認してからノートを削除し、次のノートを選�
 cargo install tauri-driver --locked       # 初回だけ
 npm run build:e2e                         # E2E テスト用のアプリを作る（target/debug/）
 npm run test:e2e                          # すべて走らせる（数分）。1 つだけなら -- e2e/specs/03-recording.test.mjs
-cargo test -p kiroscribe --features e2e   # コマンドとイベントの形を、画面側の型と突き合わせる
+cargo test -p kiroscribe --features e2e   # コマンドの層の結合テスト（録音・AI・会議の検出・更新など）と、画面側の型との突き合わせ
 ```
 
 ほかに、Linux では WebKitWebDriver（Ubuntu のパッケージは `webkitgtk-webdriver`。24.04 までは `webkit2gtk-driver`）と `xvfb`、Windows では WebView2 と同じバージョンの `msedgedriver.exe`（PATH に置くか、環境変数 `KIROSCRIBE_E2E_NATIVE_DRIVER` で場所を指定）が要ります。失敗したテストのスクリーンショットとログは `e2e/artifacts/` に残ります。`cargo build` や `cargo test` のあとは、`target/debug/` のアプリが E2E テスト用でなくなっていることがあるので、`npm run build:e2e` をやり直してください。
+
+`npm run test:e2e` は、最初にアプリを 1 回起動して、WebDriver で操作できることを確かめます。できなければ、シナリオは動かさずに、原因を調べるための情報（道具のバージョン、プロセスの様子、ドライバーとアプリのログ）を標準エラーに出して終わります。データベースを直接書き換えるシナリオがあるので、Node.js は組み込みの SQLite（`node:sqlite`）を使える 22.13 以上が要ります。
 
 コマンドの引数・戻り値やイベントの内容を変えたときは、見本（`src/test/ipc-contract.generated.ts`）を `KIROSCRIBE_UPDATE_IPC_CONTRACT=1 cargo test -p kiroscribe --features e2e ipc_contract` で書き直し、`npm run typecheck` が通るよう画面側の型を合わせます。
 

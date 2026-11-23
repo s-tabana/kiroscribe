@@ -3,15 +3,28 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { test } from "../lib/app.mjs";
+import { ROOT, test } from "../lib/app.mjs";
 import { ANTHROPIC_KEY, OPENAI_KEY } from "../lib/mock-server.mjs";
-import { apiKeyBadge, closeSettings, createNote, openSettings, pressBarButton, saveApiKey, sel } from "../lib/ui.mjs";
+import {
+  apiKeyBadge,
+  barButton,
+  closeSettings,
+  createNote,
+  openSettings,
+  pressBarButton,
+  saveApiKey,
+  saveSettings,
+  sel,
+  selectOption,
+  settingsCheck,
+  settingsField,
+} from "../lib/ui.mjs";
 
 test(
-  "API キーを保存すると「設定済み」になり、値は画面にもデータベースにも残らず、API には正しいヘッダで届く",
+  "[KEY-006][SEC-002] API キーを保存すると「設定済み」になり、値は画面にもデータベースにも残らず、API には正しいヘッダで届く",
   { apiKeys: false },
   async (ctx) => {
-    const session = await ctx.launch();
+    let session = await ctx.launch();
 
     await openSettings(session);
     assert.equal(await apiKeyBadge(session, "OpenAI"), "未設定");
@@ -74,8 +87,22 @@ test(
       }
     }
 
-    // 削除すると「未設定」に戻る
+    // アプリと WebDriver のログ、書き出した Markdown にも、キーの値は出ていない
+    for (const key of [OPENAI_KEY, ANTHROPIC_KEY]) {
+      assert.equal(ctx.work.logs().includes(key), false, "ログにキーの値が出ている");
+    }
+    await session.click("button.share-trigger");
+    await session.click('xpath://div[@role="dialog"][@aria-label="共有"]//button[normalize-space(.)="Markdown をコピー"]');
+    await session.waitUntil(() => ctx.work.clipboard() !== null, { message: "クリップボードに書き出される" });
+    assert.ok(!ctx.work.clipboard().includes(OPENAI_KEY) && !ctx.work.clipboard().includes(ANTHROPIC_KEY));
+
+    // アプリを起動し直しても、キーは残っている
+    session = await ctx.relaunch();
     await openSettings(session);
+    assert.equal(await apiKeyBadge(session, "OpenAI"), "設定済み");
+    assert.equal(await apiKeyBadge(session, "Anthropic（Claude）"), "設定済み");
+
+    // 削除すると「未設定」に戻る
     await session.click('xpath://input[@aria-label="OpenAI の API キー"]/following-sibling::button[normalize-space(.)="削除"]');
     await session.waitForText(`${sel.settingsDialog} .modal-footer [role="status"]`, "OpenAI のキーを削除しました");
     assert.equal(await apiKeyBadge(session, "OpenAI"), "未設定");
@@ -83,17 +110,47 @@ test(
   },
 );
 
-test("設定の変更（自分の呼び名など）は保存され、再起動後も残っている", async (ctx) => {
+test("[SET-002][SET-004][SET-008][SET-009] 設定は「設定を保存」で保存され、再起動後も残り、次の録音と議事録から使われる。保存せずに閉じると捨てる", async (ctx) => {
   let session = await ctx.launch();
-  await openSettings(session);
-  const myName = 'xpath://label[span[normalize-space(.)="議事録での自分の呼び名"]]/input';
-  await (await session.$(myName)).type("田中");
-  await session.click('xpath://footer//button[normalize-space(.)="設定を保存"]');
-  await session.waitForText(`${sel.settingsDialog} .modal-footer [role="status"]`, "設定を保存しました");
+  const myName = settingsField("議事録での自分の呼び名", "input");
+  const claudeModel = settingsField("Claude のモデル", "select");
+  const transcriptionModel = settingsField("モデル", "select");
 
+  // 保存せずに閉じると、変えた内容は捨てる
+  await openSettings(session);
+  await (await session.$(myName)).type("保存しない名前");
+  await selectOption(session, claudeModel, "claude-haiku-5-5");
+  await closeSettings(session);
+  await openSettings(session);
+  assert.equal(await (await session.$(myName)).value(), "");
+  assert.equal(await (await session.$(claudeModel)).value(), "claude-opus-5-5");
+  assert.equal(await (await session.$(transcriptionModel)).value(), "gpt-4o-transcribe");
+
+  // 「設定を保存」で保存する
+  await (await session.$(myName)).type("田中");
+  await selectOption(session, claudeModel, "claude-sonnet-5-5");
+  await selectOption(session, transcriptionModel, "gpt-4o-mini-transcribe");
+  await saveSettings(session);
+  await closeSettings(session);
+
+  // 起動し直さなくても、次の録音と議事録から、選んだモデルが使われる
+  await createNote(session, { title: "設定のテスト", memo: "- メモ" });
+  await pressBarButton(session, "録音を開始");
+  await session.waitUntil(() => ctx.server.transcriptions.length > 0, { timeout: 30_000, message: "文字起こしの API が呼ばれる" });
+  await pressBarButton(session, "停止");
+  await session.$(barButton("録音を再開"), { timeout: 30_000 });
+  assert.ok(ctx.server.transcriptions.every((request) => request.multipart.fields.model === "gpt-4o-mini-transcribe"));
+  await pressBarButton(session, "議事録を作成");
+  await session.waitForText(`${sel.minutes}[aria-busy="false"]`, "リリースは 12/5");
+  assert.equal(ctx.server.messages[0].json.model, "claude-sonnet-5-5");
+  assert.ok(ctx.server.messages[0].json.messages[0].content.includes("自分（田中）"), "自分の呼び名が、AI に渡す文字起こしに入る");
+
+  // 再起動しても残っている
   session = await ctx.relaunch();
   await openSettings(session);
   assert.equal(await (await session.$(myName)).value(), "田中");
+  assert.equal(await (await session.$(claudeModel)).value(), "claude-sonnet-5-5");
+  assert.equal(await (await session.$(transcriptionModel)).value(), "gpt-4o-mini-transcribe");
   // 録音に使うマイクの一覧も出ている（E2E では模擬のマイク）
   await session.waitUntil(
     async () =>
@@ -104,4 +161,31 @@ test("設定の変更（自分の呼び名など）は保存され、再起動�
       `)) === "既定のマイク（模擬のマイク）",
     { message: "マイクの一覧に模擬のマイクが出る" },
   );
+});
+
+test("[KEY-009][SET-011] 設定画面にバージョンが表示され、［キーを発行する］は発行のページを外部ブラウザで開く", async (ctx) => {
+  const session = await ctx.launch();
+  await openSettings(session);
+  const version = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
+  await session.waitForText(`${sel.settingsDialog} .about-version`, `Kiroscribe ${version}`);
+  assert.equal((await session.text(`${sel.settingsDialog} .about-version`)).trim(), `Kiroscribe ${version}`);
+
+  const pageUrl = await session.url();
+  await session.click('button[aria-label="OpenAI のキーを発行する"]');
+  await session.waitUntil(() => ctx.work.openedUrls().length === 1, { message: "OpenAI の発行のページを開く" });
+  await session.click('button[aria-label="Anthropic（Claude） のキーを発行する"]');
+  await session.waitUntil(() => ctx.work.openedUrls().length === 2, { message: "Anthropic の発行のページを開く" });
+  assert.deepEqual(ctx.work.openedUrls(), [
+    "https://platform.openai.com/api-keys",
+    "https://platform.claude.com/settings/keys",
+  ]);
+  // アプリの画面は、別のページに移らない（設定画面も開いたまま）
+  assert.equal(await session.url(), pageUrl);
+  await session.$(sel.settingsDialog);
+  assert.equal(await session.exists(`${sel.settingsDialog} .modal-footer .error-text`), false);
+  // チェックの切り替えも、保存するまでは効かない（閉じると元に戻る）
+  await session.click(settingsCheck("会議を検出したら自動で録音・文字起こしする"));
+  await closeSettings(session);
+  await openSettings(session);
+  assert.equal(await (await session.$(settingsCheck("会議を検出したら自動で録音・文字起こしする"))).isSelected(), true);
 });
