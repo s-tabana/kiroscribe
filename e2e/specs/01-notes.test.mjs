@@ -9,25 +9,12 @@ import { Key } from "../lib/webdriver.mjs";
 
 const noteList = 'nav[aria-label="ノート一覧"]';
 
-test("[NOTE-001][NOTE-008][NOTE-009][NOTE-014][NOTE-019][NOTE-020][DAT-001][TRY-007] 起動するとメイン画面が出て、ノートを作成・編集・検索・削除でき、再起動後も残っている", async (ctx) => {
+test("[NOTE-001][NOTE-008][NOTE-009][NOTE-014][NOTE-019][NOTE-020][DAT-001] 起動するとメイン画面が出て、ノートを作成・編集・検索・削除でき、再起動後も残っている", async (ctx) => {
   let session = await ctx.launch();
 
-  // ふつうに起動すると、メインウィンドウが決まった大きさで表示される
+  // ふつうに起動すると、メインウィンドウが表示される
   assert.equal(await session.title(), "Kiroscribe");
   assert.equal(await ctx.app.isMainVisible(), true);
-  const innerSize = () => session.execute("return [window.innerWidth, window.innerHeight]");
-  const [screenWidth, screenHeight] = await session.execute("return [screen.availWidth, screen.availHeight]");
-  if (screenWidth >= 1240 && screenHeight >= 820) {
-    assert.deepEqual(await innerSize(), [1240, 820], "メインウィンドウの大きさ");
-  }
-  // 幅 860px・高さ 560px より小さくはできない（それより小さくしようとしても、860x560 で止まる）
-  ctx.work.resizeWindow("main", 400, 300);
-  await session.waitUntil(async () => (await innerSize()).join("x") === "860x560", {
-    message: `ウィンドウが最小の大きさ（860x560）になる（いまは ${(await innerSize()).join("x")}）`,
-  });
-  // 最小より大きい大きさには、そのまま変えられる
-  ctx.work.resizeWindow("main", 900, 600);
-  await session.waitUntil(async () => (await innerSize()).join("x") === "900x600", { message: "ウィンドウが 900x600 になる" });
 
   // 初回起動: ノートはまだない。データベースは、アプリのデータフォルダの中にできる
   await session.waitForText("main", "最初の会議ノートを作りましょう");
@@ -186,4 +173,32 @@ test("[NOTE-008] 検索は、メモの本文・議事録・文字起こしに含
   await session.waitForText(noteList, "一致するノートがありません");
   await search.fill("");
   await session.waitUntil(async () => (await noteTitles(session)).length === 3, { message: "検索を消すと全件に戻る" });
+});
+
+test("[TRY-007] ふつうに起動するとメインウィンドウが 1240x820 で表示され、860x560 より小さくはできない", async (ctx) => {
+  const session = await ctx.launch();
+  assert.equal(await ctx.app.isMainVisible(), true);
+  // 始まりの大きさ（画面が小さくて収まらないときは、OS が画面の大きさまで縮める）
+  const [screenWidth, screenHeight] = await session.execute("return [screen.availWidth, screen.availHeight]");
+  if (screenWidth >= 1240 && screenHeight >= 820) {
+    assert.deepEqual(await session.execute("return [window.innerWidth, window.innerHeight]"), [1240, 820]);
+  }
+
+  // 大きさは、ウィンドウそのものに問い合わせる（アプリの側から変えて、変えたあとの値を受け取る）。
+  // まず、最小より大きい大きさに変えられること（大きさを変える操作が効いていること）
+  const resized = await ctx.work.resizeWindow("main", 900, 600);
+  assert.deepEqual(resized.problems, [], JSON.stringify(resized));
+  assert.deepEqual(resized.inner, [900, 600], `900x600 にならない: ${JSON.stringify(resized)}`);
+  // 最小（幅 860px・高さ 560px）より小さくしようとしても、最小で止まる
+  const shrunk = await ctx.work.resizeWindow("main", 400, 300);
+  assert.deepEqual(shrunk.inner, [860, 560], `最小の大きさで止まらない: ${JSON.stringify(shrunk)}`);
+  // 幅だけ・高さだけを小さくしようとしても同じ
+  const narrow = await ctx.work.resizeWindow("main", 400, 700);
+  assert.deepEqual(narrow.inner, [860, 700], JSON.stringify(narrow));
+  const low = await ctx.work.resizeWindow("main", 1000, 300);
+  assert.deepEqual(low.inner, [1000, 560], JSON.stringify(low));
+  // 画面（ウェブビュー）も、ウィンドウの大きさに追従している
+  await session.waitUntil(async () => (await session.execute("return [window.innerWidth, window.innerHeight]")).join("x") === "1000x560", {
+    message: "画面の大きさが、ウィンドウの大きさに合う",
+  });
 });

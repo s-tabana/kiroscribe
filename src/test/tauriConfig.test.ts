@@ -58,6 +58,18 @@ describe("画面（WebView）に許すこと", () => {
   });
 });
 
+describe("メインウィンドウの設定", () => {
+  it("[TRY-007] 幅 1240px・高さ 820px で始まり、幅 860px・高さ 560px より小さくはできない", () => {
+    expect(tauriConfig.app.windows).toHaveLength(1);
+    const [main] = tauriConfig.app.windows;
+    expect(main.label).toBe("main");
+    expect([main.width, main.height]).toEqual([1240, 820]);
+    expect([main.minWidth, main.minHeight]).toEqual([860, 560]);
+    // 起動時の処理が済んでから表示する（Windows の起動時の自動起動では、表示しない）
+    expect(main.visible).toBe(false);
+  });
+});
+
 describe("アプリ内の更新の設定", () => {
   it("[REL-007][UPD-003] 更新用のファイルを作り、決まった取得元・1 行の公開鍵・操作の要らないインストールの方式を使う", () => {
     expect(tauriConfig.bundle.createUpdaterArtifacts).toBe(true);

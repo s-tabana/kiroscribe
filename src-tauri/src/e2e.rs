@@ -26,6 +26,7 @@ const OPENED_URLS_FILE: &str = "opened-urls.log";
 const PID_FILE: &str = "app.pid";
 const CLOSE_WINDOW_FILE: &str = "close-window.txt";
 const RESIZE_WINDOW_FILE: &str = "resize-window.txt";
+const WINDOW_SIZE_FILE: &str = "window-size.json";
 
 /// 作業フォルダごとに変えるアプリの識別子の先頭。製品の識別子（`dev.kiroscribe.desktop`）とは重ならない。
 const IDENTIFIER_PREFIX: &str = "dev.kiroscribe.e2e";
@@ -297,7 +298,8 @@ fn clipboard_plugin<R: Runtime>() -> TauriPlugin<R> {
 ///   利用者がウィンドウの「×」を押したのと同じ扱いになる（WebDriver からは「×」を押せないため）
 /// - `resize-window.txt` に「ラベル 幅 高さ」（例: `main 400 300`）が書かれたら、そのウィンドウの大きさを変える。
 ///   利用者がウィンドウの端をドラッグしたときと同じく、OS がウィンドウの最小の大きさを守る
-///   （WebDriver の大きさの変更は、Windows ではウェブビューの領域しか変えないため）
+///   （WebDriver の大きさの変更は、Windows ではウェブビューの領域しか変えないため）。
+///   変えたあとのウィンドウの大きさ（OS に問い合わせた値）を `window-size.json` に書く
 fn control_plugin<R: Runtime>() -> TauriPlugin<R> {
     PluginBuilder::new("e2e-control")
         // 起動に失敗したときに、どこまで進んだかをログから追えるようにする
@@ -331,11 +333,7 @@ fn control_plugin<R: Runtime>() -> TauriPlugin<R> {
                         let _ = std::fs::remove_file(&path);
                         match parse_resize(&request) {
                             Some((label, width, height)) => match app.get_webview_window(label) {
-                                Some(window) => {
-                                    if let Err(err) = window.set_size(tauri::LogicalSize::new(width, height)) {
-                                        eprintln!("[e2e] ウィンドウ {label} の大きさを変えられません: {err}");
-                                    }
-                                }
+                                Some(window) => resize_and_report(&window, label, width, height),
                                 None => eprintln!("[e2e] ウィンドウ {label} がありません"),
                             },
                             None => eprintln!("[e2e] {RESIZE_WINDOW_FILE} の内容が正しくありません: {request}"),
@@ -345,6 +343,66 @@ fn control_plugin<R: Runtime>() -> TauriPlugin<R> {
             Ok(())
         })
         .build()
+}
+
+/// ウィンドウの大きさを変えて、変えたあとの大きさを `window-size.json` と、ログに残す。
+/// 大きさは、ウェブビューではなく、ウィンドウそのものに問い合わせる（最小の大きさは、OS とウィンドウが守る）。
+fn resize_and_report<R: Runtime>(window: &tauri::WebviewWindow<R>, label: &str, width: f64, height: f64) {
+    let mut problems: Vec<String> = Vec::new();
+    // 最大化されていると、大きさを変えられない
+    let was_maximized = window.is_maximized().unwrap_or(false);
+    if was_maximized {
+        if let Err(err) = window.unmaximize() {
+            problems.push(format!("最大化を解けません: {err}"));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    if let Err(err) = window.set_size(tauri::LogicalSize::new(width, height)) {
+        problems.push(format!("大きさを変えられません: {err}"));
+    }
+    // 大きさの変更は、少し遅れて反映される。落ち着くまで待つ（同じ値が 3 回続くか、3 秒たつまで）
+    let mut measured = measure(window);
+    let mut stable = 0;
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(100));
+        let next = measure(window);
+        stable = if next == measured { stable + 1 } else { 0 };
+        measured = next;
+        if stable >= 3 {
+            break;
+        }
+    }
+    let report = json!({
+        "label": label,
+        "requested": [width, height],
+        "inner": measured["inner"],
+        "outer": measured["outer"],
+        "scaleFactor": measured["scaleFactor"],
+        "maximized": measured["maximized"],
+        "wasMaximized": was_maximized,
+        "problems": problems,
+    });
+    eprintln!("[e2e] ウィンドウの大きさ: {report}");
+    if let Some(path) = core::file(WINDOW_SIZE_FILE) {
+        if let Err(err) = std::fs::write(&path, report.to_string()) {
+            eprintln!("[e2e] {} に書けません: {err}", path.display());
+        }
+    }
+}
+
+/// ウィンドウの大きさ（内側・外側。表示の拡大率を掛ける前の px に直して、四捨五入した値）。
+fn measure<R: Runtime>(window: &tauri::WebviewWindow<R>) -> Value {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let logical = |size: tauri::Result<tauri::PhysicalSize<u32>>| match size {
+        Ok(size) => json!([(f64::from(size.width) / scale).round(), (f64::from(size.height) / scale).round()]),
+        Err(err) => json!(err.to_string()),
+    };
+    json!({
+        "inner": logical(window.inner_size()),
+        "outer": logical(window.outer_size()),
+        "scaleFactor": scale,
+        "maximized": window.is_maximized().unwrap_or(false),
+    })
 }
 
 /// `resize-window.txt` の内容（「ラベル 幅 高さ」）を読む。

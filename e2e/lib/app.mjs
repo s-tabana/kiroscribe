@@ -172,10 +172,26 @@ export class Workspace {
 
   /**
    * ウィンドウの大きさを変える（利用者がウィンドウの端をドラッグしたときと同じく、OS が最小の大きさを守る）。
-   * WebDriver の大きさの変更は、Windows ではウェブビューの領域しか変えないので、アプリの側から変える
+   * WebDriver の大きさの変更は、Windows ではウェブビューの領域しか変えないので、アプリの側から変える。
+   * 返すのは、変えたあとの様子: { requested, inner: [幅, 高さ], outer, scaleFactor, maximized, wasMaximized, problems }
    */
-  resizeWindow(label, width, height) {
+  async resizeWindow(label, width, height) {
+    fs.rmSync(this.file("window-size.json"), { force: true });
     fs.writeFileSync(this.file("resize-window.txt"), `${label} ${width} ${height}`);
+    // アプリが、変えたあとの大きさ（ウィンドウそのものに問い合わせた値）を書くまで待つ
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const text = this.#read("window-size.json");
+      if (text) {
+        try {
+          return JSON.parse(text);
+        } catch {
+          // 書いている途中
+        }
+      }
+      if (Date.now() >= deadline) throw new Error(`アプリが、ウィンドウ ${label} の大きさを知らせてきません`);
+      await sleep(100);
+    }
   }
 
   /** 起動しているアプリのプロセス ID（まだ起動していなければ null） */
