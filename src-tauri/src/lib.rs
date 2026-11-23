@@ -6,6 +6,8 @@ mod e2e;
 mod meeting_watch;
 mod error;
 mod help;
+#[cfg(test)]
+mod ipc_tests;
 mod recording;
 mod runtime;
 mod state;
