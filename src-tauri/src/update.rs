@@ -14,7 +14,7 @@ use kiroscribe_core::settings::Settings;
 use kiroscribe_core::time::now_ms;
 use kiroscribe_core::Database;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_updater::{Update, Updater, UpdaterExt};
 use tokio::sync::Notify;
 
@@ -22,6 +22,7 @@ use crate::ai::AiState;
 use crate::background::{self, POPUP_LABEL};
 use crate::error::{CmdResult, CommandError};
 use crate::recording::RecorderState;
+use crate::runtime::AppHandle;
 use crate::state::AppState;
 
 pub const EVENT_UPDATE_STATUS: &str = "update-status";
@@ -413,26 +414,19 @@ fn describe(update: &Update) -> AvailableUpdate {
     }
 }
 
+/// 配布元と公開鍵は `tauri.conf.json` のものを使う
+/// （E2E テスト用のビルドでは、起動の前に `e2e::prepare` が模擬の配布元と試験用の鍵に書き換えている）。
 fn build_updater(app: &AppHandle) -> tauri_plugin_updater::Result<Updater> {
-    let builder = app.updater_builder().timeout(CHECK_TIMEOUT);
-    #[cfg(debug_assertions)]
-    let builder = dev_overrides(builder)?;
-    builder.build()
+    app.updater_builder().timeout(CHECK_TIMEOUT).build()
 }
 
-/// 開発用: 環境変数で配布元と公開鍵を差し替える（手元のサーバーと試験用の鍵で、確認からダウンロードまでを確かめるため）。
-/// `KIROSCRIBE_UPDATE_ENDPOINT` = latest.json の URL、`KIROSCRIBE_UPDATE_PUBKEY` = 公開鍵。リリースビルドでは読まない。
-#[cfg(debug_assertions)]
-fn dev_overrides(
-    mut builder: tauri_plugin_updater::UpdaterBuilder,
-) -> tauri_plugin_updater::Result<tauri_plugin_updater::UpdaterBuilder> {
-    if let Ok(endpoint) = std::env::var("KIROSCRIBE_UPDATE_ENDPOINT") {
-        builder = builder.endpoints(vec![endpoint.parse()?])?;
+/// 起動してから最初に確認するまでの時間。
+pub(crate) fn first_check_delay() -> Duration {
+    #[cfg(feature = "e2e")]
+    if let Some(delay) = crate::e2e::update_first_check_delay() {
+        return delay;
     }
-    if let Ok(pubkey) = std::env::var("KIROSCRIBE_UPDATE_PUBKEY") {
-        builder = builder.pubkey(pubkey);
-    }
-    Ok(builder)
+    FIRST_CHECK_DELAY
 }
 
 /// 新しい版があるか確認して、状態を更新する。
@@ -457,7 +451,7 @@ async fn check(app: &AppHandle) -> tauri_plugin_updater::Result<UpdateStatus> {
 /// 失敗（オフライン・この環境向けの配布がない等）は画面に出さず、次の機会に確かめ直す。
 pub fn spawn_auto_check(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(FIRST_CHECK_DELAY).await;
+        tokio::time::sleep(first_check_delay()).await;
         loop {
             let due = app.state::<UpdateState>().lock().check_due(now_ms());
             if due {

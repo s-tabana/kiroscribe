@@ -1,10 +1,13 @@
 mod ai;
 mod background;
 mod commands;
+#[cfg(feature = "e2e")]
+mod e2e;
 mod meeting_watch;
 mod error;
 mod help;
 mod recording;
+mod runtime;
 mod state;
 mod update;
 
@@ -17,12 +20,13 @@ use tauri::{Manager, WindowEvent};
 use crate::ai::AiState;
 use crate::background::{BackgroundState, AUTOSTART_ARG, MAIN_LABEL};
 use crate::recording::RecorderState;
+use crate::runtime::Runtime;
 use crate::state::AppState;
 use crate::update::UpdateState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::<Runtime>::new()
         // 2 つ目を起動しようとしたら、常駐中のウィンドウを出すだけにする（会議の検出が二重にならないように）
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             background::show_main(app);
@@ -91,7 +95,23 @@ pub fn run() {
                     let _ = window.hide();
                 }
             }
-        })
+        });
+    #[allow(unused_mut)]
+    let mut context = tauri::generate_context!();
+    // E2E テスト用のビルドでだけ、データの場所や OS に出ていくものを差し替える（src/e2e.rs）
+    #[cfg(feature = "e2e")]
+    let builder = {
+        e2e::prepare(&mut context);
+        e2e::plugins(builder)
+    };
+    register_commands(builder)
+        .run(context)
+        .expect("Kiroscribe の起動に失敗しました");
+}
+
+/// 画面から呼べるコマンドを登録する（テストでも同じ一覧を登録して、画面側との食い違いを確かめる）。
+fn register_commands(builder: tauri::Builder<Runtime>) -> tauri::Builder<Runtime> {
+    builder
         .invoke_handler(tauri::generate_handler![
             commands::list_notes,
             commands::create_note,
@@ -129,8 +149,6 @@ pub fn run() {
             update::install_update,
             update::take_update_notice,
         ])
-        .run(tauri::generate_context!())
-        .expect("Kiroscribe の起動に失敗しました");
 }
 
 #[cfg(test)]
@@ -169,6 +187,22 @@ mod tests {
         let lock = read_json(&root.join("package-lock.json"));
         assert_eq!(lock["version"].as_str(), Some(version), "package-lock.json");
         assert_eq!(lock["packages"][""]["version"].as_str(), Some(version), "package-lock.json（packages）");
+    }
+
+    /// 待ち時間の本来の値。E2E テスト用のビルド（feature `e2e`）では設定で縮められるので、
+    /// 製品の値はここで確かめておく（会議の開始・終了の確定は meetings、API の再試行は retry のテストにある）。
+    #[cfg(not(feature = "e2e"))]
+    #[test]
+    fn waits_have_their_product_values() {
+        use std::time::Duration;
+        assert_eq!(crate::update::first_check_delay(), Duration::from_secs(20), "起動から最初の更新の確認まで");
+        assert_eq!(crate::meeting_watch::poll_interval(), Duration::from_secs(2), "会議の検出を調べる間隔");
+        let tracker = kiroscribe_core::meetings::MeetingTracker::default();
+        assert_eq!(tracker.start_confirm_ms, 4_000, "会議の開始を確定するまで");
+        assert_eq!(tracker.end_grace_ms, 20_000, "会議が見えなくなってから録音を止めるまで");
+        let retry = kiroscribe_core::retry::RetryPolicy::default();
+        assert_eq!(retry.max_attempts, 4);
+        assert_eq!((retry.base_delay, retry.max_delay), (Duration::from_secs(1), Duration::from_secs(8)));
     }
 
     /// アプリ内更新の配布元と公開鍵が設定されていること（欠けると更新の確認が常に失敗する）。

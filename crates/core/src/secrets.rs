@@ -19,7 +19,7 @@ pub const SERVICE_NAME: &str = "Kiroscribe";
 pub const LEGACY_SERVICE_NAME: &str = "Kiroku";
 
 /// Windows 以外で使うファイルの名前（アプリデータフォルダの直下）。
-#[cfg(not(windows))]
+#[cfg(any(not(windows), feature = "e2e"))]
 const SECRETS_FILE: &str = "secrets.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -275,13 +275,15 @@ mod windows_store {
 pub use windows_store::CredentialManagerStore;
 
 /// 実行環境に応じたストアを返す。`data_dir` は Windows 以外のフォールバック先。
+///
+/// E2E テスト用のビルド（feature `e2e`）では、Windows でも資格情報マネージャーに触れず、ファイルに保存する。
 pub fn platform_store(data_dir: &Path) -> Result<Box<dyn SecretStore>> {
-    #[cfg(windows)]
+    #[cfg(all(windows, not(feature = "e2e")))]
     {
         let _ = data_dir;
         Ok(Box::new(CredentialManagerStore::new()?))
     }
-    #[cfg(not(windows))]
+    #[cfg(any(not(windows), feature = "e2e"))]
     {
         Ok(Box::new(FileSecretStore::new(data_dir.join(SECRETS_FILE))))
     }
@@ -292,14 +294,14 @@ pub fn platform_store(data_dir: &Path) -> Result<Box<dyn SecretStore>> {
 /// Windows では資格情報マネージャーの旧サービス名、Windows 以外では旧アプリのデータフォルダのファイル。
 /// 旧アプリのデータフォルダを特定できないときは `None`。
 pub fn legacy_platform_store(data_dir: &Path) -> Result<Option<Box<dyn SecretStore>>> {
-    #[cfg(windows)]
+    #[cfg(all(windows, not(feature = "e2e")))]
     {
         let _ = data_dir;
         Ok(Some(Box::new(CredentialManagerStore::with_service(
             LEGACY_SERVICE_NAME,
         )?)))
     }
-    #[cfg(not(windows))]
+    #[cfg(any(not(windows), feature = "e2e"))]
     {
         Ok(crate::legacy::legacy_data_dir(data_dir).map(|dir| {
             Box::new(FileSecretStore::new(dir.join(SECRETS_FILE))) as Box<dyn SecretStore>

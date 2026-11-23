@@ -15,9 +15,10 @@ use kiroscribe_core::secrets::{require_api_key, Provider};
 use kiroscribe_core::settings::Settings;
 use kiroscribe_core::transcript::Segment;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{Emitter, State};
 
 use crate::error::{CmdResult, CommandError};
+use crate::runtime::AppHandle;
 use crate::state::AppState;
 
 pub const EVENT_ENHANCE_DELTA: &str = "enhance-delta";

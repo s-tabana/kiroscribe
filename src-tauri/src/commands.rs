@@ -8,6 +8,7 @@ use tauri::State;
 
 use crate::error::{CmdResult, CommandError};
 use crate::recording::RecorderState;
+use crate::runtime::AppHandle;
 use crate::state::AppState;
 
 // ---- ノート ----
@@ -55,7 +56,7 @@ pub fn get_settings(state: State<'_, AppState>) -> CmdResult<Settings> {
 
 #[tauri::command]
 pub fn save_settings(
-    app: tauri::AppHandle,
+    app: AppHandle,
     state: State<'_, AppState>,
     settings: Settings,
 ) -> CmdResult<Settings> {

@@ -4,6 +4,8 @@ pub mod audio;
 pub mod chat;
 pub mod claude;
 pub mod db;
+#[cfg(feature = "e2e")]
+pub mod e2e;
 pub mod error;
 pub mod export;
 pub mod help;

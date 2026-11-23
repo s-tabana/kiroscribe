@@ -41,6 +41,10 @@ fn device_id(device: &cpal::Device) -> Option<String> {
 
 /// 録音に使えるマイクの一覧。
 pub fn list_input_devices() -> Result<Vec<AudioDevice>> {
+    #[cfg(feature = "e2e")]
+    if crate::e2e::audio::enabled() {
+        return Ok(crate::e2e::audio::devices());
+    }
     let host = cpal::default_host();
     let default_id = host.default_input_device().as_ref().and_then(device_id);
     let devices = host
@@ -187,31 +191,53 @@ fn open_system_loopback(
     ))
 }
 
+/// 取り込みを続けているあいだ保持するもの（実際のデバイスでは `cpal::Stream`）。
+/// 破棄すると取り込みが止まり、`frames` の送信側も閉じる。
+pub type CaptureGuard = Box<dyn std::any::Any>;
+
 /// マイクと（指定があれば）システム音声を開く。マイクが開けなければエラー、
 /// システム音声だけ失敗した場合はマイクのみで続ける（`sink` に知らせる）。
-///
-/// 返す `cpal::Stream` を破棄すると取り込みが止まり、`frames` の送信側も閉じる。
 pub fn open_sources(
     mic_device_id: Option<&str>,
     capture_system_audio: bool,
     sink: Arc<dyn RecorderSink>,
-) -> Result<(Vec<cpal::Stream>, Vec<OpenedSource>)> {
+) -> Result<(Vec<CaptureGuard>, Vec<OpenedSource>)> {
+    // E2E テストで模擬の音声が指定されていれば、実際のデバイスの代わりにそれを開く
+    #[cfg(feature = "e2e")]
+    if crate::e2e::audio::enabled() {
+        use crate::e2e::audio::open;
+        return open_with(capture_system_audio, sink, || open(Speaker::Me), || open(Speaker::Them));
+    }
     let host = cpal::default_host();
-    let mut streams = Vec::new();
+    open_with(
+        capture_system_audio,
+        sink.clone(),
+        || open_microphone(&host, mic_device_id, sink.clone()),
+        || open_system_loopback(&host, sink.clone()),
+    )
+}
+
+fn open_with<G: 'static>(
+    capture_system_audio: bool,
+    sink: Arc<dyn RecorderSink>,
+    open_mic: impl FnOnce() -> Result<(G, OpenedSource)>,
+    open_system: impl FnOnce() -> Result<(G, OpenedSource)>,
+) -> Result<(Vec<CaptureGuard>, Vec<OpenedSource>)> {
+    let mut guards: Vec<CaptureGuard> = Vec::new();
     let mut sources = Vec::new();
 
-    let (stream, source) = open_microphone(&host, mic_device_id, sink.clone())?;
-    streams.push(stream);
+    let (guard, source) = open_mic()?;
+    guards.push(Box::new(guard));
     sources.push(source);
 
     if capture_system_audio {
-        match open_system_loopback(&host, sink.clone()) {
-            Ok((stream, source)) => {
-                streams.push(stream);
+        match open_system() {
+            Ok((guard, source)) => {
+                guards.push(Box::new(guard));
                 sources.push(source);
             }
             Err(err) => sink.on_error(format!("相手の声は取り込まず、マイクだけで録音します（{err}）")),
         }
     }
-    Ok((streams, sources))
+    Ok((guards, sources))
 }

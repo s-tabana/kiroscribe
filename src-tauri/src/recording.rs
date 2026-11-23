@@ -11,9 +11,10 @@ use kiroscribe_core::time::now_ms;
 use kiroscribe_core::transcribe::OpenAiTranscriber;
 use kiroscribe_core::transcript::{Segment, Speaker};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{Emitter, Manager, State};
 
 use crate::error::{CmdResult, CommandError};
+use crate::runtime::AppHandle;
 use crate::state::AppState;
 
 pub const EVENT_STATUS: &str = "recording-status";

@@ -15,15 +15,22 @@ pub struct RetryPolicy {
 
 impl Default for RetryPolicy {
     fn default() -> Self {
-        Self {
-            max_attempts: 4,
-            base_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(8),
+        // E2E テスト用のビルド（feature `e2e`）でだけ、待ち時間を縮められる
+        #[cfg(feature = "e2e")]
+        if let Some(shortened) = crate::e2e::retry_policy(&Self::STANDARD) {
+            return shortened;
         }
+        Self::STANDARD
     }
 }
 
 impl RetryPolicy {
+    const STANDARD: Self = Self {
+        max_attempts: 4,
+        base_delay: Duration::from_secs(1),
+        max_delay: Duration::from_secs(8),
+    };
+
     /// n 回目（0 始まり）の失敗後に待つ時間: 1s, 2s, 4s, 8s, 8s …
     pub fn delay_after(&self, failure_index: u32) -> Duration {
         let factor = 2u32.saturating_pow(failure_index);

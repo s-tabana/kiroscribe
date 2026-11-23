@@ -42,7 +42,7 @@ impl OpenAiTranscriber {
             .map(str::to_string);
         Self {
             client: crate::http::client(),
-            base_url: OPENAI_BASE_URL.to_string(),
+            base_url: default_base_url(),
             api_key: api_key.to_string(),
             model: model.to_string(),
             language,
@@ -102,6 +102,15 @@ impl Transcribe for OpenAiTranscriber {
     fn transcribe(&self, wav: Vec<u8>, prompt: Option<String>) -> BoxFuture<'_, Result<String>> {
         Box::pin(self.request(wav, prompt))
     }
+}
+
+/// 接続先。E2E テスト用のビルド（feature `e2e`）でだけ、模擬サーバーに差し替えられる。
+fn default_base_url() -> String {
+    #[cfg(feature = "e2e")]
+    if let Some(url) = crate::e2e::openai_base_url() {
+        return url;
+    }
+    OPENAI_BASE_URL.to_string()
 }
 
 /// 無音や雑音に対して音声認識モデルが出しがちな定型文。これだけの結果は捨てる。

@@ -4,9 +4,10 @@
 
 use kiroscribe_core::help::{self, Guide, HelpClient, ReleaseNotes};
 use kiroscribe_core::time::now_ms;
-use tauri::{AppHandle, State};
+use tauri::State;
 
 use crate::error::{CmdResult, CommandError};
+use crate::runtime::AppHandle;
 use crate::state::AppState;
 
 fn app_version(app: &AppHandle) -> String {
@@ -39,6 +40,13 @@ pub fn open_external(url: String) -> CmdResult<()> {
     let url = help::allowed_external_url(&url).ok_or_else(|| {
         CommandError("このリンクは開けません（https:// で始まるリンクだけを開けます）".into())
     })?;
+    // E2E テスト用のビルドでは、ブラウザを開かずに記録だけする
+    #[cfg(feature = "e2e")]
+    {
+        crate::e2e::record_opened_url(&url);
+        Ok(())
+    }
+    #[cfg(not(feature = "e2e"))]
     tauri_plugin_opener::open_url(url, None::<&str>)
         .map_err(|err| CommandError(format!("ブラウザを開けませんでした: {err}")))
 }

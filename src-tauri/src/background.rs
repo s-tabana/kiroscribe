@@ -7,10 +7,11 @@ use kiroscribe_core::settings::Settings;
 use serde::Serialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, Wry};
+use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::error::CmdResult;
 use crate::recording::stop_now;
+use crate::runtime::{AppHandle, Runtime};
 use crate::state::AppState;
 
 pub const MAIN_LABEL: &str = "main";
@@ -47,7 +48,7 @@ pub enum PopupPayload {
 #[derive(Default)]
 pub struct BackgroundState {
     popup: Mutex<Option<PopupPayload>>,
-    tray_auto_item: Mutex<Option<CheckMenuItem<Wry>>>,
+    tray_auto_item: Mutex<Option<CheckMenuItem<Runtime>>>,
     quitting: AtomicBool,
 }
 
@@ -156,8 +157,8 @@ pub fn apply_settings(app: &AppHandle, settings: &Settings) {
     if let Some(item) = app.state::<BackgroundState>().tray_auto_item.lock().unwrap().as_ref() {
         let _ = item.set_checked(settings.auto_record_meetings);
     }
-    // 開発中の実行ファイルを自動起動に登録しないよう、リリースビルドだけで行う
-    #[cfg(not(debug_assertions))]
+    // 開発中の実行ファイルを自動起動に登録しないよう、リリースビルドだけで行う（E2E テスト用のビルドでも行わない）
+    #[cfg(all(not(debug_assertions), not(feature = "e2e")))]
     {
         use tauri_plugin_autostart::ManagerExt;
         let autolaunch = app.autolaunch();

@@ -78,6 +78,15 @@ pub fn supports_server_fallback(model: &str) -> bool {
     )
 }
 
+/// 接続先。E2E テスト用のビルド（feature `e2e`）でだけ、模擬サーバーに差し替えられる。
+fn default_base_url() -> String {
+    #[cfg(feature = "e2e")]
+    if let Some(url) = crate::e2e::anthropic_base_url() {
+        return url;
+    }
+    ANTHROPIC_BASE_URL.to_string()
+}
+
 pub struct ClaudeClient {
     client: reqwest::Client,
     base_url: String,
@@ -89,7 +98,7 @@ impl ClaudeClient {
     pub fn new(api_key: &str, model: &str) -> Self {
         Self {
             client: crate::http::client(),
-            base_url: ANTHROPIC_BASE_URL.to_string(),
+            base_url: default_base_url(),
             api_key: api_key.to_string(),
             model: model.to_string(),
         }

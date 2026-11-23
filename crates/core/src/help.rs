@@ -118,6 +118,18 @@ impl From<GithubRelease> for ReleaseNote {
     }
 }
 
+/// 取得元（使い方, リリース一覧）。E2E テスト用のビルド（feature `e2e`）でだけ、模擬サーバーに差し替えられる。
+fn default_base_urls() -> (String, String) {
+    #[cfg(feature = "e2e")]
+    let (raw, api) = crate::e2e::github_base_urls();
+    #[cfg(not(feature = "e2e"))]
+    let (raw, api) = (None::<String>, None::<String>);
+    (
+        raw.unwrap_or_else(|| RAW_BASE_URL.to_string()),
+        api.unwrap_or_else(|| API_BASE_URL.to_string()),
+    )
+}
+
 /// GitHub からヘルプの内容を取得するクライアント。
 pub struct HelpClient {
     client: reqwest::Client,
@@ -133,10 +145,11 @@ impl Default for HelpClient {
 
 impl HelpClient {
     pub fn new() -> Self {
+        let (raw_base_url, api_base_url) = default_base_urls();
         Self {
             client: crate::http::client(),
-            raw_base_url: RAW_BASE_URL.to_string(),
-            api_base_url: API_BASE_URL.to_string(),
+            raw_base_url,
+            api_base_url,
         }
     }
 

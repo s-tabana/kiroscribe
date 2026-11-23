@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 description = "Kiroscribe のUI非依存ロジック（保存・音声処理・文字起こし・Claude API）"
 
+[features]
+# E2E テスト用の差し替え口（接続先・音声・データの場所など。crates/core/src/e2e/）を有効にする。
+# リリース用のビルドでは付けない
+e2e = []
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

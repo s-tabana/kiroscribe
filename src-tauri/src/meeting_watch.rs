@@ -3,14 +3,15 @@
 use std::time::Duration;
 
 use chrono::Local;
-use kiroscribe_core::meetings::{observe, Detection, MeetingApp, MeetingEvent, MeetingTracker};
+use kiroscribe_core::meetings::{observe, MeetingApp, MeetingEvent, MeetingTracker};
 use kiroscribe_core::notes::{Note, NotePatch};
 use kiroscribe_core::secrets::{require_api_key, Provider};
 use kiroscribe_core::time::now_ms;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{Emitter, Manager};
 
 use crate::background::{show_popup, PopupPayload};
 use crate::recording::{start_for_note, stop_now, RecorderState};
+use crate::runtime::AppHandle;
 use crate::state::AppState;
 
 pub const EVENT_NOTE_CREATED: &str = "note-created";
@@ -24,16 +25,19 @@ pub fn spawn(app: AppHandle) {
     let spawned = std::thread::Builder::new()
         .name("kiroscribe-meetings".into())
         .spawn(move || {
+            #[allow(unused_mut)]
             let mut tracker = MeetingTracker::default();
-            let started = std::time::Instant::now();
+            // E2E テスト用のビルドでだけ、待ち時間を縮め、実際の検出の代わりにテストが決めた状態を使う（src/e2e.rs）
+            #[cfg(feature = "e2e")]
+            crate::e2e::tune_tracker(&mut tracker);
             loop {
-                std::thread::sleep(POLL_INTERVAL);
-                let event = match simulated_meeting(started) {
-                    Some(app) => {
-                        let detection = Detection { app, via_browser: false };
-                        tracker.tick(Some(detection), true, now_ms())
-                    }
-                    None if simulating() => tracker.tick(None, false, now_ms()),
+                std::thread::sleep(poll_interval());
+                #[cfg(feature = "e2e")]
+                let simulated = crate::e2e::simulated_detection();
+                #[cfg(not(feature = "e2e"))]
+                let simulated: Option<(Option<kiroscribe_core::meetings::Detection>, bool)> = None;
+                let event = match simulated {
+                    Some((detected, continuing)) => tracker.tick(detected, continuing, now_ms()),
                     None => tracker.observe(&observe(), own_exe.as_deref(), now_ms()),
                 };
                 if let Some(event) = event {
@@ -47,24 +51,13 @@ pub fn spawn(app: AppHandle) {
     }
 }
 
-/// 開発用: 環境変数 `KIROSCRIBE_SIMULATE_MEETING=10-40` で、起動 10 秒後から 40 秒後まで
-/// Google Meet の会議中として扱う（会議アプリのない環境で自動録音の流れを確かめるため）。
-#[cfg(debug_assertions)]
-fn simulated_meeting(started: std::time::Instant) -> Option<MeetingApp> {
-    let spec = std::env::var("KIROSCRIBE_SIMULATE_MEETING").ok()?;
-    let (from, to) = spec.split_once('-')?;
-    let (from, to): (u64, u64) = (from.trim().parse().ok()?, to.trim().parse().ok()?);
-    let elapsed = started.elapsed().as_secs();
-    (from..to).contains(&elapsed).then_some(MeetingApp::GoogleMeet)
-}
-
-#[cfg(not(debug_assertions))]
-fn simulated_meeting(_started: std::time::Instant) -> Option<MeetingApp> {
-    None
-}
-
-fn simulating() -> bool {
-    cfg!(debug_assertions) && std::env::var_os("KIROSCRIBE_SIMULATE_MEETING").is_some()
+/// 検出を調べる間隔。
+pub(crate) fn poll_interval() -> Duration {
+    #[cfg(feature = "e2e")]
+    if let Some(interval) = crate::e2e::meeting_poll_interval() {
+        return interval;
+    }
+    POLL_INTERVAL
 }
 
 /// 例: 「Google Meet 11/20 15:04」
