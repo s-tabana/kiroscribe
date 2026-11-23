@@ -182,3 +182,51 @@ fn a_chat_answer_can_be_cancelled() {
         "中止した回答が保存されている: {history}"
     );
 }
+
+/// 回答をもらえなかった質問は、履歴に残さない（送り直しても、同じ質問が 2 つ並ばない）。
+// [CHT-005]
+#[test]
+fn a_question_without_an_answer_is_not_kept_in_the_history() {
+    let h = Harness::new();
+    let note = h.note("週次定例", "- メモ");
+    let history = |h: &Harness| -> Vec<(String, String)> {
+        h.ok("list_chat_messages", json!({ "noteId": note }))
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| (message["role"].as_str().unwrap().to_string(), message["content"].as_str().unwrap().to_string()))
+            .collect()
+    };
+    let turn = |role: &str, content: &str| (role.to_string(), content.to_string());
+
+    // AI の応答が失敗した
+    set_reply(&h, ClaudeReply::status(401));
+    assert!(h.call("send_chat_message", json!({ "noteId": note, "content": "決まったことは？" })).is_err());
+    assert!(history(&h).is_empty(), "失敗した質問が履歴に残っている: {:?}", history(&h));
+
+    // 送り直して成功したら、質問と回答が 1 つずつ
+    set_reply(&h, ClaudeReply::text(&["リリースは 12/5 です。"]));
+    h.ok("send_chat_message", json!({ "noteId": note, "content": "決まったことは？" }));
+    let answered = vec![turn("user", "決まったことは？"), turn("assistant", "リリースは 12/5 です。")];
+    assert_eq!(history(&h), answered);
+    // AI には、質問を 1 回だけ送っている（失敗した分が重なっていない）
+    let body = h.claude_requests().pop().unwrap();
+    assert_eq!(body["messages"], json!([{ "role": "user", "content": "決まったことは？" }]));
+
+    // 回答が空だった・一時的な失敗が続いた・中止した、のどれでも、その質問は残さない（前の会話は残る）
+    set_reply(&h, ClaudeReply::text(&[" "]));
+    assert!(h.call("send_chat_message", json!({ "noteId": note, "content": "担当は？" })).is_err());
+    assert_eq!(history(&h), answered);
+    set_reply(&h, ClaudeReply::status(500));
+    assert!(h.call("send_chat_message", json!({ "noteId": note, "content": "担当は？" })).is_err());
+    assert_eq!(history(&h), answered);
+    set_reply(&h, ClaudeReply::text(&["途中までの回答"]).after(Duration::from_millis(2500)));
+    let before = h.claude_requests().len();
+    let running = h.spawn("send_chat_message", json!({ "noteId": note, "content": "担当は？" }));
+    wait_until("回答の作成の開始", || (h.claude_requests().len() > before).then_some(()));
+    // 作成している間は、質問が履歴にある（AI に送る前に保存している）
+    assert_eq!(history(&h).len(), 3);
+    h.ok("cancel_ai", json!({ "noteId": note, "kind": "chat" }));
+    assert_eq!(running.join().unwrap().unwrap_err(), "中止しました");
+    assert_eq!(history(&h), answered, "中止した質問が履歴に残っている");
+}

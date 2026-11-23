@@ -102,6 +102,8 @@ test("[CHT-005][ERR-002] AI チャットの API がエラーを返したら、�
   await session.waitUntil(async () => (await (await session.$(chatInput)).value()) === "決まったことは？", {
     message: "送れなかった質問が入力欄に戻る",
   });
+  // 回答をもらえなかった質問は、履歴に残さない
+  assert.deepEqual(await chatMessages(session), []);
   await dismissToast(session);
 
   // 直ったら、同じ質問をそのまま送り直せる
@@ -111,4 +113,14 @@ test("[CHT-005][ERR-002] AI チャットの API がエラーを返したら、�
     message: "回答が表示される",
   });
   assert.equal(await session.exists(sel.toast), false);
+  // 送り直しても、同じ質問が 2 つ並ばない。AI にも、質問は 1 回だけ渡す
+  assert.deepEqual(await chatMessages(session), [
+    { from: "user", text: "決まったことは？" },
+    { from: "assistant", text: "回答です。" },
+  ]);
+  assert.deepEqual(ctx.server.messages.at(-1).json.messages, [{ role: "user", content: "決まったことは？" }]);
+  // パネルを開き直しても同じ（履歴として保存されているのは、この 2 つだけ）
+  await session.click('button[aria-label="パネルを閉じる"]');
+  await openChat(session);
+  await session.waitUntil(async () => (await chatMessages(session)).length === 2, { message: "履歴は 2 件" });
 });

@@ -407,6 +407,26 @@ describe("AI チャット: 入力と中止", () => {
     expect(input).toHaveValue("決まったことは？");
   });
 
+  it("[CHT-005] 中止した質問は履歴に残さず、送り直しても同じ質問が 2 つ並ばない", async () => {
+    const { user, backend, noteId, panel, input } = await openChat({ streamDelayMs: 30 });
+
+    await user.type(input, "決まったことは？{Enter}");
+    await user.click(await within(panel).findByRole("button", { name: "中止" }));
+    await within(panel).findByRole("button", { name: "送信" });
+
+    // 履歴にも画面にも、中止した質問は残っていない（入力欄に戻っている）
+    expect(await backend.listChatMessages(noteId)).toEqual([]);
+    expect(within(panel).queryByText("決まったことは？", { selector: ".chat-message p" })).not.toBeInTheDocument();
+    expect(input).toHaveValue("決まったことは？");
+
+    // そのまま送り直すと、質問と回答が 1 つずつ並ぶ
+    await user.click(within(panel).getByRole("button", { name: "送信" }));
+    await waitFor(async () => expect((await backend.listChatMessages(noteId)).map((m) => m.role)).toEqual(["user", "assistant"]), {
+      timeout: 5000,
+    });
+    expect(within(panel).getAllByText("決まったことは？", { selector: ".chat-message p" })).toHaveLength(1);
+  });
+
   it("[CHT-010] 回答の作成中は、次の質問を送れない", async () => {
     const { user, backend, noteId, send, panel, input } = await openChat({ streamDelayMs: 30 });
 

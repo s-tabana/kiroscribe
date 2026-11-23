@@ -59,6 +59,13 @@ impl Database {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// 発言を 1 つ消す（回答をもらえなかった質問を、履歴に残さないため）。もうない発言でもエラーにしない。
+    pub fn delete_chat_message(&self, id: i64) -> Result<()> {
+        self.conn()
+            .execute("DELETE FROM chat_messages WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
     pub fn clear_chat_messages(&self, note_id: &str) -> Result<()> {
         self.conn()
             .execute("DELETE FROM chat_messages WHERE note_id = ?1", [note_id])?;
@@ -88,5 +95,25 @@ mod tests {
         db.clear_chat_messages(&note.id).unwrap();
         assert!(db.list_chat_messages(&note.id).unwrap().is_empty());
         assert_eq!(db.list_chat_messages(&other.id).unwrap().len(), 1);
+    }
+
+    // [CHT-005]
+    #[test]
+    fn a_single_message_can_be_removed() {
+        let db = Database::open_in_memory().unwrap();
+        let note = db.create_note().unwrap();
+        let first = db.add_chat_message(&note.id, Role::User, "決まったことは？").unwrap();
+        db.add_chat_message(&note.id, Role::Assistant, "リリースは 12/5 です").unwrap();
+        let failed = db.add_chat_message(&note.id, Role::User, "担当は？").unwrap();
+
+        // 回答をもらえなかった質問だけを消す（ほかの発言は残る）
+        db.delete_chat_message(failed.id).unwrap();
+        let history = db.list_chat_messages(&note.id).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].id, first.id);
+        assert!(history.iter().all(|message| message.content != "担当は？"));
+        // もうない発言を消しても、エラーにしない
+        db.delete_chat_message(failed.id).unwrap();
+        assert_eq!(db.list_chat_messages(&note.id).unwrap().len(), 2);
     }
 }

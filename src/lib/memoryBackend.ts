@@ -648,9 +648,15 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
           chats.set(noteId, [...(chats.get(noteId) ?? []), message]);
           return message;
         };
-        add("user", content.trim());
+        const question = add("user", content.trim());
         const answer = demoAnswer(content);
-        await streamText(`chat:${noteId}`, answer, (delta) => chatEvents.emit({ noteId, delta }));
+        try {
+          await streamText(`chat:${noteId}`, answer, (delta) => chatEvents.emit({ noteId, delta }));
+        } catch (err) {
+          // 回答をもらえなかった質問（失敗・中止）は、履歴に残さない
+          chats.set(noteId, (chats.get(noteId) ?? []).filter((message) => message.id !== question.id));
+          throw err;
+        }
         return add("assistant", answer);
       });
     },

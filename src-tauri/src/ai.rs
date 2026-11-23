@@ -223,19 +223,38 @@ pub async fn send_chat_message(
     }
     let guard = ai.begin(format!("chat:{note_id}"), "回答を作成中です")?;
     let loaded = load(&state, &note_id)?;
-    let history = {
+    // 質問は、AI に送る前に履歴へ保存する
+    let (question, history) = {
         let db = state.db();
-        db.add_chat_message(&note_id, Role::User, &content)?;
-        db.list_chat_messages(&note_id)?
+        let question = db.add_chat_message(&note_id, Role::User, &content)?;
+        (question, db.list_chat_messages(&note_id)?)
     };
+    let answered = answer_question(&app, &state, &guard, &loaded, &note_id, &history).await;
+    if answered.is_err() {
+        // 回答をもらえなかった質問（失敗・中止・空の回答）は、履歴に残さない。
+        // 画面は質問を入力欄に戻すので、残すと、送り直したときに同じ質問が 2 つ並ぶ
+        let _ = state.db().delete_chat_message(question.id);
+    }
+    answered
+}
+
+/// 履歴の会話を AI に送り、回答を履歴に保存して返す。
+async fn answer_question(
+    app: &AppHandle,
+    state: &AppState,
+    guard: &RunGuard<'_>,
+    loaded: &Loaded,
+    note_id: &str,
+    history: &[ChatMessage],
+) -> CmdResult<ChatMessage> {
     let request = MessageRequest {
-        system: chat_system_prompt(&context(&loaded)),
-        messages: recent_turns(&history),
+        system: chat_system_prompt(&context(loaded)),
+        messages: recent_turns(history),
         max_tokens: 16_000,
         effort: Effort::Low,
     };
     let client = ClaudeClient::new(&loaded.api_key, &loaded.settings.claude_model);
-    let mut on_text = emitter(&app, EVENT_CHAT_DELTA, &note_id);
+    let mut on_text = emitter(app, EVENT_CHAT_DELTA, note_id);
     let result = client
         .stream(&request, &mut on_text, &guard.cancel, &RetryPolicy::default())
         .await?;
@@ -243,10 +262,7 @@ pub async fn send_chat_message(
     if answer.is_empty() {
         return Err(CommandError("回答が空でした。もう一度お試しください".into()));
     }
-    let message = state
-        .db()
-        .add_chat_message(&note_id, Role::Assistant, answer)?;
-    Ok(message)
+    Ok(state.db().add_chat_message(note_id, Role::Assistant, answer)?)
 }
 
 #[cfg(test)]
