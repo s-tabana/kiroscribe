@@ -169,6 +169,30 @@ fn unread_count_prefix(title: &str) -> Option<&str> {
 pub struct Detection {
     pub app: MeetingApp,
     pub via_browser: bool,
+    /// ブラウザでの会議なら、その会議を開いているブラウザの実行ファイル名（小文字。例: `chrome.exe`）。
+    /// 会議が続いているかどうかは、このブラウザがマイクを使っているかで決める
+    pub browser: Option<&'static str>,
+}
+
+impl Detection {
+    /// デスクトップの会議アプリでの会議。
+    pub fn desktop(app: MeetingApp) -> Self {
+        Self {
+            app,
+            via_browser: false,
+            browser: None,
+        }
+    }
+
+    /// ブラウザでの会議。`exe` は、会議を開いているブラウザの実行ファイル名（一覧にないブラウザなら `None` になる）。
+    pub fn in_browser(app: MeetingApp, exe: &str) -> Self {
+        let exe = exe.to_lowercase();
+        Self {
+            app,
+            via_browser: true,
+            browser: BROWSERS.iter().copied().find(|browser| *browser == exe),
+        }
+    }
 }
 
 /// 自分自身（録音中の Kiroscribe）を除いた、いまマイクを使っているアプリ。
@@ -195,9 +219,6 @@ fn browsers_in_use(active: &[&MicUser]) -> Vec<String> {
         .collect()
 }
 
-fn browser_in_use(active: &[&MicUser]) -> bool {
-    !browsers_in_use(active).is_empty()
-}
 
 /// いま会議が始まっているかどうか。`own_exe` は自分自身（録音中の Kiroscribe）を除外するためのパス。
 pub fn detect(observation: &Observation, own_exe: Option<&str>) -> Option<Detection> {
@@ -205,10 +226,7 @@ pub fn detect(observation: &Observation, own_exe: Option<&str>) -> Option<Detect
 
     // デスクトップの会議アプリが優先
     if let Some(app) = active.iter().find_map(|u| desktop_app(&u.id)) {
-        return Some(Detection {
-            app,
-            via_browser: false,
-        });
+        return Some(Detection::desktop(app));
     }
 
     // ブラウザがマイクを使っているなら、そのブラウザのウィンドウタイトル（表示中のタブ）を見る。
@@ -221,19 +239,21 @@ pub fn detect(observation: &Observation, own_exe: Option<&str>) -> Option<Detect
         .windows
         .iter()
         .filter(|w| mic_browsers.contains(&w.exe.to_lowercase()))
-        .find_map(|w| web_meeting(&w.title))
-        .map(|app| Detection {
-            app,
-            via_browser: true,
-        })
+        .find_map(|w| web_meeting(&w.title).map(|app| Detection::in_browser(app, &w.exe)))
 }
 
 /// 始まった会議が続いているか。ブラウザでの会議は、別のタブに切り替えてタイトルが変わっても、
-/// ブラウザがマイクを使い続けている間は続いているとみなす。
+/// 会議を始めたブラウザがマイクを使い続けている間は続いているとみなす
+/// （別のブラウザがマイクを使っていても、続きにはしない）。
 pub fn still_active(observation: &Observation, meeting: &Detection, own_exe: Option<&str>) -> bool {
     let active = active_mic_users(observation, own_exe);
     if meeting.via_browser {
-        browser_in_use(&active)
+        let in_use = browsers_in_use(&active);
+        match meeting.browser {
+            Some(browser) => in_use.iter().any(|exe| exe == browser),
+            // どのブラウザの会議か分からないとき（通常は起きない）は、どれかのブラウザが使っていれば続きとする
+            None => !in_use.is_empty(),
+        }
     } else {
         active.iter().any(|u| desktop_app(&u.id) == Some(meeting.app))
     }
@@ -249,6 +269,8 @@ pub enum MeetingEvent {
 ///
 /// - 開始: 同じ会議が `start_confirm_ms` 続いたら（一瞬マイクを使っただけでは反応しない）
 /// - 終了: 会議が見えなくなってから `end_grace_ms` たったら（タブの切り替えや一時的な中断では終わらせない）
+/// - 切り替え: 会議が見えなくなって `end_grace_ms` たたないうちに、別のアプリの会議が `start_confirm_ms` 続いたら、
+///   前の会議の終了を知らせ、次の回に新しい会議の開始を知らせる（別の会議を、前の会議の続きにしない）
 #[derive(Debug, Clone)]
 pub struct MeetingTracker {
     pub start_confirm_ms: i64,
@@ -279,13 +301,27 @@ impl MeetingTracker {
     /// `detected` はいま始まりそうな会議、`continuing` は進行中の会議がまだ続いているか（[`still_active`]）。
     pub fn tick(&mut self, detected: Option<Detection>, continuing: bool, now_ms: i64) -> Option<MeetingEvent> {
         if let Some(active) = self.active {
-            if continuing || detected.is_some() {
+            // 進行中の会議が続いている（同じアプリの会議がまた見えたときも、続きとみなす）。
+            // その間に別の会議が見えても、新しい会議の開始にはしない
+            if continuing || detected.is_some_and(|detection| detection.app == active.app) {
                 self.last_seen_ms = now_ms;
+                self.candidate = None;
                 return None;
+            }
+            // 進行中の会議は見えなくなっている。その間に別のアプリの会議が続けて見えたら、前の会議を終わらせる
+            // （新しい会議の開始は、候補を持ったまま、次の回に知らせる）
+            match (detected, self.candidate) {
+                (Some(detection), Some((candidate, since))) if candidate.app == detection.app => {
+                    if now_ms - since >= self.start_confirm_ms {
+                        self.active = None;
+                        return Some(MeetingEvent::Ended(active.app));
+                    }
+                }
+                (Some(detection), _) => self.candidate = Some((detection, now_ms)),
+                (None, _) => self.candidate = None,
             }
             if now_ms - self.last_seen_ms >= self.end_grace_ms {
                 self.active = None;
-                self.candidate = None;
                 return Some(MeetingEvent::Ended(active.app));
             }
             return None;
@@ -536,7 +572,11 @@ mod tests {
     }
 
     fn found(app: MeetingApp, via_browser: bool) -> Option<Detection> {
-        Some(Detection { app, via_browser })
+        Some(if via_browser {
+            Detection::in_browser(app, "chrome.exe")
+        } else {
+            Detection::desktop(app)
+        })
     }
 
     // [MTG-001][MTG-003]
@@ -614,7 +654,7 @@ mod tests {
     // [MTG-009]
     #[test]
     fn browser_meeting_continues_after_switching_tabs() {
-        let meet = Detection { app: MeetingApp::GoogleMeet, via_browser: true };
+        let meet = Detection::in_browser(MeetingApp::GoogleMeet, "chrome.exe");
         // 別のタブ（資料）を見ていても、ブラウザがマイクを使っていれば続いている
         let switched = Observation {
             mic_users: vec![mic(CHROME, true)],
@@ -628,12 +668,25 @@ mod tests {
             windows: switched.windows.clone(),
         };
         assert!(!still_active(&left, &meet, None));
+        // 会議を始めたブラウザがマイクを放したら、別のブラウザがマイクを使っていても終わり
+        let other_browser = Observation {
+            mic_users: vec![mic(CHROME, false), mic(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", true)],
+            windows: vec![win("msedge.exe", "音声入力のテスト - Microsoft Edge")],
+        };
+        assert!(!still_active(&other_browser, &meet, None), "別のブラウザのマイクの使用を、会議の続きにしている");
+        // 2 つのブラウザが使っているときは、会議を始めたほうが使っているかで決まる
+        let both = Observation {
+            mic_users: vec![mic(CHROME, true), mic(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", true)],
+            windows: vec![],
+        };
+        assert!(still_active(&both, &meet, None));
+        assert!(!still_active(&both, &Detection::in_browser(MeetingApp::GoogleMeet, "firefox.exe"), None));
     }
 
     // [MTG-009]
     #[test]
     fn desktop_meeting_continues_only_while_that_app_uses_mic() {
-        let zoom = Detection { app: MeetingApp::Zoom, via_browser: false };
+        let zoom = Detection::desktop(MeetingApp::Zoom);
         let obs = |zoom_in_use: bool| Observation {
             mic_users: vec![mic(r"C:\Zoom\bin\Zoom.exe", zoom_in_use), mic(CHROME, true)],
             windows: vec![],

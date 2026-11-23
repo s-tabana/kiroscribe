@@ -12,8 +12,5 @@
 ## 実装待ち
 # 仕様一覧に〔実装待ち〕の印がある項目。本体（src-tauri/）の実装とテストがそろったら、印と一緒に消す。
 CHT-005 test
-MTG-015 test
-MTG-019 test
 TRY-004 test
-MTG-010 tauri
 DAT-007 tauri

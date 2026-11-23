@@ -216,7 +216,8 @@ pub fn apply_settings(app: &AppHandle, settings: &Settings) {
     }
 }
 
-fn toggle_auto_record(app: &AppHandle) -> CmdResult<()> {
+/// トレイのメニューの「会議を検出したら自動で録音」: 設定のオン・オフを入れ替えて保存する。
+pub(crate) fn toggle_auto_record(app: &AppHandle) -> CmdResult<()> {
     let state = app.state::<AppState>();
     let settings = {
         let db = state.db();
@@ -225,6 +226,7 @@ fn toggle_auto_record(app: &AppHandle) -> CmdResult<()> {
         db.save_settings(settings)?
     };
     apply_settings(app, &settings);
+    crate::meeting_watch::settings_changed(app, !settings.auto_record_meetings, &settings);
     Ok(())
 }
 

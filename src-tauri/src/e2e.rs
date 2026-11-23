@@ -358,10 +358,16 @@ pub fn tune_tracker(tracker: &mut MeetingTracker) {
 }
 
 /// 会議の検出の差し替え。実際の検出（マイクの使用状況）の代わりに、`meeting.txt` の内容を「いまの状態」とする。
-/// 戻り値は `MeetingTracker::tick` に渡す（始まりそうな会議, 進行中の会議が続いているか）。
-pub fn simulated_detection() -> Option<(Option<Detection>, bool)> {
+/// `active` は、進行中の会議。戻り値は `MeetingTracker::tick` に渡す（始まりそうな会議, 進行中の会議が続いているか）。
+/// `meeting.txt` の会議アプリが別のものに変わったら、進行中の会議は終わって、別の会議が始まったものとして扱う。
+pub fn simulated_detection(active: Option<Detection>) -> Option<(Option<Detection>, bool)> {
     let meeting = core::simulated_meeting()?;
-    Some((meeting.map(|app| Detection { app, via_browser: false }), meeting.is_some()))
+    Some(simulated_tick(meeting, active))
+}
+
+fn simulated_tick(meeting: Option<kiroscribe_core::meetings::MeetingApp>, active: Option<Detection>) -> (Option<Detection>, bool) {
+    let continuing = active.is_some_and(|active| Some(active.app) == meeting);
+    (meeting.map(Detection::desktop), continuing)
 }
 
 /// タスクトレイのアイコンを作れなかったことにするか。
@@ -453,6 +459,19 @@ mod tests {
         .unwrap();
         apply(&mut config, dir, Some("http://127.0.0.1:9/latest.json".into()), None);
         assert_eq!(config.plugins.0["updater"]["pubkey"], "REAL");
+    }
+
+    #[test]
+    fn the_simulated_meeting_continues_only_while_the_same_app_is_written() {
+        use kiroscribe_core::meetings::MeetingApp;
+        let meet = Detection::desktop(MeetingApp::GoogleMeet);
+        let zoom = Detection::desktop(MeetingApp::Zoom);
+        assert_eq!(simulated_tick(None, None), (None, false));
+        assert_eq!(simulated_tick(Some(MeetingApp::GoogleMeet), None), (Some(meet), false), "まだ始まっていない");
+        assert_eq!(simulated_tick(Some(MeetingApp::GoogleMeet), Some(meet)), (Some(meet), true));
+        assert_eq!(simulated_tick(None, Some(meet)), (None, false), "会議が終わった");
+        // 別の会議アプリに書き換えたら、前の会議は続いていない（別の会議が始まろうとしている）
+        assert_eq!(simulated_tick(Some(MeetingApp::Zoom), Some(meet)), (Some(zoom), false));
     }
 
     #[test]

@@ -550,6 +550,13 @@ impl Harness {
     }
 }
 
+impl Harness {
+    /// 会議の検出の結果を、検出のスレッドと同じように、順番待ちの列へ入れる（処理が終わるのは待たない）。
+    pub fn submit_meeting(&self, event: MeetingEvent) {
+        crate::meeting_watch::submit(self.app.handle(), event);
+    }
+}
+
 impl Drop for Harness {
     fn drop(&mut self) {
         // 録音が残っていたら止める（音声のスレッドと文字起こしを、次のテストに持ち越さない）

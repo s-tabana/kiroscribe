@@ -151,7 +151,7 @@ test(
   },
 );
 
-test("[MTG-012] 設定の「会議の自動検出」がオフのときは、会議を検出しても何もしない", async (ctx) => {
+test("[MTG-012][MTG-019] 設定の「会議の自動検出」がオフのときは、会議を検出しても何もしない。会議の途中でオンにすると、録音を始める", async (ctx) => {
   const session = await ctx.launch();
   await openSettings(session);
   await session.click(settingsCheck("会議を検出したら自動で録音・文字起こしする"));
@@ -163,6 +163,49 @@ test("[MTG-012] 設定の「会議の自動検出」がオフのときは、会�
   assert.equal(await ctx.app.hasPopup(), false, "ポップアップを出している");
   assert.deepEqual(await noteTitles(session), [], "ノートを作っている");
   assert.equal(ctx.server.transcriptions.length, 0, "録音している");
+
+  // 会議が続いているあいだにオンにすると、その会議の録音を始める
+  await openSettings(session);
+  await session.click(settingsCheck("会議を検出したら自動で録音・文字起こしする"));
+  await saveSettings(session);
+  await closeSettings(session);
+  await ctx.app.popup();
+  const started = await session.waitForText(sel.popup, "自動で録音・文字起こしを始めました");
+  assert.ok(started.includes("Discord"), started);
+  await ctx.app.main();
+  await session.waitUntil(async () => /^Discord /.test((await noteTitles(session))[0] ?? ""), { message: "会議のノートができる" });
+  await session.$(`${sel.noteItems} [aria-label="録音中"]`);
+});
+
+test("[MTG-010] 会議が終わってすぐ別のアプリの会議が始まったら、前の録音を止めて、新しいノートで録音を始める", async (ctx) => {
+  const session = await ctx.launch();
+  ctx.work.setMeeting("googleMeet");
+  await ctx.app.popup();
+  await session.waitForText(sel.popup, "自動で録音・文字起こしを始めました");
+  await ctx.app.main();
+  await session.waitUntil(() => ctx.server.transcriptions.length > 0, { timeout: 30_000, message: "最初の会議が文字起こしされる" });
+
+  // Google Meet を抜けて、すぐ Zoom の会議に入る（前の会議の終了を待つ 2 秒より前に、次の会議が始まる）
+  ctx.server.openai.delayMs = 1_500; // 前の録音の仕上げに時間がかかっても、次の会議を取りこぼさない
+  ctx.work.setMeeting("zoom");
+  await session.waitUntil(async () => (await noteTitles(session)).length === 2, { timeout: 30_000, message: "次の会議のノートができる" });
+  ctx.server.openai.delayMs = 0;
+  const titles = await noteTitles(session);
+  assert.match(titles[0], /^Zoom /);
+  assert.match(titles[1], /^Google Meet /);
+  // 録音しているのは、新しいノートだけ
+  await session.waitUntil(
+    () =>
+      session.execute(`
+        const items = Array.from(document.querySelectorAll(${JSON.stringify(sel.noteItems)}));
+        return items.length === 2 && !!items[0].querySelector('[aria-label="録音中"]') && !items[1].querySelector('[aria-label="録音中"]');
+      `),
+    { timeout: 30_000, message: "新しい会議のノートだけが録音中になる" },
+  );
+  await ctx.app.popup();
+  const popup = await session.waitForText(sel.popup, "自動で録音・文字起こしを始めました", { timeout: 30_000 });
+  assert.ok(popup.includes("Zoom"), popup);
+  assert.equal((await ctx.app.popupHandles()).length, 1);
 });
 
 test("[POP-011] 自動で始めた録音をメインウィンドウの［停止］で止めると、ポップアップも停止の表示に変わる", async (ctx) => {
@@ -191,4 +234,23 @@ test("[POP-011] 自動で始めた録音をメインウィンドウの［停止�
   await sleep(1_500);
   assert.equal((await noteTitles(session)).length, 1);
   assert.equal(await session.exists(`${sel.noteItems} [aria-label="録音中"]`), false);
+});
+
+test("[MTG-015] 自動録音を始められなかったときは、理由を知らせて、空のノートを残さない", async (ctx) => {
+  const reason = "マイクが見つかりません。接続と Windows のプライバシー設定（マイクへのアクセス）を確認してください";
+  ctx.work.setMicError(reason);
+  const session = await ctx.launch();
+  ctx.work.setMeeting("zoom");
+  await ctx.app.popup();
+  const shown = await session.waitForText(sel.popup, reason);
+  assert.ok(shown.includes("Zoom"), shown);
+
+  await ctx.app.main();
+  await sleep(500);
+  assert.deepEqual(await noteTitles(session), [], "録音できなかった会議のノートが、一覧に残っている");
+  assert.equal(ctx.server.transcriptions.length, 0);
+  // 起動し直しても、空のノートは出てこない
+  ctx.work.setMeeting(null);
+  const relaunched = await ctx.relaunch();
+  await relaunched.waitForText('nav[aria-label="ノート一覧"]', "まだノートがありません");
 });

@@ -194,3 +194,118 @@ fn stopping_from_the_main_window_turns_the_popup_to_stopped() {
     h.meeting(MeetingEvent::Ended(MeetingApp::Zoom));
     assert_eq!(popup_kinds(&h).len(), 2);
 }
+
+/// ノートを作ったあとで録音を始められなかったら、理由を知らせて、作った空のノートは消す。
+// [MTG-015]
+#[test]
+fn the_empty_note_is_removed_when_recording_cannot_start() {
+    let h = Harness::new();
+    let reason = "マイクが見つかりません。接続と Windows のプライバシー設定（マイクへのアクセス）を確認してください";
+    std::fs::write(h.fixture.file("mic-error.txt"), reason).unwrap();
+    h.meeting(MeetingEvent::Started(MeetingApp::Zoom));
+
+    let popup = h.popup();
+    assert_eq!((&popup["kind"], &popup["app"]), (&json!("error"), &json!("Zoom")));
+    assert!(popup["message"].as_str().unwrap().contains(reason), "{popup}");
+    assert!(note_ids(&h).is_empty(), "録音できなかった会議の、空のノートが残っている");
+    assert!(h.events("note-created").is_empty(), "消すノートを、画面の一覧に加えている");
+    assert_eq!(h.recording_state(), "idle");
+
+    // マイクが使えるようになれば、次の会議は録音できる
+    std::fs::remove_file(h.fixture.file("mic-error.txt")).unwrap();
+    h.meeting(MeetingEvent::Started(MeetingApp::Zoom));
+    assert_eq!(h.popup()["kind"], "recording");
+    assert_eq!(note_ids(&h).len(), 1);
+    assert_eq!(h.events("note-created").len(), 1);
+}
+
+/// 自動検出をオンにした時点で会議中なら、その会議の録音を始める。利用者が録音を止めたあとは、勝手に始め直さない。
+// [MTG-019]
+#[test]
+fn turning_automatic_recording_on_during_a_meeting_starts_recording() {
+    let h = Harness::new();
+    h.save_settings(|settings| settings.auto_record_meetings = false);
+    h.meeting(MeetingEvent::Started(MeetingApp::GoogleMeet));
+    assert_eq!(h.recording_state(), "idle");
+
+    // 会議の途中でオンにする → その会議の録音が始まる
+    h.save_settings(|settings| settings.auto_record_meetings = true);
+    wait_until("会議の録音の開始", || (h.recording_state() == "recording").then_some(()));
+    let popup = wait_until("ポップアップでの知らせ", || Some(h.popup()).filter(|popup| popup["kind"] == "recording"));
+    assert_eq!(popup["app"], "Google Meet");
+    assert_eq!(note_ids(&h).len(), 1);
+    assert!(h.events("note-created")[0]["title"].as_str().unwrap().starts_with("Google Meet "));
+
+    // 自動で始めた録音を利用者が止めたあとは、同じ会議が続いていても、設定を保存し直しても、始め直さない
+    h.ok("stop_recording", json!({}));
+    h.save_settings(|settings| settings.my_name = "田中".into());
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(h.recording_state(), "idle", "止めた録音を、勝手に始め直している");
+    assert_eq!(note_ids(&h).len(), 1);
+
+    // 手動の録音を止めたあとも、続いている会議を勝手に録音し始めない
+    let manual = h.note("手動の録音", "");
+    h.ok("start_recording", json!({ "noteId": manual }));
+    h.ok("stop_recording", json!({}));
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(h.recording_state(), "idle", "手動の録音を止めた直後に、会議の録音を始めている");
+    assert_eq!(note_ids(&h).len(), 2);
+
+    // オフにしてオンにし直すと（利用者が、いまの会議を録音したいと示した）、録音を始める
+    h.save_settings(|settings| settings.auto_record_meetings = false);
+    h.save_settings(|settings| settings.auto_record_meetings = true);
+    wait_until("会議の録音の開始", || (h.recording_state() == "recording").then_some(()));
+    assert_eq!(note_ids(&h).len(), 3);
+    h.ok("stop_recording", json!({}));
+
+    // 会議が終わったあとでオンにしても、何も始めない
+    h.meeting(MeetingEvent::Ended(MeetingApp::GoogleMeet));
+    h.save_settings(|settings| settings.auto_record_meetings = false);
+    h.save_settings(|settings| settings.auto_record_meetings = true);
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(h.recording_state(), "idle");
+    assert_eq!(note_ids(&h).len(), 3);
+}
+
+/// 会議が終わってすぐ別のアプリの会議が始まったら、前の録音を止めて、新しいノートで録音を始める。
+/// 前の録音の仕上げ（残りの文字起こし）に時間がかかっていても、次の会議の録音を取りこぼさない。
+// [MTG-010]
+#[test]
+fn a_meeting_in_another_app_is_recorded_into_a_new_note() {
+    let h = Harness::new();
+    h.meeting(MeetingEvent::Started(MeetingApp::GoogleMeet));
+    let first = note_ids(&h)[0].clone();
+    wait_until("最初の会議の文字起こし", || (!h.segments(&first).is_empty()).then_some(()));
+
+    // 会議の検出は、前の会議の終了と、次の会議の開始を、続けて知らせる。前の録音の仕上げには時間がかかる
+    *h.fixture.api.transcription_delay.lock().unwrap() = Duration::from_millis(1200);
+    h.submit_meeting(MeetingEvent::Ended(MeetingApp::GoogleMeet));
+    h.submit_meeting(MeetingEvent::Started(MeetingApp::Zoom));
+
+    let second = wait_until("次の会議のノート", || note_ids(&h).into_iter().find(|id| *id != first));
+    wait_until("次の会議の録音", || {
+        let status = h.ok("get_recording_status", json!({}));
+        (status["state"] == "recording" && status["noteId"] == second.as_str()).then_some(())
+    });
+    assert_eq!(note_ids(&h), [second.clone(), first.clone()], "会議ごとに、別のノートに分ける");
+    let titles: Vec<String> = h
+        .events("note-created")
+        .iter()
+        .map(|note| note["title"].as_str().unwrap().split(' ').next().unwrap().to_string())
+        .collect();
+    assert_eq!(titles, ["Google", "Zoom"]);
+    // 前の録音は、仕上げまで終わっている（順に処理している）
+    assert_eq!(
+        popup_kinds(&h),
+        [json!("recording"), json!("finishing"), json!("stopped"), json!("recording")]
+    );
+    assert_eq!(h.popup()["app"], "Zoom");
+    *h.fixture.api.transcription_delay.lock().unwrap() = Duration::ZERO;
+
+    // 新しい会議の発話は、新しいノートにだけ入る
+    let known = h.segments(&first).len();
+    wait_until("次の会議の文字起こし", || (!h.segments(&second).is_empty()).then_some(()));
+    assert_eq!(h.segments(&first).len(), known, "次の会議の発話が、前の会議のノートに入っている");
+    h.meeting(MeetingEvent::Ended(MeetingApp::Zoom));
+    assert_eq!(h.recording_state(), "idle");
+}

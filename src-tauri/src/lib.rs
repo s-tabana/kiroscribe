@@ -19,6 +19,7 @@ use tauri::{Manager, WindowEvent};
 
 use crate::ai::AiState;
 use crate::background::{BackgroundState, AUTOSTART_ARG, MAIN_LABEL};
+use crate::meeting_watch::MeetingState;
 use crate::recording::RecorderState;
 use crate::runtime::Runtime;
 use crate::state::AppState;
@@ -50,6 +51,7 @@ pub fn run() {
             app.manage(RecorderState::default());
             app.manage(AiState::default());
             app.manage(BackgroundState::default());
+            app.manage(MeetingState::default());
 
             let handle = app.handle().clone();
             // トレイが使えない環境でも起動は続ける

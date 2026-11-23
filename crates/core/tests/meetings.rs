@@ -24,17 +24,16 @@ fn observation(mic_users: Vec<MicUser>, windows: Vec<WindowInfo>) -> Observation
 }
 
 fn desktop(app: MeetingApp) -> Option<Detection> {
-    Some(Detection {
-        app,
-        via_browser: false,
-    })
+    Some(Detection::desktop(app))
 }
 
+/// Chrome での会議。
 fn browser(app: MeetingApp) -> Option<Detection> {
-    Some(Detection {
-        app,
-        via_browser: true,
-    })
+    browser_in(app, "chrome.exe")
+}
+
+fn browser_in(app: MeetingApp, exe: &str) -> Option<Detection> {
+    Some(Detection::in_browser(app, exe))
 }
 
 // [MTG-001]
@@ -124,7 +123,7 @@ fn every_listed_browser_is_checked_and_other_apps_are_not() {
             vec![mic(&format!(r"C:\Program Files\Browser\{exe}"))],
             vec![window(exe, "Meet - abc-defg-hij")],
         );
-        assert_eq!(detect(&seen, None), browser(MeetingApp::GoogleMeet), "{exe}");
+        assert_eq!(detect(&seen, None), browser_in(MeetingApp::GoogleMeet, exe), "{exe}");
     }
     // ブラウザでないアプリのウィンドウのタイトルは見ない
     let other = observation(
@@ -169,7 +168,7 @@ fn the_meeting_title_must_belong_to_the_browser_that_uses_the_mic() {
         vec![mic(CHROME), mic(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")],
         vec![window("msedge.exe", "Zoom Meeting")],
     );
-    assert_eq!(detect(&both, None), browser(MeetingApp::Zoom));
+    assert_eq!(detect(&both, None), browser_in(MeetingApp::Zoom, "msedge.exe"));
 }
 
 /// Discord についてのページを開いたまま、別のサイトでマイクを使っても、会議とみなさない。
@@ -216,6 +215,79 @@ fn another_meeting_detected_while_one_continues_does_not_start_a_new_one() {
         assert_eq!(tracker.tick(zoom, true, now), None);
         assert_eq!(tracker.active().map(|d| d.app), Some(MeetingApp::GoogleMeet));
     }
+}
+
+/// 会議が終わって 20 秒たたないうちに別のアプリの会議が始まったら、前の会議を終わらせて、新しい会議を始める。
+// [MTG-010]
+#[test]
+fn a_meeting_in_another_app_right_after_one_ends_is_a_new_meeting() {
+    let meet = browser(MeetingApp::GoogleMeet);
+    let zoom = desktop(MeetingApp::Zoom);
+    let mut tracker = MeetingTracker::default();
+    tracker.tick(meet, false, 0);
+    assert_eq!(tracker.tick(meet, true, 4_000), Some(MeetingEvent::Started(MeetingApp::GoogleMeet)));
+
+    // Meet を抜けて、6 秒後（終了が確定する 20 秒より前）に Zoom の会議に入る
+    assert_eq!(tracker.tick(None, false, 10_000), None);
+    assert_eq!(tracker.tick(zoom, false, 16_000), None, "一瞬の検出では切り替えない");
+    assert_eq!(tracker.tick(zoom, false, 18_000), None);
+    // Zoom が 4 秒続いたら、前の会議の終了を知らせ、次の回に新しい会議の開始を知らせる
+    assert_eq!(tracker.tick(zoom, false, 20_000), Some(MeetingEvent::Ended(MeetingApp::GoogleMeet)));
+    assert_eq!(tracker.active(), None);
+    assert_eq!(tracker.tick(zoom, false, 22_000), Some(MeetingEvent::Started(MeetingApp::Zoom)));
+    assert_eq!(tracker.active().map(|d| d.app), Some(MeetingApp::Zoom));
+    assert_eq!(tracker.tick(zoom, true, 24_000), None, "開始は 1 回だけ");
+
+    // Zoom が終われば、いつもどおり 20 秒後に終了
+    assert_eq!(tracker.tick(None, false, 30_000), None);
+    assert_eq!(tracker.tick(None, false, 50_000), Some(MeetingEvent::Ended(MeetingApp::Zoom)));
+}
+
+/// 別のアプリの会議が見えても、前の会議が戻ってくれば続き。別の会議が途切れたら数え直す。
+// [MTG-010]
+#[test]
+fn the_previous_meeting_continues_if_it_comes_back_before_the_switch_is_confirmed() {
+    let slack = desktop(MeetingApp::SlackHuddle);
+    let teams = desktop(MeetingApp::Teams);
+    let mut tracker = MeetingTracker::default();
+    tracker.tick(slack, false, 0);
+    assert_eq!(tracker.tick(slack, true, 4_000), Some(MeetingEvent::Started(MeetingApp::SlackHuddle)));
+
+    // ハドルが一瞬途切れて Teams が見えたが、2 秒後にはハドルが戻った
+    assert_eq!(tracker.tick(teams, false, 6_000), None);
+    assert_eq!(tracker.tick(slack, true, 8_000), None);
+    assert_eq!(tracker.active().map(|d| d.app), Some(MeetingApp::SlackHuddle));
+    // そのあとまた Teams が見えても、4 秒を数え直す
+    assert_eq!(tracker.tick(teams, false, 10_000), None);
+    assert_eq!(tracker.tick(teams, false, 12_000), None);
+    assert_eq!(tracker.tick(teams, false, 14_000), Some(MeetingEvent::Ended(MeetingApp::SlackHuddle)));
+    assert_eq!(tracker.tick(teams, false, 16_000), Some(MeetingEvent::Started(MeetingApp::Teams)));
+
+    // 別のアプリの会議が続かないまま 20 秒たてば、前の会議はふつうに終わる。そのあとの会議は、4 秒続いてから始まる
+    let mut tracker = MeetingTracker::default();
+    tracker.tick(slack, false, 0);
+    tracker.tick(slack, true, 4_000);
+    assert_eq!(tracker.tick(None, false, 6_000), None);
+    assert_eq!(tracker.tick(teams, false, 22_000), None);
+    assert_eq!(tracker.tick(teams, false, 24_000), Some(MeetingEvent::Ended(MeetingApp::SlackHuddle)), "見えなくなって 20 秒");
+    assert_eq!(tracker.tick(teams, false, 26_000), Some(MeetingEvent::Started(MeetingApp::Teams)));
+}
+
+/// 同じアプリの会議がまた見えたときは、続きとして扱う（終了にしない）。
+// [MTG-008][MTG-010]
+#[test]
+fn the_same_app_seen_again_within_the_grace_period_is_the_same_meeting() {
+    let meet = browser(MeetingApp::GoogleMeet);
+    let mut tracker = MeetingTracker::default();
+    tracker.tick(meet, false, 0);
+    tracker.tick(meet, true, 4_000);
+    assert_eq!(tracker.tick(None, false, 10_000), None);
+    for now in [20_000, 22_000, 24_000, 40_000] {
+        assert_eq!(tracker.tick(meet, false, now), None);
+    }
+    assert_eq!(tracker.active().map(|d| d.app), Some(MeetingApp::GoogleMeet));
+    assert_eq!(tracker.tick(None, false, 59_000), None);
+    assert_eq!(tracker.tick(None, false, 60_000), Some(MeetingEvent::Ended(MeetingApp::GoogleMeet)));
 }
 
 // [MTG-021]

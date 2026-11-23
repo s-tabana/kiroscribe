@@ -350,6 +350,7 @@ fn mock_app(update_endpoint: &str) -> (tauri::App<MockRuntime>, WebviewWindow<Mo
     app.manage(RecorderState::default());
     app.manage(AiState::default());
     app.manage(BackgroundState::default());
+    app.manage(crate::meeting_watch::MeetingState::default());
     app.manage(UpdateState::new(false, None));
     let window = WebviewWindowBuilder::new(&app, MAIN_LABEL, Default::default())
         .build()

@@ -67,9 +67,14 @@ pub fn save_settings(
     state: State<'_, AppState>,
     settings: Settings,
 ) -> CmdResult<Settings> {
-    let saved = state.db().save_settings(settings)?;
+    let (was_auto_recording, saved) = {
+        let db = state.db();
+        let before = db.load_settings().map(|before| before.auto_record_meetings).unwrap_or(false);
+        (before, db.save_settings(settings)?)
+    };
     crate::background::apply_settings(&app, &saved);
     crate::update::apply_settings(&app, &saved);
+    crate::meeting_watch::settings_changed(&app, was_auto_recording, &saved);
     Ok(saved)
 }
 
