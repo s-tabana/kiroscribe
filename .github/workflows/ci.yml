@@ -78,6 +78,10 @@ jobs:
         shell: bash
         run: npm run tauri build -- --config scripts/tauri.ci.conf.json
 
+      # E2E テスト用の差し替え口（cargo の feature `e2e`）は、配布するビルドには入れない
+      - name: 配布するビルドに E2E テスト用のコードがないことの確認
+        run: node e2e/check-release-binary.mjs target/release/kiroscribe.exe
+
       # zip に包まず、インストーラ（.exe）1 ファイルをそのまま保存する
       # （archive: false のときは成果物名がファイル名になる）
       - name: インストーラを成果物として保存

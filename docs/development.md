@@ -7,6 +7,7 @@ Kiroscribe をビルドする人と、リリースを出す人のための説明
 ```text
 crates/core/   画面に依存しないロジック（保存・音声処理・文字起こし・Claude API・書き出し）
 src-tauri/     Tauri アプリ（コマンドとイベント）
+e2e/           実際のアプリを起動して操作するテスト（E2E）と、そのための模擬サーバー
 src/           画面（React + TypeScript）
 scripts/       リリース用のスクリプト・仕様とテストの対応の検査と、そのテスト
 .github/       CI・リリース・依存関係の検査・網羅率の計測のワークフロー
@@ -76,6 +77,20 @@ it("[NOTE-014] 確認してからノートを削除し、次のノートを選�
 - **この一覧は、減らすだけにします。** テストを書いたら、その行を消します（消し忘れると、検査が「一覧から消してください」と失敗します）。
 - 検査を通すために行を足すことはしません。新しい項目には、テストを一緒に足します。
 - `node scripts/check-spec-coverage.mjs --strict` は、一覧を見逃しに使わず、残っている行をすべて不足として数えます。一覧が空になったら、リリースのワークフローの検査を `--strict` に切り替えます。
+## E2E テスト
+
+実際のアプリを起動し、画面を操作して確かめるテストです（`e2e/specs/`）。アプリは E2E テスト用のビルド（cargo の feature `e2e`）を使います。このビルドでだけ、外部の API・音声・会議の検出・OS のダイアログなどを模擬のものに差し替えられます（差し替えの一覧は `crates/core/src/e2e/mod.rs` の先頭）。リリース用のビルドには含まれません。
+
+```bash
+cargo install tauri-driver --locked       # 初回だけ
+npm run build:e2e                         # E2E テスト用のアプリを作る（target/debug/）
+npm run test:e2e                          # すべて走らせる（数分）。1 つだけなら -- e2e/specs/03-recording.test.mjs
+cargo test -p kiroscribe --features e2e   # コマンドとイベントの形を、画面側の型と突き合わせる
+```
+
+ほかに、Linux では `webkit2gtk-driver` と `xvfb`、Windows では WebView2 と同じバージョンの `msedgedriver.exe`（PATH に置くか、環境変数 `KIROSCRIBE_E2E_NATIVE_DRIVER` で場所を指定）が要ります。失敗したテストのスクリーンショットとログは `e2e/artifacts/` に残ります。`cargo build` や `cargo test` のあとは、`target/debug/` のアプリが E2E テスト用でなくなっていることがあるので、`npm run build:e2e` をやり直してください。
+
+コマンドの引数・戻り値やイベントの内容を変えたときは、見本（`src/test/ipc-contract.generated.ts`）を `KIROSCRIBE_UPDATE_IPC_CONTRACT=1 cargo test -p kiroscribe --features e2e ipc_contract` で書き直し、`npm run typecheck` が通るよう画面側の型を合わせます。
 
 ## リリースの出し方
 

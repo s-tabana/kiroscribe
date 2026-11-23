@@ -1,0 +1,113 @@
+# Kiroscribe の E2E テスト（実際のアプリを起動して、画面を操作して確かめる）
+#
+# - E2E テスト用のビルド（cargo の feature `e2e`）を作り、tauri-driver と WebDriver で操作する（e2e/）。
+#   外部の API・音声・会議の検出などは模擬のものに差し替わるので、Secret は使わない
+#   （フォークからのプルリクエストでも同じ内容が動く）。
+# - 配布する形（Windows）と、開発に使う Linux の両方で走らせる。
+# - アクションは、タグではなくコミットのハッシュで固定している（タグは後から付け替えられるため）。
+#   行末のコメントがそのバージョンで、Dependabot がハッシュとコメントをまとめて更新する。
+name: e2e
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+# ビルドに時間がかかるため、実行中のものは止めずに順番待ちにする
+# （待っている間に新しい push が来たら、待っている方だけが置き換わる）
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+# このワークフローに渡すトークンは、リポジトリの読み取りだけ
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: E2E（${{ matrix.name }}）
+    runs-on: ${{ matrix.os }}
+    # ふだんは 15 分ほど。WebDriver がつながらないときに待ち続けないようにする
+    timeout-minutes: 60
+    strategy:
+      # 片方が失敗しても、もう片方の結果は見たい
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+          - name: Linux
+            os: ubuntu-latest
+    steps:
+      # persist-credentials: false … トークンを .git/config に残さない（後のステップで動く依存関係のコードから読めないようにする）
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      # このアクションにはバージョンのタグがないので、master ブランチのコミットで固定し、
+      # ツールチェーンは入力で指定する（@stable と書くのと同じ動き）
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      # Tauri のビルドに要るものと、E2E に要るもの（webkit2gtk-driver = WebKitWebDriver、xvfb = 仮想の画面、
+      # dbus = 多重起動の防止が使うセッション）
+      - name: システムの依存関係（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev libasound2-dev \
+            webkit2gtk-driver xvfb dbus
+
+      - name: 依存関係のインストール
+        run: npm ci
+
+      # tauri-driver は、WebDriver の命令を OS ごとのドライバー（Windows: msedgedriver、Linux: WebKitWebDriver）へ中継する。
+      # バージョンは Tauri 本体とは独立している
+      - name: tauri-driver のインストール
+        run: cargo install tauri-driver --locked --version 2.1.0
+
+      # msedgedriver は、このマシンの WebView2 と同じバージョンでないと接続できない。
+      # Tauri の手引きと同じく msedgedriver-tool で、入っている WebView2 に合うものを取得する（コミットで固定）。
+      # 置いた場所は、E2E の起動スクリプトが tauri-driver に --native-driver で渡す
+      - name: msedgedriver の取得（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: ${{ runner.temp }}
+        run: |
+          cargo install --git https://github.com/chippers/msedgedriver-tool --rev 8c4b34f51b45f5cf08013366d703de464ab871d1 --locked
+          & "$HOME/.cargo/bin/msedgedriver-tool.exe"
+          if (-not (Test-Path msedgedriver.exe)) { throw "msedgedriver.exe を取得できませんでした" }
+          "KIROSCRIBE_E2E_NATIVE_DRIVER=$((Get-Item msedgedriver.exe).FullName)" >> $env:GITHUB_ENV
+
+      # コマンドとイベントを模擬のランタイムで呼び、引数・戻り値の形が画面側の型と合うことを確かめる
+      # （OS によらない内容なので Linux だけで走らせる。型との突き合わせは ci.yml の「型チェック」が行う）
+      - name: コマンドとイベントの形の確認（Linux）
+        if: runner.os == 'Linux'
+        run: cargo test -p kiroscribe --features e2e --locked
+
+      - name: E2E テスト用のアプリのビルド
+        run: npm run build:e2e
+
+      # Linux では、起動スクリプトが仮想の画面（xvfb-run）と D-Bus のセッションを用意する
+      - name: E2E テスト
+        run: npm run test:e2e
+
+      - name: 失敗したテストのスクリーンショットとログを保存
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-artifacts-${{ matrix.name }}
+          path: e2e/artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
