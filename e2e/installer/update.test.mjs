@@ -100,6 +100,10 @@ async function waitForUpdatedLaunch(ctx, { oldPid, launchesBefore }) {
 }
 
 test("[REL-001][REL-010] インストーラで入れると、アプリと機能の一覧・スタートメニューに出て、そのバージョンのアプリが起動する", async (ctx) => {
+  // 管理者の権限を求めない作り（UAC の確認が出ない）: インストーラのマニフェストが asInvoker
+  const manifest = /<requestedExecutionLevel\s+level=["']([A-Za-z]+)["']/.exec(fs.readFileSync(build.old.installer).toString("latin1"));
+  assert.equal(manifest?.[1], "asInvoker", "インストーラが管理者の権限を求める作りになっている");
+
   const info = await install(build.old.installer);
   assert.equal(info.displayName, "Kiroscribe");
   assert.equal(info.displayVersion, OLD);

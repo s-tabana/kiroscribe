@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { test } from "../lib/app.mjs";
 import { CABLE, CABLE_SPEAKERS, audioEndpoints, playSpeech, setDesktopMicAccess, setDeviceEnabled, wavRms } from "../lib/audio-device.mjs";
-import { closeSettings, createNote, dismissToast, openSettings, pressBarButton, sel, toastText, utterances } from "../lib/ui.mjs";
+import { closeSettings, createNote, dismissToast, openSettings, pressBarButton, saveSettings, sel, settingsCheck, toastText, utterances } from "../lib/ui.mjs";
 
 const REAL_AUDIO = process.platform === "win32" && process.env.KIROSCRIBE_E2E_REAL_AUDIO === "1";
 const skip = !REAL_AUDIO && "仮想のオーディオケーブルを入れた Windows でだけ走る（KIROSCRIBE_E2E_REAL_AUDIO=1）";
@@ -74,6 +74,25 @@ test("[SET-006][REC-001][REC-009] 本物の音声デバイスから、マイク�
 
   await pressBarButton(session, "停止");
   await session.$(`xpath://*[@aria-label="録音"]//button[normalize-space(.)="録音を再開"]`, { timeout: 30_000 });
+});
+
+test("[REC-017] 設定で「相手の声も取り込む」をオフにすると、本物のデバイスでも、マイクだけを取り込む", options, async (ctx) => {
+  const session = await ctx.launch();
+  await openSettings(session);
+  const check = await session.$(settingsCheck("相手の声（PC から流れる音声）も取り込む"));
+  if (await check.isSelected()) await check.click();
+  await saveSettings(session);
+  await closeSettings(session);
+
+  await createNote(session, { title: "マイクだけ" });
+  await pressBarButton(session, "録音を開始");
+  await session.waitForText(timer, "録音中");
+  await playSpeech(ctx.work.dir, 10);
+  await session.waitUntil(async () => (await speakersShown(session)).has("自分"), { timeout: 30_000, message: "自分の発話が出る" });
+  await sleep(2_000);
+  assert.deepEqual([...(await speakersShown(session))], ["自分"], "相手の声を取り込んでいる");
+  await session.waitForText("body", "相手の声は取り込んでいません（マイクのみ）");
+  await pressBarButton(session, "停止");
 });
 
 test("[REC-019][SET-006] 選んだマイクが見つからないときは、既定のマイクで録音し、そのことを知らせる", options, async (ctx) => {
