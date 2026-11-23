@@ -1,10 +1,18 @@
 //! 本物の API（OpenAI の文字起こし・Anthropic の Messages）が、いまもアプリの送り方を受け付けることを確かめる。
 //!
 //! 模擬サーバーのテストでは、API の側の変更（モデルの廃止・名前の変更・応答の形の変更）に気づけない。
-//! アプリと同じクライアント・同じプロンプトで、設定画面で選べるすべてのモデルに、ごく短い問い合わせを送る。
-//! API キーを、環境変数 `KIROSCRIBE_LIVE_OPENAI_KEY`・`KIROSCRIBE_LIVE_ANTHROPIC_KEY` で渡したときだけ問い合わせる
-//! （料金がかかる。1 回で数円）。渡さなければ、何もせずに通る。CI では `.github/workflows/live-api.yml` が、
-//! リポジトリの Secret（登録してあれば）を渡して、手動または週に 1 回走らせる。
+//! アプリと同じクライアント・同じプロンプトで、設定画面で選べるすべてのモデルに、ごく短い問い合わせを送る
+//! （料金がかかる。1 回で数円）。
+//!
+//! 資格情報は、サービスごとに次のどちらか。どちらもなければ、そのサービスには問い合わせずに通る。
+//! - API キー: 環境変数 `KIROSCRIBE_LIVE_OPENAI_KEY`・`KIROSCRIBE_LIVE_ANTHROPIC_KEY`（手元で走らせるとき）
+//! - ID の連携（Workload Identity Federation）: GitHub Actions の中で、GitHub が発行するジョブの ID のトークン
+//!   （OIDC）を、各社の短い期限のアクセストークンに交換する。保管する鍵がない。
+//!   Anthropic: `KIROSCRIBE_LIVE_ANTHROPIC_FEDERATION_RULE_ID`・`KIROSCRIBE_LIVE_ANTHROPIC_ORGANIZATION_ID`
+//!   （と、ルールが複数のワークスペースに効くときは `KIROSCRIBE_LIVE_ANTHROPIC_WORKSPACE_ID`）。
+//!   OpenAI: `KIROSCRIBE_LIVE_OPENAI_IDENTITY_PROVIDER_ID`・`KIROSCRIBE_LIVE_OPENAI_SERVICE_ACCOUNT_ID`。
+//!
+//! CI では `.github/workflows/live-api.yml` が、手動または週に 1 回走らせる。設定の手順は docs/development.md。
 
 use std::sync::atomic::AtomicBool;
 
@@ -19,12 +27,193 @@ use kiroscribe_core::transcript::{Segment, Speaker};
 
 const SETTINGS_DIALOG: &str = include_str!("../../../src/components/SettingsDialog.tsx");
 
-fn key(name: &str) -> Option<String> {
-    let value = std::env::var(name).ok().filter(|v| !v.trim().is_empty());
-    if value.is_none() {
-        eprintln!("{name} がないので、本物の API には問い合わせません");
+fn env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Anthropic に問い合わせる資格情報（API キーか、ID の連携で得たアクセストークン）
+enum AnthropicCredential {
+    ApiKey(String),
+    AccessToken(String),
+}
+
+impl AnthropicCredential {
+    fn client(&self, model: &str) -> ClaudeClient {
+        match self {
+            Self::ApiKey(key) => ClaudeClient::new(key, model),
+            Self::AccessToken(token) => ClaudeClient::with_access_token(token, model),
+        }
     }
-    value
+}
+
+async fn anthropic_credential() -> Option<AnthropicCredential> {
+    if let Some(key) = env("KIROSCRIBE_LIVE_ANTHROPIC_KEY") {
+        return Some(AnthropicCredential::ApiKey(key));
+    }
+    let (Some(rule), Some(organization), Some(github)) = (
+        env("KIROSCRIBE_LIVE_ANTHROPIC_FEDERATION_RULE_ID"),
+        env("KIROSCRIBE_LIVE_ANTHROPIC_ORGANIZATION_ID"),
+        federation::GitHubIdToken::from_env(),
+    ) else {
+        eprintln!("Anthropic の API キーも ID の連携の設定もないので、本物の Anthropic の API には問い合わせません");
+        return None;
+    };
+    let federation = federation::AnthropicFederation {
+        token_url: federation::ANTHROPIC_TOKEN_URL.into(),
+        federation_rule_id: rule,
+        organization_id: organization,
+        workspace_id: env("KIROSCRIBE_LIVE_ANTHROPIC_WORKSPACE_ID"),
+    };
+    Some(AnthropicCredential::AccessToken(
+        federation.access_token(&github).await,
+    ))
+}
+
+/// OpenAI に問い合わせる資格情報。API キーも、ID の連携で得たアクセストークンも、同じく `Authorization: Bearer` で送る
+async fn openai_credential() -> Option<String> {
+    if let Some(key) = env("KIROSCRIBE_LIVE_OPENAI_KEY") {
+        return Some(key);
+    }
+    let (Some(provider), Some(service_account), Some(github)) = (
+        env("KIROSCRIBE_LIVE_OPENAI_IDENTITY_PROVIDER_ID"),
+        env("KIROSCRIBE_LIVE_OPENAI_SERVICE_ACCOUNT_ID"),
+        federation::GitHubIdToken::from_env(),
+    ) else {
+        eprintln!("OpenAI の API キーも ID の連携の設定もないので、本物の OpenAI の API には問い合わせません");
+        return None;
+    };
+    let federation = federation::OpenAiFederation {
+        token_url: federation::OPENAI_TOKEN_URL.into(),
+        audience: env("KIROSCRIBE_LIVE_OPENAI_AUDIENCE")
+            .unwrap_or_else(|| federation::OPENAI_AUDIENCE.into()),
+        identity_provider_id: provider,
+        service_account_id: service_account,
+    };
+    Some(federation.access_token(&github).await)
+}
+
+/// ID の連携（Workload Identity Federation）: GitHub Actions のジョブの ID のトークン（OIDC の JWT）を、
+/// 各社の短い期限のアクセストークンに交換する。
+/// 交換の形は、Anthropic はドキュメント（Workload Identity Federation の「Token exchange request」）、
+/// OpenAI は公式の SDK（openai-python の auth/_workload.py）と同じ
+mod federation {
+    use serde_json::{json, Value};
+
+    pub const ANTHROPIC_TOKEN_URL: &str = "https://api.anthropic.com/v1/oauth/token";
+    pub const ANTHROPIC_AUDIENCE: &str = "https://api.anthropic.com";
+    pub const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+    pub const OPENAI_AUDIENCE: &str = "https://api.openai.com/v1";
+
+    /// GitHub Actions が、`id-token: write` の権限を持つジョブに渡す、ID のトークンの発行先
+    pub struct GitHubIdToken {
+        pub request_url: String,
+        pub request_token: String,
+    }
+
+    impl GitHubIdToken {
+        pub fn from_env() -> Option<Self> {
+            Some(Self {
+                request_url: super::env("ACTIONS_ID_TOKEN_REQUEST_URL")?,
+                request_token: super::env("ACTIONS_ID_TOKEN_REQUEST_TOKEN")?,
+            })
+        }
+
+        /// 受け取り手（audience）を指定して、ID のトークンを発行してもらう。
+        /// トークンは 1 回の交換にしか使えない（再利用は拒まれる）ので、交換のたびに発行してもらう
+        pub async fn issue(&self, audience: &str) -> String {
+            // 発行先の URL には、すでに問い合わせの文字列（?api-version=…）が付いているので、後ろに足す
+            let mut url = reqwest::Url::parse(&self.request_url)
+                .expect("ACTIONS_ID_TOKEN_REQUEST_URL が URL ではありません");
+            url.query_pairs_mut().append_pair("audience", audience);
+            let response = kiroscribe_core::http::client()
+                .get(url)
+                .bearer_auth(&self.request_token)
+                .send()
+                .await
+                .unwrap_or_else(|err| {
+                    panic!("GitHub に ID のトークンを発行してもらえません: {err}")
+                });
+            let body = read(response, "GitHub の ID のトークンの発行").await;
+            body["value"]
+                .as_str()
+                .expect("GitHub の応答に value がありません")
+                .to_string()
+        }
+    }
+
+    async fn read(response: reqwest::Response, what: &str) -> Value {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        assert!(
+            status.is_success(),
+            "{what}が失敗しました（HTTP {status}）: {text}"
+        );
+        serde_json::from_str(&text)
+            .unwrap_or_else(|err| panic!("{what}の応答が JSON として読めません: {err}"))
+    }
+
+    async fn exchange(url: &str, body: Value, what: &str) -> String {
+        let response = kiroscribe_core::http::client()
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .unwrap_or_else(|err| panic!("{what}に接続できません: {err}"));
+        let body = read(response, what).await;
+        body["access_token"]
+            .as_str()
+            .filter(|token| !token.is_empty())
+            .unwrap_or_else(|| panic!("{what}の応答に access_token がありません"))
+            .to_string()
+    }
+
+    /// Anthropic の連携の設定（Claude Console の「Workload identity」で作るルール）
+    pub struct AnthropicFederation {
+        pub token_url: String,
+        pub federation_rule_id: String,
+        pub organization_id: String,
+        /// ルールが 1 つのワークスペースだけに効くなら、なくてよい
+        pub workspace_id: Option<String>,
+    }
+
+    impl AnthropicFederation {
+        pub async fn access_token(&self, github: &GitHubIdToken) -> String {
+            let mut body = json!({
+                "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                "assertion": github.issue(ANTHROPIC_AUDIENCE).await,
+                "federation_rule_id": self.federation_rule_id,
+                "organization_id": self.organization_id,
+            });
+            if let Some(workspace) = &self.workspace_id {
+                body["workspace_id"] = json!(workspace);
+            }
+            exchange(&self.token_url, body, "Anthropic のトークンの交換").await
+        }
+    }
+
+    /// OpenAI の連携の設定（OpenAI の管理画面で作る ID プロバイダとサービス アカウント）
+    pub struct OpenAiFederation {
+        pub token_url: String,
+        pub audience: String,
+        pub identity_provider_id: String,
+        pub service_account_id: String,
+    }
+
+    impl OpenAiFederation {
+        pub async fn access_token(&self, github: &GitHubIdToken) -> String {
+            let body = json!({
+                "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                "subject_token": github.issue(&self.audience).await,
+                "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+                "identity_provider_id": self.identity_provider_id,
+                "service_account_id": self.service_account_id,
+            });
+            exchange(&self.token_url, body, "OpenAI のトークンの交換").await
+        }
+    }
 }
 
 /// 設定画面の選択肢（`const <name>: ModelOption[] = [ { value: "…" }, … ]`）から、モデルの名前を取り出す。
@@ -65,7 +254,7 @@ fn segments() -> Vec<Segment> {
 // [CHT-013][SET-009]
 #[tokio::test]
 async fn every_selectable_claude_model_answers_a_chat_question() {
-    let Some(api_key) = key("KIROSCRIBE_LIVE_ANTHROPIC_KEY") else { return };
+    let Some(credential) = anthropic_credential().await else { return };
     let segments = segments();
     let context = MeetingContext {
         title: "リリースの打ち合わせ",
@@ -86,7 +275,8 @@ async fn every_selectable_claude_model_answers_a_chat_question() {
             effort: Effort::Low,
         };
         let mut streamed = String::new();
-        let result = ClaudeClient::new(&api_key, &model)
+        let result = credential
+            .client(&model)
             .stream(&request, &mut |text: &str| streamed.push_str(text), &AtomicBool::new(false), &RetryPolicy::default())
             .await
             .unwrap_or_else(|err| panic!("{model}: 回答が返りません: {err}"));
@@ -101,7 +291,7 @@ async fn every_selectable_claude_model_answers_a_chat_question() {
 // [MIN-020]
 #[tokio::test]
 async fn the_default_model_writes_minutes_from_the_app_prompt() {
-    let Some(api_key) = key("KIROSCRIBE_LIVE_ANTHROPIC_KEY") else { return };
+    let Some(credential) = anthropic_credential().await else { return };
     let segments = segments();
     let context = MeetingContext {
         title: "",
@@ -121,7 +311,8 @@ async fn the_default_model_writes_minutes_from_the_app_prompt() {
         effort: Effort::Medium,
     };
     let model = models("CLAUDE_MODELS").remove(0);
-    let result = ClaudeClient::new(&api_key, &model)
+    let result = credential
+        .client(&model)
         .stream(&request, &mut |_: &str| {}, &AtomicBool::new(false), &RetryPolicy::default())
         .await
         .unwrap_or_else(|err| panic!("{model}: 議事録が返りません: {err}"));
@@ -134,7 +325,7 @@ async fn the_default_model_writes_minutes_from_the_app_prompt() {
 // [TRN-022][SET-008]
 #[tokio::test]
 async fn every_selectable_transcription_model_accepts_the_app_audio() {
-    let Some(api_key) = key("KIROSCRIBE_LIVE_OPENAI_KEY") else { return };
+    let Some(api_key) = openai_credential().await else { return };
     // 2 秒の、声の高さの音（言葉ではないので、文字起こしの結果は問わない。受け付けられて、応答の形が読めればよい）
     let rate = 16_000;
     let samples: Vec<f32> = (0..rate * 2)
@@ -151,4 +342,83 @@ async fn every_selectable_transcription_model_accepts_the_app_audio() {
             .unwrap_or_else(|err| panic!("{model}: 文字起こしの API が受け付けません: {err}"));
         eprintln!("{model}: 「{text}」");
     }
+}
+
+/// ID の連携の交換が、各社の決めた形で送られる（本物の API には問い合わせない。模擬サーバーで確かめる）。
+/// 設定を間違えたときではなく、ここの送り方を間違えたときに、本物の CI を待たずに気づくため
+#[tokio::test]
+async fn federation_exchanges_github_id_tokens_in_each_documented_form() {
+    use serde_json::json;
+    use wiremock::matchers::{body_json, header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    for (audience, jwt) in [
+        (federation::ANTHROPIC_AUDIENCE, "jwt-for-anthropic"),
+        (federation::OPENAI_AUDIENCE, "jwt-for-openai"),
+    ] {
+        Mock::given(method("GET"))
+            .and(path("/github-id-token"))
+            .and(query_param("api-version", "2.0"))
+            .and(query_param("audience", audience))
+            .and(header("authorization", "Bearer github-request-token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "count": 1, "value": jwt })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/anthropic/v1/oauth/token"))
+        .and(body_json(json!({
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": "jwt-for-anthropic",
+            "federation_rule_id": "fdrl_test",
+            "organization_id": "00000000-0000-0000-0000-000000000000",
+            "workspace_id": "wrkspc_test",
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "sk-ant-oat01-test", "token_type": "Bearer", "expires_in": 600, "scope": "workspace:developer"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/openai/oauth/token"))
+        .and(body_json(json!({
+            "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+            "subject_token": "jwt-for-openai",
+            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+            "identity_provider_id": "idp_test",
+            "service_account_id": "svc_acct_test",
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({ "access_token": "openai-access-token", "expires_in": 3600 }),
+            ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // GitHub は、発行先の URL にすでに問い合わせの文字列（?api-version=2.0）を付けて渡す
+    let github = federation::GitHubIdToken {
+        request_url: format!("{}/github-id-token?api-version=2.0", server.uri()),
+        request_token: "github-request-token".into(),
+    };
+    let anthropic = federation::AnthropicFederation {
+        token_url: format!("{}/anthropic/v1/oauth/token", server.uri()),
+        federation_rule_id: "fdrl_test".into(),
+        organization_id: "00000000-0000-0000-0000-000000000000".into(),
+        workspace_id: Some("wrkspc_test".into()),
+    };
+    assert_eq!(anthropic.access_token(&github).await, "sk-ant-oat01-test");
+    let openai = federation::OpenAiFederation {
+        token_url: format!("{}/openai/oauth/token", server.uri()),
+        audience: federation::OPENAI_AUDIENCE.into(),
+        identity_provider_id: "idp_test".into(),
+        service_account_id: "svc_acct_test".into(),
+    };
+    assert_eq!(openai.access_token(&github).await, "openai-access-token");
 }

@@ -117,7 +117,31 @@ WebDriver が届かないところは、次の方法で確かめます。どれ�
 ### インターネットの先の本物を使うテスト
 
 - **ヘルプの取得元**: `KIROSCRIBE_LIVE_TESTS=1 cargo test -p kiroscribe-core --test live_github` で、本物の GitHub から使い方とリリースノートを読めることを確かめます（CI の `ci.yml` で毎回）。
-- **AI の API**: `KIROSCRIBE_LIVE_OPENAI_KEY`・`KIROSCRIBE_LIVE_ANTHROPIC_KEY` に API キーを入れて `cargo test -p kiroscribe-core --test live_api -- --nocapture` を走らせると、設定画面で選べるすべてのモデルに、アプリと同じ送り方でごく短い問い合わせを送ります（料金がかかります。1 回で数円）。CI では `live-api.yml` が、リポジトリの Secret（同じ名前）を登録してあるときだけ、手動と週に 1 回走らせます。テスト専用のキーを作り、使える金額に上限を付けて登録してください。
+- **AI の API**: `cargo test -p kiroscribe-core --test live_api -- --nocapture` は、設定画面で選べるすべてのモデルに、アプリと同じ送り方でごく短い問い合わせを送ります（料金がかかります。1 回で数円）。手元では `KIROSCRIBE_LIVE_OPENAI_KEY`・`KIROSCRIBE_LIVE_ANTHROPIC_KEY` に API キーを入れて走らせます。CI では `live-api.yml` が、手動と週に 1 回（既定のブランチ `main` のファイルで）走らせます。資格情報は、次の「鍵なしでの設定」を勧めます（API キーを同じ名前の Secret に登録しても動きます。そのときは、テスト専用のキーに使える金額の上限を付けます）。どちらもないサービスは、確かめずに終わります。
+
+#### 本物の AI の API のテストを、鍵なしで動かす（ID の連携）
+
+GitHub Actions は、ジョブごとに「どのリポジトリの、どのワークフローの、どのブランチの実行か」を書いた ID のトークン（OIDC）を発行します。Anthropic と OpenAI は、このトークンを信頼する設定を作っておくと、短い期限（数分〜1 時間）のアクセストークンと交換してくれます（Workload Identity Federation）。保管する鍵がないので、漏れる鍵もありません。交換は `crates/core/tests/live_api.rs` がします。
+
+**Anthropic**（Claude Console の [Workload identity](https://platform.claude.com/settings/workload-identity-federation) の「Connect workload」→「GitHub Actions」。組織の管理者の権限が要ります）
+
+1. 発行元（federation issuer）: `https://token.actions.githubusercontent.com`（JWKS は discovery）。
+2. サービス アカウントを作り、テスト専用のワークスペース（使える金額の上限を付けたもの）のメンバーにします。
+3. ルール（federation rule）は、このワークフローだけに絞ります。
+   - `subject_prefix`: `repo:s-tabana/kiroscribe:ref:refs/heads/*`（フォークからのプルリクエストの実行は `…:pull_request` になるので一致しません）
+   - `audience`: `https://api.anthropic.com`
+   - `claims`: `repository_owner` が `s-tabana`
+   - `condition`: `claims.workflow_ref.startsWith("s-tabana/kiroscribe/.github/workflows/live-api.yml@") && claims.ref in ["refs/heads/main", "refs/heads/next"]`
+   - `oauth_scope`: `workspace:inference`（Messages だけ）、`token_lifetime_seconds`: `600`、ワークスペース: 2. のもの
+4. リポジトリの Secret に、ルールの ID（`fdrl_…`）を `KIROSCRIBE_LIVE_ANTHROPIC_FEDERATION_RULE_ID`、組織の ID（Console の Organization の画面）を `KIROSCRIBE_LIVE_ANTHROPIC_ORGANIZATION_ID` として登録します。ルールを複数のワークスペースに効かせたときだけ、`KIROSCRIBE_LIVE_ANTHROPIC_WORKSPACE_ID` も登録します。
+
+**OpenAI**（OpenAI の管理画面の Workload identity federation）
+
+1. ID プロバイダ（Workload Identity Provider）: 発行元 `https://token.actions.githubusercontent.com`、audience `https://api.openai.com/v1`（ほかの値にしたときは、Secret `KIROSCRIBE_LIVE_OPENAI_AUDIENCE` にも同じ値を登録します）。
+2. テスト専用のプロジェクト（使える金額の上限を付けたもの）のサービス アカウントに、上の Anthropic の 3. と同じ条件（リポジトリ `s-tabana/kiroscribe`、`workflow_ref` がこのワークフロー、ブランチが `main` か `next`）で対応付けます。
+3. リポジトリの Secret に、ID プロバイダの ID を `KIROSCRIBE_LIVE_OPENAI_IDENTITY_PROVIDER_ID`、サービス アカウントの ID を `KIROSCRIBE_LIVE_OPENAI_SERVICE_ACCOUNT_ID` として登録します。
+
+ID は鍵ではありませんが、公開のリポジトリの実行記録に出さないよう、Secret（伏せ字になる）に入れます。登録したら、Actions の「live-api」を手動で実行し、Summary に「ID の連携（鍵なし）で確かめる」と出て、テストが通ることを確かめます。交換が拒まれたときの理由は、Anthropic は Console の Workload identity の「History」に出ます。
 
 ### 画面と本体の取り決め
 
