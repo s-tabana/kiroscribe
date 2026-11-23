@@ -69,7 +69,11 @@ jobs:
       - name: フロントエンドのテスト
         run: npm run test:web
 
+      # KIROSCRIBE_LIVE_TESTS: 本物の GitHub に問い合わせて、ヘルプの取得元がいまも読めることを確かめる
+      # （crates/core/tests/live_github.rs。キーは使わない）。Windows では、本物の資格情報マネージャーも使う
       - name: Rust のテスト
+        env:
+          KIROSCRIBE_LIVE_TESTS: "1"
         run: cargo test --workspace --locked
 
       # アプリ内更新の署名に使う秘密鍵は、リリース（release.yml）でだけ使う。
