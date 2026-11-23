@@ -103,7 +103,8 @@ function verify(options = {}) {
       intervalMs: 0,
       ...options,
     },
-    { sleep: async () => {} },
+    // テストの実行の仕組みは、子のプロセスの標準出力でやり取りするので、テストの中では何も出さない
+    { sleep: async () => {}, log: () => {} },
   );
 }
 

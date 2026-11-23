@@ -77,8 +77,9 @@ function parseLatest(text, url) {
  * 公開したリリースを確かめる。問題がなければ、確かめた内容の要約（文字列の配列）を返す。
  * 問題が続けば UsageError を投げる。
  * options: { repo, version, installer, sums, pubkeys: [{ label, pubkey }], prerelease, baseUrl, timeoutMs, intervalMs }
+ * 2 つ目の引数: { fetch, sleep, log }（テストで差し替える。log は、確かめ直すときの知らせ）
  */
-export async function verifyPublishedRelease(options, { fetch: fetchImpl = globalThis.fetch, sleep } = {}) {
+export async function verifyPublishedRelease(options, { fetch: fetchImpl = globalThis.fetch, sleep, log = console.log } = {}) {
   const { repo, version, prerelease = false, baseUrl = "https://github.com", timeoutMs = 600_000, intervalMs = 10_000 } =
     options;
   const wait = sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -168,7 +169,7 @@ export async function verifyPublishedRelease(options, { fetch: fetchImpl = globa
       if (Date.now() >= deadline) {
         throw new UsageError(`公開したリリースを確かめられませんでした（${Math.round(timeoutMs / 1000)} 秒待ちました）: ${error.message}`);
       }
-      console.log(`まだ確かめられません。${Math.round(intervalMs / 1000)} 秒後に確かめ直します: ${error.message}`);
+      log(`まだ確かめられません。${Math.round(intervalMs / 1000)} 秒後に確かめ直します: ${error.message}`);
       await wait(intervalMs);
     }
   }
