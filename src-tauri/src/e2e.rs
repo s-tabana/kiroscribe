@@ -503,10 +503,14 @@ fn parse_resize(request: &str) -> Option<(&str, f64, f64)> {
 /// （同じ名前のプラグインは後から登録したほうが使われる。画面側のコードと権限の設定は製品のまま）。
 /// あわせて、テストからアプリを操作するための窓口を足す。
 pub fn plugins<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
-    builder
-        .plugin(dialog_plugin())
-        .plugin(clipboard_plugin())
-        .plugin(control_plugin())
+    // 同じ名前のプラグインは、あとから登録したほうに置き換わる。ダイアログを本当に出すときは、
+    // 製品のダイアログのプラグイン（tauri-plugin-dialog）を置き換えない（置き換えると、その準備が行われない）
+    let builder = if core::config().native_startup_dialog {
+        builder
+    } else {
+        builder.plugin(dialog_plugin())
+    };
+    builder.plugin(clipboard_plugin()).plugin(control_plugin())
 }
 
 /// 起動時の処理（`lib.rs` の setup）が終わったことを、ログと起動の記録（`launches.log`）に残す。

@@ -63,7 +63,8 @@ test(
       const deadline = Date.now() + 60_000;
       while (!windows.some((w) => w.texts.some((text) => text.includes("Kiroscribe を起動できませんでした")))) {
         if (Date.now() >= deadline || child.exitCode !== null) {
-          assert.fail(`起動の失敗のダイアログが出ません（終了コード ${child.exitCode}）: ${JSON.stringify(windows)}`);
+          const appLog = fs.readFileSync(ctx.work.file("app-1.log"), "utf8").split("\n").slice(-30).join("\n");
+          assert.fail(`起動の失敗のダイアログが出ません（終了コード ${child.exitCode}）: ${JSON.stringify(windows)}\n--- アプリのログ ---\n${appLog}`);
         }
         await sleep(500);
         windows = visibleWindows(child.pid);
