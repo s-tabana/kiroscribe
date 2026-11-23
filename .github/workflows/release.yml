@@ -150,10 +150,10 @@ jobs:
         run: npm ci
 
       # 仕様一覧（docs/spec/）の項目が、テストかリリース前のチェックリストに結び付いているか。
-      # いまは、未対応の一覧（docs/spec/pending.txt）に載っている項目を見逃す通常の検査にしている。
-      # 未対応が 0 件になったら `--strict` を付けて、テストのない仕様を出荷できないようにする
+      # `--strict` は、未対応の一覧（docs/spec/pending.txt）を見逃しに使わない
+      # （一覧に行が残っていれば不足として数える）。テストのない仕様は出荷しない
       - name: 仕様とテストの対応の確認
-        run: node scripts/check-spec-coverage.mjs
+        run: node scripts/check-spec-coverage.mjs --strict
 
       - name: リリース用スクリプトのテスト
         working-directory: scripts
