@@ -66,6 +66,28 @@ function isAlive(pid) {
   }
 }
 
+/**
+ * 実行中のアプリが読むファイルを、書きかけの中身が見えないように書く（一時ファイルに書いてから名前を変える）。
+ * そのまま書くと、ファイルができてから中身を書き終えるまでのあいだに、アプリが空の中身を読むことがある。
+ * Windows では、アプリが読んでいる最中は名前を変えられないことがあるので、少し待って試し直す
+ */
+export function writeFileAtomic(file, text) {
+  const temp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temp, text);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.renameSync(temp, file);
+      return;
+    } catch (error) {
+      if (attempt >= 50 || !["EPERM", "EBUSY", "EACCES"].includes(error.code)) {
+        fs.rmSync(temp, { force: true });
+        throw error;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+}
+
 /** ファイル名に使えない文字を置き換える */
 function safeName(name) {
   return name.replace(/[^\p{L}\p{N}._-]+/gu, "_").slice(0, 80);
@@ -95,7 +117,7 @@ export class Workspace {
 
   /** 起動時に読まれる設定（config.json）を書く */
   configure(config) {
-    fs.writeFileSync(this.file("config.json"), JSON.stringify(config, null, 2));
+    writeFileAtomic(this.file("config.json"), JSON.stringify(config, null, 2));
   }
 
   /** API キーを保存済みの状態にする（設定画面を通さずに用意したいテスト用） */
@@ -109,7 +131,7 @@ export class Workspace {
 
   /** マイクを開けなかったことにする（message が理由の文）。null で元に戻す */
   setMicError(message) {
-    if (message) fs.writeFileSync(this.file("mic-error.txt"), message);
+    if (message) writeFileAtomic(this.file("mic-error.txt"), message);
     else fs.rmSync(this.file("mic-error.txt"), { force: true });
   }
 
@@ -138,13 +160,13 @@ export class Workspace {
 
   /** いま会議中として扱う会議アプリ（"googleMeet"・"slackHuddle"・"zoom"・"teams"・"discord"）。null で会議を終える */
   setMeeting(app) {
-    if (app) fs.writeFileSync(this.file("meeting.txt"), app);
+    if (app) writeFileAtomic(this.file("meeting.txt"), app);
     else fs.rmSync(this.file("meeting.txt"), { force: true });
   }
 
   /** 確認ダイアログ・保存ダイアログへの答えを決める（アプリが次にダイアログを出すときから有効） */
   answerDialogs({ confirm = false, savePath = null } = {}) {
-    fs.writeFileSync(this.file("dialogs.json"), JSON.stringify({ confirm, savePath }));
+    writeFileAtomic(this.file("dialogs.json"), JSON.stringify({ confirm, savePath }));
   }
 
   /** アプリが出そうとしたダイアログ（古い順） */
@@ -167,7 +189,7 @@ export class Workspace {
 
   /** 利用者がウィンドウの「×」を押したのと同じように、ウィンドウを閉じる */
   closeWindow(label) {
-    fs.writeFileSync(this.file("close-window.txt"), label);
+    writeFileAtomic(this.file("close-window.txt"), label);
   }
 
   /**
@@ -179,7 +201,7 @@ export class Workspace {
    */
   async resizeWindow(label, width, height) {
     fs.rmSync(this.file("window-size.json"), { force: true });
-    fs.writeFileSync(this.file("resize-window.txt"), `${label} ${width} ${height}`);
+    writeFileAtomic(this.file("resize-window.txt"), `${label} ${width} ${height}`);
     // アプリが、変えたあとの大きさ（ウィンドウそのものに問い合わせた値）を書くまで待つ
     const deadline = Date.now() + 15_000;
     for (;;) {
@@ -204,7 +226,13 @@ export class Workspace {
     return (this.#read("launches.log") ?? "")
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line));
+      .flatMap((line) => {
+        try {
+          return [JSON.parse(line)];
+        } catch {
+          return []; // アプリが書いている途中の行
+        }
+      });
   }
 
   /** 起動しているアプリのプロセス ID（まだ起動していなければ null） */

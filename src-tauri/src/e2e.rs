@@ -341,9 +341,10 @@ fn control_plugin<R: Runtime>() -> TauriPlugin<R> {
                 .name("kiroscribe-e2e-control".into())
                 .spawn(move || loop {
                     std::thread::sleep(Duration::from_millis(100));
+                    // テストは、書きかけが見えないように書く（一時ファイルから名前を変える）。
+                    // それでも空なら書いている途中とみなし、消さずに次の回で読み直す
                     let Some(path) = core::file(CLOSE_WINDOW_FILE) else { return };
-                    if let Ok(label) = std::fs::read_to_string(&path) {
-                        let _ = std::fs::remove_file(&path);
+                    if let Some(label) = read_request(&path) {
                         match app.get_webview_window(label.trim()) {
                             Some(window) => {
                                 if let Err(err) = window.close() {
@@ -354,8 +355,7 @@ fn control_plugin<R: Runtime>() -> TauriPlugin<R> {
                         }
                     }
                     let Some(path) = core::file(RESIZE_WINDOW_FILE) else { return };
-                    if let Ok(request) = std::fs::read_to_string(&path) {
-                        let _ = std::fs::remove_file(&path);
+                    if let Some(request) = read_request(&path) {
                         match parse_resize(&request) {
                             Some((label, width, height)) => match app.get_webview_window(label) {
                                 Some(window) => resize_and_report(&window, label, width, height),
@@ -368,6 +368,16 @@ fn control_plugin<R: Runtime>() -> TauriPlugin<R> {
             Ok(())
         })
         .build()
+}
+
+/// テストからの依頼のファイルを読んで消す。ない・空（書いている途中）なら `None` で、ファイルは残す。
+fn read_request(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    let _ = std::fs::remove_file(path);
+    Some(text)
 }
 
 /// ウィンドウの大きさを変えて、変えたあとの大きさを `window-size.json` と、ログに残す。
