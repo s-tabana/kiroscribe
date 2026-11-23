@@ -567,21 +567,13 @@ mod tests {
     #[cfg(all(windows, not(feature = "e2e")))]
     #[test]
     fn the_product_stores_keys_in_the_credential_manager_as_kiroscribe() {
-        let dir = tempfile_dir();
-        let store = platform_store(&dir).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = platform_store(dir.path()).unwrap();
         assert_eq!(store.description(), "Windows 資格情報マネージャー");
         assert_eq!(SERVICE_NAME, "Kiroscribe");
         assert_eq!(Provider::OpenAi.account(), "openai-api-key");
         assert_eq!(Provider::Anthropic.account(), "anthropic-api-key");
-        assert!(!dir.join("secrets.json").exists(), "キーのファイルを作った");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(all(windows, not(feature = "e2e")))]
-    fn tempfile_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kiroscribe-secrets-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        assert!(!dir.path().join("secrets.json").exists(), "キーのファイルを作った");
     }
 
     /// 本物の資格情報マネージャーで、サービス名をまたぐ引き継ぎを確かめる（Windows の CI で実行される）。

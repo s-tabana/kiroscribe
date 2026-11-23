@@ -30,8 +30,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 
 [dev-dependencies]
 wiremock = "0.6"
+tempfile = "3"
 
 # 資格情報マネージャーの中身を、keyring を通さずに Windows の API で直接確かめるテスト用
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
-tempfile = "3"
