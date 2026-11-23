@@ -93,8 +93,10 @@ test(
     }
     await session.click("button.share-trigger");
     await session.click('xpath://div[@role="dialog"][@aria-label="共有"]//button[normalize-space(.)="Markdown をコピー"]');
-    await session.waitUntil(() => ctx.work.clipboard() !== null, { message: "クリップボードに書き出される" });
-    assert.ok(!ctx.work.clipboard().includes(OPENAI_KEY) && !ctx.work.clipboard().includes(ANTHROPIC_KEY));
+    // 書き出した内容（空でない）を受け取ってから調べる
+    const copied = await session.waitUntil(() => ctx.work.clipboard() || null, { message: "クリップボードに書き出される" });
+    assert.match(copied, /^# /, `Markdown が書き出されていない:\n${copied}`);
+    assert.ok(!copied.includes(OPENAI_KEY) && !copied.includes(ANTHROPIC_KEY));
 
     // アプリを起動し直しても、キーは残っている
     session = await ctx.relaunch();

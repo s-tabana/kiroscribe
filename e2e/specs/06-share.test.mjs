@@ -37,9 +37,15 @@ test("[SHR-007][SHR-008][SHR-009][SHR-012] 共有: Markdown をコピーでき�
   await session.waitForText(`${sel.minutes}[aria-busy="false"]`, "リリースは 12/5");
   await openShare(session);
   await session.click(shareButton("Markdown をコピー"));
-  await session.waitUntil(() => ctx.work.clipboard() !== notesOnly, { message: "クリップボードの内容が変わる" });
-  const minutesOnly = ctx.work.clipboard();
-  assert.ok(minutesOnly.includes("リリースは 12/5"));
+  // 変わったあとの内容を、1 回の読み取りで受け取る（待ったあとで読み直すと、待ちで見た内容と食い違うことがある）
+  const minutesOnly = await session.waitUntil(
+    () => {
+      const text = ctx.work.clipboard();
+      return text && text !== notesOnly ? text : null;
+    },
+    { message: "クリップボードの内容が変わる" },
+  );
+  assert.ok(minutesOnly.includes("リリースは 12/5"), `議事録が書き出されていない:\n${minutesOnly}`);
   assert.ok(!minutesOnly.includes("- リリース日を決める"), "既定ではメモを含めない");
 
   // 保存: ダイアログで選んだパスに書き出す（既定のファイル名は .md）

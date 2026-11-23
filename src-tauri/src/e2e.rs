@@ -184,7 +184,8 @@ fn append_line(file: &str, line: &str) {
         .create(true)
         .append(true)
         .open(&path)
-        .and_then(|mut f| writeln!(f, "{line}"));
+        // 1 行を 1 回で書く（読む側に、行の途中までが見えないように）
+        .and_then(|mut f| f.write_all(format!("{line}\n").as_bytes()));
     if let Err(err) = written {
         eprintln!("[e2e] {} に書けません: {err}", path.display());
     }
@@ -275,7 +276,29 @@ fn save(options: Value) -> Option<String> {
 #[tauri::command]
 fn write_text(text: String) -> Result<(), String> {
     let path = core::file(CLIPBOARD_FILE).ok_or("作業フォルダがありません")?;
-    std::fs::write(&path, text).map_err(|err| format!("{} に書けません: {err}", path.display()))
+    write_whole(&path, &text).map_err(|err| format!("{} に書けません: {err}", path.display()))
+}
+
+/// ファイルを、読む側から「空」や「途中まで書いた内容」が見えないように書く（別の名前で書いてから、置き換える）。
+/// テストは、アプリが書いている最中にもファイルを読むため。
+fn write_whole(path: &Path, text: &str) -> std::io::Result<()> {
+    let temp = path.with_extension("writing");
+    std::fs::write(&temp, text)?;
+    // Windows では、読まれている最中のファイルを置き換えられないことがある。少し待ってやり直す
+    let mut replaced = std::fs::rename(&temp, path);
+    for _ in 0..20 {
+        if replaced.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        replaced = std::fs::rename(&temp, path);
+    }
+    if replaced.is_err() {
+        // どうしても置き換えられないときは、じかに書く（読む側は、求める内容になるまで待つ）
+        let _ = std::fs::remove_file(&temp);
+        return std::fs::write(path, text);
+    }
+    Ok(())
 }
 
 fn dialog_plugin<R: Runtime>() -> TauriPlugin<R> {
@@ -386,7 +409,7 @@ fn resize_and_report<R: Runtime>(window: &tauri::WebviewWindow<R>, label: &str, 
     });
     eprintln!("[e2e] ウィンドウの大きさ: {report}");
     if let Some(path) = core::file(WINDOW_SIZE_FILE) {
-        if let Err(err) = std::fs::write(&path, report.to_string()) {
+        if let Err(err) = write_whole(&path, &report.to_string()) {
             eprintln!("[e2e] {} に書けません: {err}", path.display());
         }
     }
@@ -529,6 +552,44 @@ pub fn update_first_check_delay() -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// テストは、アプリが書いている最中にもファイルを読む。空や、途中までの内容が見えてはいけない。
+    /// （Windows では、読まれている最中のファイルを置き換えられないことがあるので、そのときは待ってやり直す。
+    /// 読む側の様子で結果が変わるので、ここで確かめるのは unix だけ）
+    #[cfg(unix)]
+    #[test]
+    fn a_reader_never_sees_a_partly_written_file() {
+        let dir = std::env::temp_dir().join(format!("kiroscribe-e2e-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clipboard.txt");
+        let first = "# 週次定例\n".repeat(2_000);
+        let second = "## 議事録\n".repeat(3_000);
+        write_whole(&path, &first).unwrap();
+
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let (path, first, second, done) = (path.clone(), first.clone(), second.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut reads = 0_u32;
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    let seen = std::fs::read_to_string(&path).unwrap();
+                    assert!(seen == first || seen == second, "途中の内容が見えた（{} バイト）", seen.len());
+                    reads += 1;
+                }
+                reads
+            })
+        };
+        for round in 0..2_000 {
+            write_whole(&path, if round % 2 == 0 { &second } else { &first }).unwrap();
+        }
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(reader.join().expect("読む側が失敗した") > 0);
+        // 書くときに使った一時ファイルは残さない
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        assert_eq!(left, ["clipboard.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// OS が答える最小の大きさ（枠を含む外側・物理ピクセル）から、内側の大きさ（拡大率を掛ける前の px）を求める。
     #[test]
