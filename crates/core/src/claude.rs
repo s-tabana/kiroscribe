@@ -70,6 +70,24 @@ pub struct StreamResult {
     pub fell_back: bool,
 }
 
+/// 中止の指示を確かめる間隔。
+const CANCEL_POLL: Duration = Duration::from_millis(50);
+
+/// `future` を、中止の指示が出るまで進める。中止されたら、その場で `Err(CoreError::Cancelled)` を返す
+/// （AI からの次のデータや、再試行の待ち時間の終わりを待たない）。
+async fn until_cancelled<T>(cancel: &AtomicBool, future: impl std::future::Future<Output = T>) -> Result<T> {
+    tokio::pin!(future);
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(CoreError::Cancelled);
+        }
+        tokio::select! {
+            value = &mut future => return Ok(value),
+            () = tokio::time::sleep(CANCEL_POLL) => {}
+        }
+    }
+}
+
 /// サーバー側フォールバックの `"default"` 指定を受け付けるモデル。
 pub fn supports_server_fallback(model: &str) -> bool {
     matches!(
@@ -151,7 +169,7 @@ impl ClaudeClient {
         if supports_server_fallback(&self.model) {
             request = request.header("anthropic-beta", FALLBACK_BETA);
         }
-        let response = request.send().await?;
+        let response = until_cancelled(cancel, request.send()).await??;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -165,10 +183,7 @@ impl ClaudeClient {
         let mut result = StreamResult::default();
         let mut parser = SseParser::default();
         let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            if cancel.load(Ordering::SeqCst) {
-                return Err(CoreError::Cancelled);
-            }
+        while let Some(chunk) = until_cancelled(cancel, stream.next()).await? {
             for event in parser.push(&chunk?) {
                 let Ok(data) = serde_json::from_str::<Value>(&event.data) else {
                     continue;
@@ -246,7 +261,7 @@ impl ClaudeClient {
             };
             match result {
                 Err(err) if !emitted && attempt + 1 < policy.max_attempts && is_retryable(&err) => {
-                    tokio::time::sleep(policy.delay_after(attempt)).await;
+                    until_cancelled(cancel, tokio::time::sleep(policy.delay_after(attempt))).await?;
                     attempt += 1;
                 }
                 other => return other,
@@ -488,5 +503,92 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, CoreError::Cancelled));
+    }
+    /// 中止を指示してから、呼び出しが「中止しました」で戻るまでの時間。
+    async fn cancelled_within(
+        client: &ClaudeClient,
+        policy: &RetryPolicy,
+        cancel_after: Duration,
+        received: &mut Vec<String>,
+    ) -> Duration {
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let canceller = tokio::spawn(async move {
+            tokio::time::sleep(cancel_after).await;
+            flag.store(true, Ordering::SeqCst);
+            std::time::Instant::now()
+        });
+        let mut on_text = |text: &str| received.push(text.to_string());
+        let result = client.stream(&request(), &mut on_text, &cancel, policy).await;
+        let returned_at = std::time::Instant::now();
+        assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+        returned_at.duration_since(canceller.await.unwrap())
+    }
+
+    /// 中止は、AI からの次のデータを待たずに、すぐ効く: 応答が始まるのを待っているあいだでも。
+    // [MIN-005][CHT-006]
+    #[tokio::test]
+    async fn cancel_takes_effect_while_waiting_for_the_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(sse_response(text_stream(&["遅れて届く回答"], "end_turn")).set_delay(Duration::from_secs(5)))
+            .mount(&server)
+            .await;
+        let client = ClaudeClient::new("k", "claude-opus-5-5").with_base_url(&server.uri());
+        let mut received = Vec::new();
+        let took = cancelled_within(&client, &fast(), Duration::from_millis(200), &mut received).await;
+        assert!(took < Duration::from_millis(500), "中止が効くまでに {took:?} かかった");
+        assert!(received.is_empty());
+    }
+
+    /// 文章の途中で AI からのデータが止まっているあいだでも、中止はすぐ効く。
+    // [MIN-005][CHT-006]
+    #[tokio::test]
+    async fn cancel_takes_effect_while_the_stream_is_silent() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // 前半を送ったあと、何も送らずに接続を保ち続けるサーバー
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 16 * 1024];
+            let _ = socket.read(&mut buffer).await;
+            let events = sse(&[
+                json!({"type": "message_start", "message": {"model": "claude-opus-5-5"}}),
+                json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+                json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "書きかけ"}}),
+            ]);
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+            let chunk = format!("{:x}\r\n{events}\r\n", events.len());
+            socket.write_all(format!("{head}{chunk}").as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let client = ClaudeClient::new("k", "claude-opus-5-5").with_base_url(&format!("http://{address}"));
+        let mut received = Vec::new();
+        let took = cancelled_within(&client, &fast(), Duration::from_millis(300), &mut received).await;
+        assert!(took < Duration::from_millis(500), "中止が効くまでに {took:?} かかった");
+        assert_eq!(received, ["書きかけ"], "止まる前に届いた分は、画面に渡っている");
+    }
+
+    /// 一時的な失敗のあと、再試行を待っているあいだでも、中止はすぐ効く。
+    // [MIN-005][CHT-006]
+    #[tokio::test]
+    async fn cancel_takes_effect_while_waiting_to_retry() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({"error": {"type": "api_error", "message": "x"}})))
+            .mount(&server)
+            .await;
+        let client = ClaudeClient::new("k", "claude-opus-5-5").with_base_url(&server.uri());
+        let slow_retry = RetryPolicy {
+            max_attempts: 4,
+            base_delay: Duration::from_secs(5),
+            max_delay: Duration::from_secs(5),
+        };
+        let mut received = Vec::new();
+        let took = cancelled_within(&client, &slow_retry, Duration::from_millis(300), &mut received).await;
+        assert!(took < Duration::from_millis(500), "中止が効くまでに {took:?} かかった");
+        assert_eq!(server.received_requests().await.unwrap().len(), 1, "中止したあとに、もう一度送っている");
     }
 }

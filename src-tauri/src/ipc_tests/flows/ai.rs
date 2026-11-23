@@ -1,6 +1,6 @@
 //! 議事録の作成と AI チャットのコマンド。
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kiroscribe_core::transcript::Speaker;
 use serde_json::{json, Value};
@@ -90,8 +90,11 @@ fn minutes_run_one_at_a_time_and_can_be_cancelled() {
     wait_until("別のノートの作成と AI チャットの開始", || (h.claude_requests().len() == 3).then_some(()));
 
     // 中止: エラーの文は「中止しました」（画面は、これを知らせとして出さない）。何も保存しない
+    let cancelled_at = Instant::now();
     assert_eq!(h.ok("cancel_ai", json!({ "noteId": note, "kind": "enhance" })), Value::Null);
     assert_eq!(running.join().unwrap().unwrap_err(), "中止しました");
+    // 中止は、AI から次のデータが届くのを待たずに、すぐ効く（模擬サーバーは 2.5 秒たたないと応答しない）
+    assert!(cancelled_at.elapsed() < Duration::from_millis(1000), "中止が効くまでに {:?} かかった", cancelled_at.elapsed());
     assert_eq!(h.ok("get_note", json!({ "id": note }))["enhancedNotes"], Value::Null);
     // ほかの作成は、中止されずに終わる
     assert_eq!(elsewhere.join().unwrap().unwrap()["enhancedNotes"], "本文");
@@ -174,8 +177,10 @@ fn a_chat_answer_can_be_cancelled() {
     let busy = h.call("send_chat_message", json!({ "noteId": note, "content": "もう 1 つ" })).unwrap_err();
     assert_eq!(busy, "回答を作成中です");
 
+    let cancelled_at = Instant::now();
     h.ok("cancel_ai", json!({ "noteId": note, "kind": "chat" }));
     assert_eq!(running.join().unwrap().unwrap_err(), "中止しました");
+    assert!(cancelled_at.elapsed() < Duration::from_millis(1000), "中止が効くまでに {:?} かかった", cancelled_at.elapsed());
     let history = h.ok("list_chat_messages", json!({ "noteId": note }));
     assert!(
         history.as_array().unwrap().iter().all(|message| message["role"] != "assistant"),

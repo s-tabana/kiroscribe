@@ -68,7 +68,8 @@ test("[MIN-004][MIN-006][NOTE-019] ［議事録を作成］で、議事録がス
 
 test("[MIN-005] 議事録の作成は途中で中止でき、中止したものは保存されない", async (ctx) => {
   const gate = createGate();
-  ctx.server.anthropic.reply = () => ({ chunks: ["# 途中のタイトル\n\n", "書きかけの議事録"], hold: gate.promise });
+  // 前半を送ったあと、AI から何も届かない状態にする（中止は、次のデータを待たずに効く）
+  ctx.server.anthropic.reply = () => ({ chunks: ["# 途中のタイトル\n\n", "書きかけの議事録"], hold: gate.promise, silent: true });
   try {
     const session = await ctx.launch();
     await createNote(session, { title: "中止のテスト", memo: "- メモ" });
@@ -76,8 +77,8 @@ test("[MIN-005] 議事録の作成は途中で中止でき、中止したもの�
     await session.waitForText(streaming, "書きかけの議事録");
 
     await session.click(`xpath://section[@aria-label="議事録"]//button[normalize-space(.)="中止"]`);
-    // メモの画面に戻り、もう一度作成できる。中止は失敗として知らせない
-    await session.$(enhanceButton);
+    // すぐにメモの画面に戻り、もう一度作成できる。中止は失敗として知らせない
+    await session.$(enhanceButton, { timeout: 3_000 });
     await session.waitGone(sel.minutes);
     assert.equal(await session.exists(sel.toast), false, "中止はエラーとして知らせない");
     assert.equal(await (await session.$(sel.memo)).value(), "- メモ");

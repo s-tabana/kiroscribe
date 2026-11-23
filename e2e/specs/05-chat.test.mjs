@@ -124,3 +124,28 @@ test("[CHT-005][ERR-002] AI チャットの API がエラーを返したら、�
   await openChat(session);
   await session.waitUntil(async () => (await chatMessages(session)).length === 2, { message: "履歴は 2 件" });
 });
+
+test("[CHT-006] 回答の作成は途中で中止でき、中止した質問と回答は履歴に残らない", async (ctx) => {
+  const gate = createGate();
+  // 前半を送ったあと、AI から何も届かない状態にする（中止は、次のデータを待たずに効く）
+  ctx.server.anthropic.reply = () => ({ chunks: ["書きかけの"], hold: gate.promise, silent: true });
+  try {
+    const session = await ctx.launch();
+    await createNote(session, { title: "週次定例", memo: "- メモ" });
+    await openChat(session);
+    await (await session.$(chatInput)).type("決まったことは？");
+    await session.click('button[aria-label="送信"]');
+    await session.waitUntil(async () => (await chatMessages(session)).at(-1)?.text === "書きかけの", {
+      message: "回答が途中まで表示される",
+    });
+
+    await session.click('xpath://aside[@aria-label="AI チャット"]//button[normalize-space(.)="中止"]');
+    // すぐに送信できる状態に戻り、質問は入力欄に戻る。エラーとしては知らせない
+    await session.$('button[aria-label="送信"]', { timeout: 3_000 });
+    assert.equal(await (await session.$(chatInput)).value(), "決まったことは？");
+    assert.equal(await session.exists(sel.toast), false, "中止はエラーとして知らせない");
+    assert.deepEqual(await chatMessages(session), [], "中止した質問や、書きかけの回答が残っている");
+  } finally {
+    gate.open();
+  }
+});
