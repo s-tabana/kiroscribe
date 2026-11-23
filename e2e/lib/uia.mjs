@@ -186,22 +186,25 @@ Click-Element $icon ($env:KIROSCRIBE_TRAY_BUTTON -eq 'right')
 export function openMenu(pid) {
   const out = powershell(
     `
-$menu = $null
-foreach ($w in $AE::RootElement.FindAll($Scope::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
-  if ($w.Current.ClassName -eq '#32768') { $menu = $w; break }
-}
-if ($menu -eq $null) { 'null'; exit 0 }
+# メニューのウィンドウ（#32768）は、隠れたものが常にあるので、見えていて項目のあるものだけを読む
 $isItem = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::MenuItem)
-$items = @()
-foreach ($e in $menu.FindAll($Scope::Descendants, $isItem)) {
-  $checked = $null
-  $toggle = $null
-  if ($e.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$toggle)) {
-    $checked = ($toggle.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On)
+foreach ($w in $AE::RootElement.FindAll($Scope::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
+  if ($w.Current.ClassName -ne '#32768' -or $w.Current.IsOffscreen) { continue }
+  $found = $w.FindAll($Scope::Descendants, $isItem)
+  if ($found.Count -eq 0) { continue }
+  $items = @()
+  foreach ($e in $found) {
+    $checked = $null
+    $toggle = $null
+    if ($e.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$toggle)) {
+      $checked = ($toggle.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On)
+    }
+    $items += [pscustomobject]@{ name = $e.Current.Name; checked = $checked }
   }
-  $items += [pscustomobject]@{ name = $e.Current.Name; checked = $checked }
+  ConvertTo-Json -InputObject @($items) -Depth 3 -Compress
+  exit 0
 }
-ConvertTo-Json -InputObject @($items) -Depth 3 -Compress
+'null'
 `,
     { KIROSCRIBE_UIA_PID: String(pid) },
   );
@@ -213,7 +216,7 @@ export function chooseMenuItem(name) {
   const out = trayScript(
     `
 foreach ($w in $AE::RootElement.FindAll($Scope::Children, $True_)) {
-  if ($w.Current.ClassName -ne '#32768') { continue }
+  if ($w.Current.ClassName -ne '#32768' -or $w.Current.IsOffscreen) { continue }
   $item = $w.FindFirst($Scope::Descendants, (Named $env:KIROSCRIBE_MENU_ITEM))
   if ($item -ne $null) { Click-Element $item $false; 'chosen'; exit 0 }
 }
