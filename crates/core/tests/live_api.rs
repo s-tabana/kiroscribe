@@ -137,10 +137,20 @@ mod federation {
                     panic!("GitHub に ID のトークンを発行してもらえません: {err}")
                 });
             let body = read(response, "GitHub の ID のトークンの発行").await;
-            body["value"]
+            let token = body["value"]
                 .as_str()
                 .expect("GitHub の応答に value がありません")
-                .to_string()
+                .to_string();
+            mask(&token);
+            token
+        }
+    }
+
+    /// GitHub Actions の中では、受け取ったトークンを実行記録で伏せ字にするよう伝える
+    /// （テストは `--nocapture` で走らせ、公開のリポジトリの実行記録はだれでも読めるため）
+    fn mask(token: &str) {
+        if std::env::var_os("GITHUB_ACTIONS").is_some() {
+            println!("::add-mask::{token}");
         }
     }
 
@@ -163,11 +173,13 @@ mod federation {
             .await
             .unwrap_or_else(|err| panic!("{what}に接続できません: {err}"));
         let body = read(response, what).await;
-        body["access_token"]
+        let token = body["access_token"]
             .as_str()
             .filter(|token| !token.is_empty())
             .unwrap_or_else(|| panic!("{what}の応答に access_token がありません"))
-            .to_string()
+            .to_string();
+        mask(&token);
+        token
     }
 
     /// Anthropic の連携の設定（Claude Console の「Workload identity」で作るルール）
