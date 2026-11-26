@@ -224,19 +224,47 @@ pub fn apply_settings(app: &AppHandle, settings: &Settings) {
     if let Some(item) = app.state::<BackgroundState>().tray_auto_item.lock().unwrap().as_ref() {
         let _ = item.set_checked(settings.auto_record_meetings);
     }
-    // 開発中の実行ファイルを自動起動に登録しないよう、リリースビルドだけで行う（E2E テスト用のビルドでも行わない）
-    #[cfg(all(not(debug_assertions), not(feature = "e2e")))]
+    if registers_autostart() {
+        if let Err(err) = set_launch_at_login(app, settings.launch_at_login) {
+            eprintln!("自動起動の設定を変更できませんでした: {err}");
+        }
+    }
+}
+
+/// 自動起動の登録の名前。アンインストーラ（NSIS）が消す名前（製品名）と同じにする。
+#[cfg(windows)]
+const AUTOSTART_NAME: &str = "Kiroscribe";
+
+/// Windows の起動時に起動するよう登録する（`enabled` が false なら解除する）。
+/// Windows では、利用者ごとの場所にだけ、引用符で囲んだパスで登録する（kiroscribe_core::autostart）。
+/// 自動起動のライブラリは、管理者として動いていると全ユーザー共通の場所に書いてしまうため使わない。
+fn set_launch_at_login(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let _ = app;
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        kiroscribe_core::autostart::set_enabled(AUTOSTART_NAME, &exe, &[AUTOSTART_ARG], enabled).map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
     {
         use tauri_plugin_autostart::ManagerExt;
         let autolaunch = app.autolaunch();
-        let result = if settings.launch_at_login {
-            autolaunch.enable()
-        } else {
-            autolaunch.disable()
-        };
-        if let Err(err) = result {
-            eprintln!("自動起動の設定を変更できませんでした: {err}");
-        }
+        let result = if enabled { autolaunch.enable() } else { autolaunch.disable() };
+        result.map_err(|e| e.to_string())
+    }
+}
+
+/// Windows の自動起動に登録するか。開発中の実行ファイルを登録しないよう、リリースビルドだけで行う。
+/// E2E テスト用のビルドは、作業フォルダの設定（`registerAutostart`）で求められたときだけ行う
+/// （インストールしたアプリで、登録と解除を確かめるテスト用）。
+fn registers_autostart() -> bool {
+    #[cfg(feature = "e2e")]
+    {
+        crate::e2e::register_autostart()
+    }
+    #[cfg(not(feature = "e2e"))]
+    {
+        !cfg!(debug_assertions)
     }
 }
 

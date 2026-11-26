@@ -66,6 +66,28 @@ function isAlive(pid) {
   }
 }
 
+/**
+ * 実行中のアプリが読むファイルを、書きかけの中身が見えないように書く（一時ファイルに書いてから名前を変える）。
+ * そのまま書くと、ファイルができてから中身を書き終えるまでのあいだに、アプリが空の中身を読むことがある。
+ * Windows では、アプリが読んでいる最中は名前を変えられないことがあるので、少し待って試し直す
+ */
+export function writeFileAtomic(file, text) {
+  const temp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temp, text);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.renameSync(temp, file);
+      return;
+    } catch (error) {
+      if (attempt >= 50 || !["EPERM", "EBUSY", "EACCES"].includes(error.code)) {
+        fs.rmSync(temp, { force: true });
+        throw error;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+}
+
 /** ファイル名に使えない文字を置き換える */
 function safeName(name) {
   return name.replace(/[^\p{L}\p{N}._-]+/gu, "_").slice(0, 80);
@@ -95,7 +117,7 @@ export class Workspace {
 
   /** 起動時に読まれる設定（config.json）を書く */
   configure(config) {
-    fs.writeFileSync(this.file("config.json"), JSON.stringify(config, null, 2));
+    writeFileAtomic(this.file("config.json"), JSON.stringify(config, null, 2));
   }
 
   /** API キーを保存済みの状態にする（設定画面を通さずに用意したいテスト用） */
@@ -109,7 +131,7 @@ export class Workspace {
 
   /** マイクを開けなかったことにする（message が理由の文）。null で元に戻す */
   setMicError(message) {
-    if (message) fs.writeFileSync(this.file("mic-error.txt"), message);
+    if (message) writeFileAtomic(this.file("mic-error.txt"), message);
     else fs.rmSync(this.file("mic-error.txt"), { force: true });
   }
 
@@ -138,13 +160,13 @@ export class Workspace {
 
   /** いま会議中として扱う会議アプリ（"googleMeet"・"slackHuddle"・"zoom"・"teams"・"discord"）。null で会議を終える */
   setMeeting(app) {
-    if (app) fs.writeFileSync(this.file("meeting.txt"), app);
+    if (app) writeFileAtomic(this.file("meeting.txt"), app);
     else fs.rmSync(this.file("meeting.txt"), { force: true });
   }
 
   /** 確認ダイアログ・保存ダイアログへの答えを決める（アプリが次にダイアログを出すときから有効） */
   answerDialogs({ confirm = false, savePath = null } = {}) {
-    fs.writeFileSync(this.file("dialogs.json"), JSON.stringify({ confirm, savePath }));
+    writeFileAtomic(this.file("dialogs.json"), JSON.stringify({ confirm, savePath }));
   }
 
   /** アプリが出そうとしたダイアログ（古い順） */
@@ -167,7 +189,7 @@ export class Workspace {
 
   /** 利用者がウィンドウの「×」を押したのと同じように、ウィンドウを閉じる */
   closeWindow(label) {
-    fs.writeFileSync(this.file("close-window.txt"), label);
+    writeFileAtomic(this.file("close-window.txt"), label);
   }
 
   /**
@@ -179,7 +201,7 @@ export class Workspace {
    */
   async resizeWindow(label, width, height) {
     fs.rmSync(this.file("window-size.json"), { force: true });
-    fs.writeFileSync(this.file("resize-window.txt"), `${label} ${width} ${height}`);
+    writeFileAtomic(this.file("resize-window.txt"), `${label} ${width} ${height}`);
     // アプリが、変えたあとの大きさ（ウィンドウそのものに問い合わせた値）を書くまで待つ
     const deadline = Date.now() + 15_000;
     for (;;) {
@@ -194,6 +216,23 @@ export class Workspace {
       if (Date.now() >= deadline) throw new Error(`アプリが、ウィンドウ ${label} の大きさを知らせてきません`);
       await sleep(100);
     }
+  }
+
+  /**
+   * アプリの起動の記録（古い順）。1 件は { version, pid, exe, args, mainShown, dirFromEnv }。
+   * アプリ内更新のあと、インストーラが起動し直したアプリ（WebDriver の外で動く）も記録する
+   */
+  launches() {
+    return (this.#read("launches.log") ?? "")
+      .split("\n")
+      .filter(Boolean)
+      .flatMap((line) => {
+        try {
+          return [JSON.parse(line)];
+        } catch {
+          return []; // アプリが書いている途中の行
+        }
+      });
   }
 
   /** 起動しているアプリのプロセス ID（まだ起動していなければ null） */
@@ -228,7 +267,7 @@ export class App {
   }
 
   /** tauri-driver を起動し、その下でアプリを起動する。環境変数は tauri-driver → ネイティブのドライバー → アプリへ引き継がれる */
-  static async launch(workspace, { index = 1, waitForMain = true, args: appArgs = [] } = {}) {
+  static async launch(workspace, { index = 1, waitForMain = true, args: appArgs = [], binary = appBinary() } = {}) {
     const [port, nativePort] = [await freePort(), await freePort()];
     const logFile = workspace.file(`app-${index}.log`);
     const log = fs.openSync(logFile, "a");
@@ -254,11 +293,11 @@ export class App {
     let session;
     try {
       await Promise.race([waitForServer(baseUrl), failed]);
-      session = await Promise.race([Session.create(baseUrl, { application: appBinary(), args: appArgs }), failed]);
+      session = await Promise.race([Session.create(baseUrl, { application: binary, args: appArgs }), failed]);
     } catch (err) {
       driver.kill();
       throw new Error(
-        `アプリを起動できませんでした: ${err.message}\n` +
+        `アプリ（${binary}）を起動できませんでした: ${err.message}\n` +
           `（Windows では、msedgedriver と WebView2 のバージョンが合っていないと、ここで止まることがあります）\n` +
           tail(logFile),
       );
@@ -441,7 +480,8 @@ export class Context {
 
   /**
    * アプリを起動して、メインウィンドウの WebDriver のセッションを返す。
-   * options: { args?: アプリに渡す引数（例: ["--autostart"]）, waitForMain?: false でメイン画面の表示を待たない }
+   * options: { args?: アプリに渡す引数（例: ["--autostart"]）, waitForMain?: false でメイン画面の表示を待たない,
+   *            binary?: 起動する実行ファイル（既定は appBinary()。インストールしたアプリを起動するときに指定する） }
    */
   async launch(options) {
     this.launches += 1;
@@ -465,9 +505,9 @@ export class Context {
    * 同じ作業フォルダ（＝同じデータ）で、アプリをもう 1 つ直接起動する。終了するまで待って、終了コードを返す。
    * 多重起動の防止が働けば、2 つ目はすぐに終了する。
    */
-  async launchSecondInstance({ timeout = 30_000, args = [] } = {}) {
+  async launchSecondInstance({ timeout = 30_000, args = [], binary = appBinary() } = {}) {
     const log = fs.openSync(this.work.file("second-instance.log"), "a");
-    const child = spawn(appBinary(), args, { env: appEnvironment(this.work), stdio: ["ignore", log, log] });
+    const child = spawn(binary, args, { env: appEnvironment(this.work), stdio: ["ignore", log, log] });
     fs.closeSync(log);
     const exited = new Promise((resolve, reject) => {
       child.once("error", reject);
@@ -556,15 +596,16 @@ export class Context {
 
 /**
  * E2E テストを 1 件定義する（node:test の test と同じ形で書ける）。
- * options: { config?: アプリの設定の上書き, apiKeys?: false | { openai, anthropic }, timeout?: ミリ秒 }
+ * options: { config?: アプリの設定の上書き, apiKeys?: false | { openai, anthropic }, timeout?: ミリ秒,
+ *            skip?: 飛ばす理由（文字列）。その環境では確かめられないテストに付ける }
  * fn にはテスト 1 件ぶんの道具（Context）が渡る。失敗したら、スクリーンショットとログを e2e/artifacts/ に残す。
  *
  * 仕様の ID を付けるときは、テストの名前の先頭に角かっこで書く（例: 「[NOTE-001] 起動するとメイン画面が出て…」）。
  */
 export function test(name, options, fn) {
   if (typeof options === "function") [options, fn] = [{}, options];
-  const { timeout = 180_000, ...contextOptions } = options;
-  nodeTest(name, { timeout }, async () => {
+  const { timeout = 180_000, skip = false, ...contextOptions } = options;
+  nodeTest(name, { timeout, skip }, async () => {
     const context = await Context.create(name, contextOptions);
     try {
       await fn(context);

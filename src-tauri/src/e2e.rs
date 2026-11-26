@@ -27,6 +27,7 @@ const PID_FILE: &str = "app.pid";
 const CLOSE_WINDOW_FILE: &str = "close-window.txt";
 const RESIZE_WINDOW_FILE: &str = "resize-window.txt";
 const WINDOW_SIZE_FILE: &str = "window-size.json";
+const LAUNCHES_FILE: &str = "launches.log";
 
 /// 作業フォルダごとに変えるアプリの識別子の先頭。製品の識別子（`dev.kiroscribe.desktop`）とは重ならない。
 const IDENTIFIER_PREFIX: &str = "dev.kiroscribe.e2e";
@@ -340,9 +341,10 @@ fn control_plugin<R: Runtime>() -> TauriPlugin<R> {
                 .name("kiroscribe-e2e-control".into())
                 .spawn(move || loop {
                     std::thread::sleep(Duration::from_millis(100));
+                    // テストは、書きかけが見えないように書く（一時ファイルから名前を変える）。
+                    // それでも空なら書いている途中とみなし、消さずに次の回で読み直す
                     let Some(path) = core::file(CLOSE_WINDOW_FILE) else { return };
-                    if let Ok(label) = std::fs::read_to_string(&path) {
-                        let _ = std::fs::remove_file(&path);
+                    if let Some(label) = read_request(&path) {
                         match app.get_webview_window(label.trim()) {
                             Some(window) => {
                                 if let Err(err) = window.close() {
@@ -353,8 +355,7 @@ fn control_plugin<R: Runtime>() -> TauriPlugin<R> {
                         }
                     }
                     let Some(path) = core::file(RESIZE_WINDOW_FILE) else { return };
-                    if let Ok(request) = std::fs::read_to_string(&path) {
-                        let _ = std::fs::remove_file(&path);
+                    if let Some(request) = read_request(&path) {
                         match parse_resize(&request) {
                             Some((label, width, height)) => match app.get_webview_window(label) {
                                 Some(window) => resize_and_report(&window, label, width, height),
@@ -367,6 +368,16 @@ fn control_plugin<R: Runtime>() -> TauriPlugin<R> {
             Ok(())
         })
         .build()
+}
+
+/// テストからの依頼のファイルを読んで消す。ない・空（書いている途中）なら `None` で、ファイルは残す。
+fn read_request(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    let _ = std::fs::remove_file(path);
+    Some(text)
 }
 
 /// ウィンドウの大きさを変えて、変えたあとの大きさを `window-size.json` と、ログに残す。
@@ -492,15 +503,32 @@ fn parse_resize(request: &str) -> Option<(&str, f64, f64)> {
 /// （同じ名前のプラグインは後から登録したほうが使われる。画面側のコードと権限の設定は製品のまま）。
 /// あわせて、テストからアプリを操作するための窓口を足す。
 pub fn plugins<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
-    builder
-        .plugin(dialog_plugin())
-        .plugin(clipboard_plugin())
-        .plugin(control_plugin())
+    // 同じ名前のプラグインは、あとから登録したほうに置き換わる。ダイアログを本当に出すときは、
+    // 製品のダイアログのプラグイン（tauri-plugin-dialog）を置き換えない（置き換えると、その準備が行われない）
+    let builder = if core::config().native_startup_dialog {
+        builder
+    } else {
+        builder.plugin(dialog_plugin())
+    };
+    builder.plugin(clipboard_plugin()).plugin(control_plugin())
 }
 
-/// 起動時の処理（`lib.rs` の setup）が終わったことを、ログに残す。
-pub fn log_setup_done(main_shown: bool) {
+/// 起動時の処理（`lib.rs` の setup）が終わったことを、ログと起動の記録（`launches.log`）に残す。
+/// 起動の記録は、アプリ内更新でインストーラが起動し直したアプリ（WebDriver の外で動く）の様子を、テストから確かめるために使う。
+pub fn log_setup_done(version: &str, main_shown: bool) {
     eprintln!("[e2e] 起動時の処理が終わりました（メインウィンドウ: {}）", if main_shown { "表示" } else { "非表示" });
+    append_line(LAUNCHES_FILE, &launch_record(version, main_shown).to_string());
+}
+
+fn launch_record(version: &str, main_shown: bool) -> Value {
+    json!({
+        "version": version,
+        "pid": std::process::id(),
+        "exe": std::env::current_exe().map(|path| path.display().to_string()).unwrap_or_default(),
+        "args": std::env::args().skip(1).collect::<Vec<_>>(),
+        "mainShown": main_shown,
+        "dirFromEnv": std::env::var_os(core::DIR_ENV).is_some_and(|dir| !dir.is_empty()),
+    })
 }
 
 /// 外部ブラウザは開かず、開こうとした URL を `opened-urls.log` に記録する。
@@ -540,6 +568,16 @@ fn simulated_tick(meeting: Option<kiroscribe_core::meetings::MeetingApp>, active
 }
 
 /// タスクトレイのアイコンを作れなかったことにするか。
+/// Windows の自動起動に本当に登録するか（`config.json` の `registerAutostart`）。
+pub fn register_autostart() -> bool {
+    core::config().register_autostart
+}
+
+/// 起動できなかったときのダイアログを本当に出すか（`config.json` の `nativeStartupDialog`）。
+pub fn native_startup_dialog() -> bool {
+    core::config().native_startup_dialog
+}
+
 pub fn tray_unavailable() -> bool {
     core::config().tray_unavailable
 }

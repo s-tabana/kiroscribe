@@ -676,6 +676,10 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       lastSaved = { fileName, markdown: toMarkdown(noteId, options).markdown };
       return fileName;
     },
+    async saveMeetingRecord(fileName) {
+      // プレビューには会議の検出がないので、記録は空
+      return { path: fileName, entries: 0 };
+    },
     get lastCopied() {
       return lastCopied;
     },

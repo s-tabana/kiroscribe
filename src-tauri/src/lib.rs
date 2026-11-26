@@ -79,7 +79,7 @@ pub fn run() {
                 background::show_main(&handle);
             }
             #[cfg(feature = "e2e")]
-            e2e::log_setup_done(show);
+            e2e::log_setup_done(&version, show);
             Ok(())
         })
         // メインウィンドウを閉じてもトレイに残す（会議の検出と録音を続けるため）
@@ -137,6 +137,7 @@ fn register_commands(builder: tauri::Builder<Runtime>) -> tauri::Builder<Runtime
             background::close_popup,
             background::open_note_from_popup,
             background::open_settings_from_popup,
+            meeting_watch::save_meeting_record,
             help::get_guide,
             help::get_release_notes,
             help::open_external,

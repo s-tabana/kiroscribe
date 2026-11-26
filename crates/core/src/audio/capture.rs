@@ -28,6 +28,27 @@ fn audio_error(context: &str, err: impl std::fmt::Display) -> CoreError {
     CoreError::Audio(format!("{context}: {err}"))
 }
 
+/// Windows のプライバシー設定で、マイクを使うことが許可されていないときの知らせ。
+pub const MSG_MIC_ACCESS_DENIED: &str = "マイクを使う許可がありません。Windows の「設定」→「プライバシーとセキュリティ」→「マイク」で、\
+「マイクへのアクセス」と「デスクトップ アプリがマイクにアクセスできるようにする」をオンにしてください";
+
+/// 音声デバイスのエラーが「アクセスが拒否された」（E_ACCESSDENIED。プライバシー設定でマイクが許可されていない）か。
+/// 文は Windows の言語で変わるので、番号（10 進・16 進）と、英語・日本語の文のどれかで見分ける
+pub fn is_access_denied(err: &str) -> bool {
+    ["-2147024891", "0x80070005", "0X80070005", "E_ACCESSDENIED", "Access is denied", "アクセスが拒否されました"]
+        .iter()
+        .any(|sign| err.contains(sign))
+}
+
+/// マイク（自分）を開けなかったときのエラー。プライバシー設定で許可されていないときは、どこを直せばよいかを知らせる。
+fn device_error(speaker: Speaker, context: &str, err: impl std::fmt::Display) -> CoreError {
+    let text = err.to_string();
+    if speaker == Speaker::Me && is_access_denied(&text) {
+        return CoreError::Audio(MSG_MIC_ACCESS_DENIED.into());
+    }
+    audio_error(context, text)
+}
+
 fn device_name(device: &cpal::Device) -> String {
     device
         .description()
@@ -131,10 +152,10 @@ fn open_device(
             )))
         }
     }
-    .map_err(|e| audio_error(&format!("{}の音声を開けません", speaker.label()), e))?;
+    .map_err(|e| device_error(speaker, &format!("{}の音声を開けません", speaker.label()), e))?;
     stream
         .play()
-        .map_err(|e| audio_error(&format!("{}の録音を開始できません", speaker.label()), e))?;
+        .map_err(|e| device_error(speaker, &format!("{}の録音を開始できません", speaker.label()), e))?;
     Ok((
         stream,
         OpenedSource {
@@ -163,7 +184,7 @@ fn open_microphone(
         .ok_or_else(|| CoreError::Audio("マイクが見つかりません。接続と Windows のプライバシー設定（マイクへのアクセス）を確認してください".into()))?;
     let config = device
         .default_input_config()
-        .map_err(|e| audio_error("マイクの設定を取得できません", e))?;
+        .map_err(|e| device_error(Speaker::Me, "マイクの設定を取得できません", e))?;
     open_device(&device, config, Speaker::Me, sink)
 }
 
@@ -240,4 +261,35 @@ fn open_with<G: 'static>(
         }
     }
     Ok((guards, sources))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Windows のプライバシー設定でマイクが許可されていないときは、英語の技術的な文ではなく、直す場所を知らせる。
+    // [REC-022]
+    #[test]
+    fn microphone_access_denied_is_explained() {
+        let english = "Failed to initialize audio client: Access is denied. (os error -2147024891)";
+        let japanese = "オーディオ クライアントを初期化できません: アクセスが拒否されました。 (os error -2147024891)";
+        let hex = "IAudioClient::Initialize failed: 0x80070005";
+        for err in [english, japanese, hex] {
+            assert!(is_access_denied(err), "{err}");
+            match device_error(Speaker::Me, "自分の音声を開けません", err) {
+                CoreError::Audio(message) => assert_eq!(message, MSG_MIC_ACCESS_DENIED),
+                other => panic!("{other:?}"),
+            }
+        }
+        // ほかのエラーは、そのまま理由を知らせる
+        match device_error(Speaker::Me, "自分の音声を開けません", "The requested device is no longer available.") {
+            CoreError::Audio(message) => assert_eq!(message, "自分の音声を開けません: The requested device is no longer available."),
+            other => panic!("{other:?}"),
+        }
+        // PC の音声（相手）の取り込みは、マイクの許可とは関係がないので、そのまま知らせる
+        match device_error(Speaker::Them, "相手の音声を開けません", english) {
+            CoreError::Audio(message) => assert!(message.starts_with("相手の音声を開けません: "), "{message}"),
+            other => panic!("{other:?}"),
+        }
+    }
 }

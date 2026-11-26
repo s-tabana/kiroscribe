@@ -92,6 +92,59 @@ cargo test -p kiroscribe --features e2e   # コマンドの層の結合テスト
 
 `npm run test:e2e` は、最初にアプリを 1 回起動して、WebDriver で操作できることを確かめます。できなければ、シナリオは動かさずに、原因を調べるための情報（道具のバージョン、プロセスの様子、ドライバーとアプリのログ）を標準エラーに出して終わります。データベースを直接書き換えるシナリオがあるので、Node.js は組み込みの SQLite（`node:sqlite`）を使える 22.13 以上が要ります。
 
+### インストールと更新の通しのテスト（Windows）
+
+利用者と同じインストーラ（NSIS）でアプリを入れ、アプリ内更新で新しい版（本物のインストーラ）に更新するまでを確かめるテストです（`e2e/installer/`。CI では `.github/workflows/installer-e2e.yml`、リリースの前にも走ります）。
+
+```bash
+npm run build:e2e:installer   # 古い版（0.0.1）と新しい版（0.0.2）のインストーラを作る（target/installer-e2e/。使い捨ての鍵で署名する）
+npm run test:e2e:installer    # 入れる → 更新する → 起動し直す → データが残っている → アンインストール、を確かめる
+```
+
+どちらのインストーラも E2E テスト用のビルドで、バージョンと、アプリに埋め込む公開鍵（使い捨ての鍵のもの）だけが違います。更新は模擬サーバーから配ります。インストーラが起動し直したアプリは WebDriver の外で動くので、アプリが作業フォルダに残す起動の記録（`launches.log`）で確かめます。インストーラは環境変数を引き継がないことがあるため、作業フォルダは起動の引数 `--kiroscribe-e2e-dir=<作業フォルダ>` でも渡しています。
+
+このテストは、PC の利用者の場所（`%LOCALAPPDATA%\Kiroscribe`）に本当にインストールし、最後にアンインストールします。Kiroscribe が入っている PC では、置き換えないよう、始める前に止まります（使い捨ての環境でだけ `-- --replace-installed` を付けます）。
+
+### OS の画面と本物のデバイスを使うテスト（Windows）
+
+WebDriver が届かないところは、次の方法で確かめます。どれも CI の Windows で走ります。
+
+- **OS の画面（UI オートメーション）**: 起動に失敗したときのダイアログ、タスクトレイのアイコンと右クリックのメニュー、ポップアップのドラッグは、Windows の UI オートメーションで画面の部品を読み、本物のマウスの操作で押します（`e2e/lib/uia.mjs`。Windows PowerShell 5.1 から呼ぶ）。
+- **本物の音声デバイス**: `e2e.yml` の「本物の音声デバイス」のジョブは、仮想のオーディオケーブル（VB-CABLE）を入れ、Windows のプライバシー設定でマイクを許可してから、`KIROSCRIBE_E2E_REAL_AUDIO=1` で `e2e/specs/14-real-audio.test.mjs`・`15-real-meeting.test.mjs` を走らせます。模擬の音声を切って（`config.json` の `audio` を `null`）、既定の出力に鳴らした音が、マイク（自分）と PC の音声（相手）として WASAPI から届くことを確かめます。デバイスを無効にして、抜いたときの知らせも確かめます。
+- **会議の検出**: `config.json` の `realMeetingDetection` で模擬をやめ、マイクを開いたまま待つだけのプログラム（`cargo build -p kiroscribe-core --example hold_mic`）を `Zoom.exe` などの名前に写して動かしたり、Edge で「Meet - …」の題のページにマイクを使わせたりして、Windows の記録から検出できることを確かめます。
+- **会議の検出の記録**: 設定の「会議の検出の記録を保存…」で書き出した記録に `description` と `expected` を書き足して `crates/core/tests/fixtures/meetings/` に置くと、回帰テストになります（同じフォルダの README.md）。
+
+### インターネットの先の本物を使うテスト
+
+- **ヘルプの取得元**: `KIROSCRIBE_LIVE_TESTS=1 cargo test -p kiroscribe-core --test live_github` で、本物の GitHub から使い方とリリースノートを読めることを確かめます（CI の `ci.yml` で毎回）。
+- **AI の API**: `cargo test -p kiroscribe-core --test live_api -- --nocapture` は、設定画面で選べるすべてのモデルに、アプリと同じ送り方でごく短い問い合わせを送ります（料金がかかります。1 回で数円）。手元では `KIROSCRIBE_LIVE_OPENAI_KEY`・`KIROSCRIBE_LIVE_ANTHROPIC_KEY` に API キーを入れて走らせます。CI では `live-api.yml` が、手動と週に 1 回（既定のブランチ `main` のファイルで）走らせます。資格情報は、次の「鍵なしでの設定」を勧めます（API キーを同じ名前の Secret に登録しても動きます。そのときは、テスト専用のキーに使える金額の上限を付けます）。どちらもないサービスは、確かめずに終わります。
+
+#### 本物の AI の API のテストを、鍵なしで動かす（ID の連携）
+
+GitHub Actions は、ジョブごとに「どのリポジトリの、どのワークフローの、どのブランチの実行か」を書いた ID のトークン（OIDC）を発行します。Anthropic と OpenAI は、このトークンを信頼する設定を作っておくと、短い期限（数分〜1 時間）のアクセストークンと交換してくれます（Workload Identity Federation）。保管する鍵がないので、漏れる鍵もありません。交換は `crates/core/tests/live_api.rs` がします。
+
+**Anthropic**（Claude Console の [Workload identity](https://platform.claude.com/settings/workload-identity-federation) の「Connect workload」→「GitHub Actions」。組織の管理者の権限が要ります）
+
+1. 発行元（federation issuer）: `https://token.actions.githubusercontent.com`（JWKS は discovery）。
+2. サービス アカウントを作り、テスト専用のワークスペース（使える金額の上限を付けたもの）のメンバーにします。
+3. ルール（federation rule）は、このワークフローだけに絞ります。
+   - `subject_prefix`: `repo:s-tabana/kiroscribe:ref:refs/heads/*`（フォークからのプルリクエストの実行は `…:pull_request` になるので一致しません）
+   - `audience`: `https://api.anthropic.com`
+   - `claims`: `repository_owner` が `s-tabana`
+   - `condition`: `claims.workflow_ref.startsWith("s-tabana/kiroscribe/.github/workflows/live-api.yml@") && claims.ref in ["refs/heads/main", "refs/heads/next"]`
+   - `oauth_scope`: `workspace:inference`（Messages だけ）、`token_lifetime_seconds`: `600`、ワークスペース: 2. のもの
+4. リポジトリの Secret に、ルールの ID（`fdrl_…`）を `KIROSCRIBE_LIVE_ANTHROPIC_FEDERATION_RULE_ID`、組織の ID（Console の Organization の画面）を `KIROSCRIBE_LIVE_ANTHROPIC_ORGANIZATION_ID` として登録します。ルールを複数のワークスペースに効かせたときだけ、`KIROSCRIBE_LIVE_ANTHROPIC_WORKSPACE_ID` も登録します。
+
+**OpenAI**（OpenAI の管理画面の Workload identity federation）
+
+1. ID プロバイダ（Workload Identity Provider）: 発行元 `https://token.actions.githubusercontent.com`、audience `https://api.openai.com/v1`（ほかの値にしたときは、Secret `KIROSCRIBE_LIVE_OPENAI_AUDIENCE` にも同じ値を登録します）。
+2. テスト専用のプロジェクト（使える金額の上限を付けたもの）のサービス アカウントに、上の Anthropic の 3. と同じ条件（リポジトリ `s-tabana/kiroscribe`、`workflow_ref` がこのワークフロー、ブランチが `main` か `next`）で対応付けます。
+3. リポジトリの Secret に、ID プロバイダの ID を `KIROSCRIBE_LIVE_OPENAI_IDENTITY_PROVIDER_ID`、サービス アカウントの ID を `KIROSCRIBE_LIVE_OPENAI_SERVICE_ACCOUNT_ID` として登録します。
+
+ID は鍵ではありませんが、公開のリポジトリの実行記録に出さないよう、Secret（伏せ字になる）に入れます。登録したら、Actions の「live-api」を手動で実行し、Summary に「ID の連携（鍵なし）で確かめる」と出て、テストが通ることを確かめます。交換が拒まれたときの理由は、Anthropic は Console の Workload identity の「History」に出ます。
+
+### 画面と本体の取り決め
+
 コマンドの引数・戻り値やイベントの内容を変えたときは、見本（`src/test/ipc-contract.generated.ts`）を `KIROSCRIBE_UPDATE_IPC_CONTRACT=1 cargo test -p kiroscribe --features e2e ipc_contract` で書き直し、`npm run typecheck` が通るよう画面側の型を合わせます。
 
 ## リリースの出し方
@@ -114,13 +167,13 @@ cargo test -p kiroscribe --features e2e   # コマンドの層の結合テスト
 
 3. **main に入れる。** CI が通ったことを確かめます。
 
-4. **実機で確かめる。** CI が保存したインストーラで、[リリース前の実機チェックリスト](release-checklist.md)の「A. 公開の前に確かめること」を行います（公開のあとに「B」を行います）。
+4. **実機で確かめる。** CI が保存したインストーラで、[リリース前の実機チェックリスト](release-checklist.md)の「A. 公開の前に確かめること」を行います。インストール・アプリ内の更新・アンインストールは CI のインストールと更新のテスト（installer-e2e）が、公開の直後の確認はリリースのワークフローが行うので、チェックリストにはありません。
 
 5. **リリースを始める。** 次のどちらかです。
    - タグを push する: `git tag v0.3.0 && git push origin v0.3.0`（タグは `v` + バージョン）
    - GitHub の **Actions → release → Run workflow** で main を選び、バージョン（例: `0.3.0`）を入力する
 
-バージョンの食い違い、CHANGELOG の節の不足、署名鍵の未設定、仕様とテストの対応の不足、テストの失敗があると、Release を作らずに失敗します。公開したあとで不具合が見つかったときは、同じバージョンを差し替えずに、次のバージョンを出します。`0.3.0-beta.1` のようにハイフンの付くバージョンはプレリリースになり、利用者のアプリには配られません。
+バージョンの食い違い、CHANGELOG の節の不足、署名鍵の未設定、仕様とテストの対応の不足、テストの失敗（インストールと更新の通しのテストを含む）があると、Release を作らずに失敗します。公開したあとで不具合が見つかったときは、同じバージョンを差し替えずに、次のバージョンを出します。`0.3.0-beta.1` のようにハイフンの付くバージョンはプレリリースになり、利用者のアプリには配られません。
 
 細かい動作は、ワークフローのファイルの中のコメントに書いてあります。
 

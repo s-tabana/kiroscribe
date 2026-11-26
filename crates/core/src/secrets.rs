@@ -473,6 +473,109 @@ mod tests {
         }
     }
 
+    /// 資格情報マネージャーの汎用資格情報を、keyring を通さずに Windows の API で直接読む。
+    /// なければ `None`。返すのは（保存の種類、ユーザー名、パスワード）。パスワードは UTF-16 で入っている。
+    #[cfg(windows)]
+    fn read_generic_credential(target: &str) -> Option<(u32, String, String)> {
+        use windows_sys::Win32::Security::Credentials::{
+            CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC,
+        };
+        fn wide_to_string(ptr: *const u16) -> String {
+            if ptr.is_null() {
+                return String::new();
+            }
+            let len = (0..).take_while(|&i| unsafe { *ptr.add(i) } != 0).count();
+            String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(ptr, len) })
+        }
+        let wide: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
+        let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
+        // SAFETY: wide は NUL で終わる文字列。成功したら credential は CredFree で返すまで有効
+        if unsafe { CredReadW(wide.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) } == 0 {
+            return None;
+        }
+        let read = unsafe {
+            let c = &*credential;
+            let blob = std::slice::from_raw_parts(c.CredentialBlob, c.CredentialBlobSize as usize);
+            let utf16: Vec<u16> = blob
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            (c.Persist, wide_to_string(c.UserName), String::from_utf16_lossy(&utf16))
+        };
+        unsafe { CredFree(credential as *const _) };
+        Some(read)
+    }
+
+    /// 利用者が「資格情報マネージャー → Windows 資格情報」で見るとおりの汎用資格情報
+    /// （インターネットやネットワークのアドレス「<アカウント>.<サービス>」）として保存され、
+    /// 別のストア（＝アプリを起動し直したとき）からも読め、削除すると消えることを、Windows の API で直接確かめる。
+    /// 本物のキーと衝突しないよう、サービス名だけテスト用にする（製品のサービス名は下のテストで確かめる）。
+    // [KEY-004]
+    #[cfg(windows)]
+    #[test]
+    fn keys_are_generic_credentials_in_the_credential_manager() {
+        use windows_sys::Win32::Security::Credentials::CRED_PERSIST_ENTERPRISE;
+
+        let service = format!("Kiroscribe-test-{}", uuid::Uuid::new_v4());
+        let store = CredentialManagerStore::with_service(&service).unwrap();
+        let openai = format!("openai-api-key.{service}");
+        let anthropic = format!("anthropic-api-key.{service}");
+        assert_eq!(read_generic_credential(&openai), None);
+
+        store.set(Provider::OpenAi, "sk-openai-テスト").unwrap();
+        store.set(Provider::Anthropic, "sk-ant-テスト").unwrap();
+        let cleanup = || {
+            let _ = store.delete(Provider::OpenAi);
+            let _ = store.delete(Provider::Anthropic);
+        };
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // サインインし直しても残る種類（エンタープライズ）で、アカウント名がユーザー名に入っている
+            assert_eq!(
+                read_generic_credential(&openai),
+                Some((CRED_PERSIST_ENTERPRISE, "openai-api-key".into(), "sk-openai-テスト".into()))
+            );
+            assert_eq!(
+                read_generic_credential(&anthropic),
+                Some((CRED_PERSIST_ENTERPRISE, "anthropic-api-key".into(), "sk-ant-テスト".into()))
+            );
+            // アプリを起動し直したのと同じく、新しく作ったストアからも読める
+            let reopened = CredentialManagerStore::with_service(&service).unwrap();
+            assert_eq!(reopened.get(Provider::OpenAi).unwrap().as_deref(), Some("sk-openai-テスト"));
+            assert_eq!(
+                api_key_status(&reopened).unwrap(),
+                ApiKeyStatus {
+                    openai: true,
+                    anthropic: true,
+                    storage: "Windows 資格情報マネージャー".into(),
+                }
+            );
+            // 削除すると、資格情報マネージャーからも消える
+            reopened.delete(Provider::OpenAi).unwrap();
+            assert_eq!(read_generic_credential(&openai), None);
+            assert!(read_generic_credential(&anthropic).is_some());
+        }));
+        cleanup();
+        if let Err(panic) = checked {
+            std::panic::resume_unwind(panic);
+        }
+        assert_eq!(read_generic_credential(&anthropic), None);
+    }
+
+    /// 製品のビルドは、Windows では資格情報マネージャーに「Kiroscribe」の名前で保存する
+    /// （ここでは読み書きしない。名前と保存先の表示だけを確かめる）。
+    // [KEY-004]
+    #[cfg(all(windows, not(feature = "e2e")))]
+    #[test]
+    fn the_product_stores_keys_in_the_credential_manager_as_kiroscribe() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = platform_store(dir.path()).unwrap();
+        assert_eq!(store.description(), "Windows 資格情報マネージャー");
+        assert_eq!(SERVICE_NAME, "Kiroscribe");
+        assert_eq!(Provider::OpenAi.account(), "openai-api-key");
+        assert_eq!(Provider::Anthropic.account(), "anthropic-api-key");
+        assert!(!dir.path().join("secrets.json").exists(), "キーのファイルを作った");
+    }
+
     /// 本物の資格情報マネージャーで、サービス名をまたぐ引き継ぎを確かめる（Windows の CI で実行される）。
     // [DAT-008]
     #[cfg(windows)]

@@ -1,0 +1,92 @@
+# 本物の API（OpenAI の文字起こし・Anthropic の Messages）で、アプリの送り方がいまも受け付けられるかを確かめる
+# （crates/core/tests/live_api.rs）。設定画面で選べるすべてのモデルに、ごく短い問い合わせを送る（1 回で数円）。
+#
+# 資格情報は、サービスごとに次のどちらか（両方あれば API キー）。どちらもなければ、そのサービスは確かめずに終わる
+# （その旨を Summary に出す）。手順は docs/development.md の「本物の API のテスト」。
+# - ID の連携（Workload Identity Federation。保管する鍵がないので、こちらを勧める）: このジョブが GitHub から
+#   受け取る ID のトークンを、各社の短い期限のアクセストークンに交換する。各社の管理画面で、このリポジトリの
+#   このワークフローだけを信頼する設定を作り、その ID を Secret に登録する
+#   Anthropic: KIROSCRIBE_LIVE_ANTHROPIC_FEDERATION_RULE_ID・KIROSCRIBE_LIVE_ANTHROPIC_ORGANIZATION_ID
+#              （ルールが複数のワークスペースに効くときは KIROSCRIBE_LIVE_ANTHROPIC_WORKSPACE_ID も）
+#   OpenAI:    KIROSCRIBE_LIVE_OPENAI_IDENTITY_PROVIDER_ID・KIROSCRIBE_LIVE_OPENAI_SERVICE_ACCOUNT_ID
+#   （ID は鍵ではないが、公開のリポジトリの実行記録に出さないよう、Secret に入れて伏せ字にする）
+# - API キー: Secret「KIROSCRIBE_LIVE_OPENAI_KEY」「KIROSCRIBE_LIVE_ANTHROPIC_KEY」。テスト専用のキーに、
+#   使える金額の上限を付けて登録する
+# フォークからのプルリクエストでは動かない（手動の実行と、週に 1 回だけ。週に 1 回の実行は、既定のブランチ main の
+# このファイルで動く）。
+name: live-api
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 毎週月曜 09:17（日本時間 18:17）。モデルの廃止などに、リリースの前に気づくため
+    - cron: "17 9 * * 1"
+
+concurrency:
+  group: live-api
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  live-api:
+    name: 本物の API
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # ID の連携: GitHub に、このジョブの ID のトークンを発行してもらう（リポジトリへの書き込みの権限ではない）
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: システムの依存関係
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev
+
+      # 依存関係のビルド（外部のコードが走る）は、資格情報を渡さずに済ませておく
+      - name: ビルド
+        run: cargo test -p kiroscribe-core --test live_api --locked --no-run
+
+      - name: 資格情報の確認
+        env:
+          OPENAI_KEY: ${{ secrets.KIROSCRIBE_LIVE_OPENAI_KEY }}
+          OPENAI_FEDERATION: ${{ secrets.KIROSCRIBE_LIVE_OPENAI_IDENTITY_PROVIDER_ID && secrets.KIROSCRIBE_LIVE_OPENAI_SERVICE_ACCOUNT_ID && 'yes' || '' }}
+          ANTHROPIC_KEY: ${{ secrets.KIROSCRIBE_LIVE_ANTHROPIC_KEY }}
+          ANTHROPIC_FEDERATION: ${{ secrets.KIROSCRIBE_LIVE_ANTHROPIC_FEDERATION_RULE_ID && secrets.KIROSCRIBE_LIVE_ANTHROPIC_ORGANIZATION_ID && 'yes' || '' }}
+        run: |
+          report() {
+            if [ -n "$2" ]; then
+              echo "- $1: API キーで確かめる" >> "$GITHUB_STEP_SUMMARY"
+            elif [ -n "$3" ]; then
+              echo "- $1: ID の連携（鍵なし）で確かめる" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::notice title=$1 の資格情報がありません::ID の連携の設定も API キーも Secret にないため、$1 の API は確かめません（docs/development.md）。"
+              echo "- $1: ID の連携の設定も API キーもないため、確かめていません" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          report OpenAI "$OPENAI_KEY" "$OPENAI_FEDERATION"
+          report Anthropic "$ANTHROPIC_KEY" "$ANTHROPIC_FEDERATION"
+
+      - name: 本物の API のテスト
+        env:
+          KIROSCRIBE_LIVE_OPENAI_KEY: ${{ secrets.KIROSCRIBE_LIVE_OPENAI_KEY }}
+          KIROSCRIBE_LIVE_OPENAI_IDENTITY_PROVIDER_ID: ${{ secrets.KIROSCRIBE_LIVE_OPENAI_IDENTITY_PROVIDER_ID }}
+          KIROSCRIBE_LIVE_OPENAI_SERVICE_ACCOUNT_ID: ${{ secrets.KIROSCRIBE_LIVE_OPENAI_SERVICE_ACCOUNT_ID }}
+          # 省略すると https://api.openai.com/v1（ID プロバイダの audience を別の値にしたときだけ登録する）
+          KIROSCRIBE_LIVE_OPENAI_AUDIENCE: ${{ secrets.KIROSCRIBE_LIVE_OPENAI_AUDIENCE }}
+          KIROSCRIBE_LIVE_ANTHROPIC_KEY: ${{ secrets.KIROSCRIBE_LIVE_ANTHROPIC_KEY }}
+          KIROSCRIBE_LIVE_ANTHROPIC_FEDERATION_RULE_ID: ${{ secrets.KIROSCRIBE_LIVE_ANTHROPIC_FEDERATION_RULE_ID }}
+          KIROSCRIBE_LIVE_ANTHROPIC_ORGANIZATION_ID: ${{ secrets.KIROSCRIBE_LIVE_ANTHROPIC_ORGANIZATION_ID }}
+          KIROSCRIBE_LIVE_ANTHROPIC_WORKSPACE_ID: ${{ secrets.KIROSCRIBE_LIVE_ANTHROPIC_WORKSPACE_ID }}
+        run: cargo test -p kiroscribe-core --test live_api --locked -- --nocapture

@@ -105,19 +105,38 @@ fn default_base_url() -> String {
     ANTHROPIC_BASE_URL.to_string()
 }
 
+/// API に送る資格情報
+enum Credential {
+    /// 利用者の API キー（`x-api-key` で送る）
+    ApiKey(String),
+    /// 短い期限のアクセストークン（`Authorization: Bearer` で送る）。
+    /// アプリでは使わない。本物の API のテスト（crates/core/tests/live_api.rs）が、CI の ID の連携
+    /// （Workload Identity Federation）で得たトークンで問い合わせるためのもの
+    AccessToken(String),
+}
+
 pub struct ClaudeClient {
     client: reqwest::Client,
     base_url: String,
-    api_key: String,
+    credential: Credential,
     model: String,
 }
 
 impl ClaudeClient {
     pub fn new(api_key: &str, model: &str) -> Self {
+        Self::with_credential(Credential::ApiKey(api_key.to_string()), model)
+    }
+
+    /// API キーの代わりに、短い期限のアクセストークンで問い合わせる（[`Credential::AccessToken`]）
+    pub fn with_access_token(access_token: &str, model: &str) -> Self {
+        Self::with_credential(Credential::AccessToken(access_token.to_string()), model)
+    }
+
+    fn with_credential(credential: Credential, model: &str) -> Self {
         Self {
             client: crate::http::client(),
             base_url: default_base_url(),
-            api_key: api_key.to_string(),
+            credential,
             model: model.to_string(),
         }
     }
@@ -158,10 +177,12 @@ impl ClaudeClient {
         on_text: &mut (dyn FnMut(&str) + Send),
         cancel: &AtomicBool,
     ) -> Result<StreamResult> {
-        let mut request = self
-            .client
-            .post(format!("{}/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
+        let request = self.client.post(format!("{}/messages", self.base_url));
+        let request = match &self.credential {
+            Credential::ApiKey(key) => request.header("x-api-key", key),
+            Credential::AccessToken(token) => request.bearer_auth(token),
+        };
+        let mut request = request
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
             .timeout(REQUEST_TIMEOUT)
@@ -361,6 +382,29 @@ mod tests {
         assert_eq!(result.stop_reason.as_deref(), Some("end_turn"));
         assert_eq!(result.model.as_deref(), Some("claude-opus-5-5"));
         assert!(!result.fell_back);
+    }
+
+    /// アクセストークン（本物の API のテストが、CI の ID の連携で得るもの）は `Authorization: Bearer` で送り、
+    /// `x-api-key` は付けない。ほかの送り方（本文・ヘッダー）は API キーのときと同じ
+    #[tokio::test]
+    async fn access_token_is_sent_as_bearer_instead_of_api_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .and(header("authorization", "Bearer sk-ant-oat01-test"))
+            .and(header("anthropic-version", ANTHROPIC_VERSION))
+            .and(header("anthropic-beta", FALLBACK_BETA))
+            .and(body_partial_json(json!({"model": "claude-opus-5-5", "stream": true})))
+            .respond_with(sse_response(text_stream(&["了解"], "end_turn")))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ClaudeClient::with_access_token("sk-ant-oat01-test", "claude-opus-5-5").with_base_url(&server.uri());
+        let result = client.stream(&request(), &mut |_| {}, &AtomicBool::new(false), &fast()).await.unwrap();
+        assert_eq!(result.text, "了解");
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests.iter().all(|r| !r.headers.contains_key("x-api-key")));
     }
 
     // [MIN-015]

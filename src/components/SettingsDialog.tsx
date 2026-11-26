@@ -425,7 +425,53 @@ function AboutSection({ autoUpdate, onAutoUpdateChange, onOpenHelp }: AboutSecti
           リリースノート
         </button>
       </p>
+
+      <MeetingRecordSave />
     </section>
+  );
+}
+
+/** 会議の検出の記録のファイル名（例: kiroscribe-meeting-record-20261123-1904.json） */
+export function meetingRecordFileName(now: Date): string {
+  const two = (n: number) => String(n).padStart(2, "0");
+  const date = `${now.getFullYear()}${two(now.getMonth() + 1)}${two(now.getDate())}`;
+  return `kiroscribe-meeting-record-${date}-${two(now.getHours())}${two(now.getMinutes())}.json`;
+}
+
+/** 会議の検出の記録を保存する（会議を自動で検出できなかったときに、原因を調べるため） */
+function MeetingRecordSave() {
+  const backend = useBackend();
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+
+  const save = async () => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const saved = await backend.saveMeetingRecord(meetingRecordFileName(new Date()));
+      if (saved) setMessage({ kind: "ok", text: `会議の検出の記録を保存しました（${saved.entries} 件）: ${saved.path}` });
+    } catch (err) {
+      setMessage({ kind: "error", text: errorMessage(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="about-record">
+      <button type="button" className="link-button" onClick={() => void save()} disabled={busy}>
+        会議の検出の記録を保存…
+      </button>
+      <small className="hint">
+        {"会議を自動で検出できなかったときに、原因を調べるための記録です。" +
+          "マイクを使ったアプリの名前と、マイクを使っているブラウザのタブの名前だけが入ります（録音やノートの内容は入りません）。"}
+      </small>
+      {message && (
+        <p className={message.kind === "ok" ? "ok-text" : "error-text"} role="status">
+          {message.text}
+        </p>
+      )}
+    </div>
   );
 }
 

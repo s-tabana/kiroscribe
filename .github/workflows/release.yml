@@ -41,8 +41,15 @@ env:
   SUMS_FILE: release-assets/SHA256SUMS.txt
 
 jobs:
+  # 本物のインストーラでの、インストールとアプリ内更新の通しのテスト（installer-e2e.yml と同じ内容）。
+  # 署名鍵は使わない（使い捨ての鍵で署名する）。これが通らなければ、下のビルドと公開は始まらない
+  installer-e2e:
+    name: インストールと更新のテスト
+    uses: ./.github/workflows/installer-e2e.yml
+
   release:
     name: Windows（署名付きインストーラ・リリース）
+    needs: installer-e2e
     runs-on: windows-latest
     # 署名鍵を使い、Release を公開するジョブ。Environment に承認者を設定すると、承認されるまで始まらない
     environment: release
@@ -215,6 +222,35 @@ jobs:
 
           echo "installer=$installer" >> "$GITHUB_OUTPUT"
 
+      # 利用者のアプリは、1 つ前のリリースに埋め込まれた公開鍵で更新の署名を確かめる。
+      # 鍵を作り直してしまった・取り違えた場合に、利用者が更新できなくなるのを公開の前に止める。
+      # 1 つ前のリリース（プレリリースを除く、このタグ以外で最も新しいもの）がなければ（最初のリリース）、確かめない
+      - name: 1 つ前のリリースの公開鍵での署名の確認
+        id: previous
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          INSTALLER: ${{ steps.assets.outputs.installer }}
+        run: |
+          previous="$(gh release list --exclude-drafts --exclude-pre-releases --limit 50 --json tagName \
+            --jq "[.[] | select(.tagName != \"$TAG\")][0].tagName // empty")"
+          if [ -z "$previous" ]; then
+            echo "::notice title=1 つ前のリリースがありません::最初のリリースなので、1 つ前の公開鍵での確認は行いません。"
+            exit 0
+          fi
+          config="release-assets/previous-tauri.conf.json"
+          gh api -H "Accept: application/vnd.github.raw+json" \
+            "repos/$GH_REPO/contents/src-tauri/tauri.conf.json?ref=$previous" > "$config"
+          if ! node scripts/verify-update-signature.mjs \
+            --file "$INSTALLER" --signature "$INSTALLER.sig" --config "$config"; then
+            echo "::error title=1 つ前のリリースの公開鍵で検証できません::$previous を使っている利用者は、この更新の署名を確かめられず、更新できません。署名鍵（Secret の TAURI_SIGNING_PRIVATE_KEY）が、$previous の tauri.conf.json の公開鍵と対になっているか確かめてください。"
+            exit 1
+          fi
+          echo "1 つ前のリリース: $previous"
+          echo "config=$config" >> "$GITHUB_OUTPUT"
+
       # ダウンロードしたインストーラが、ここでビルドしたものと同じかを利用者が確かめられるようにする。
       # リリース本文はアプリの「リリースノート」にも表示されるので、本文には書かず、添付ファイルにする。
       # 形式は「<SHA-256>  <ファイル名>」（sha256sum -c で照合できる）
@@ -285,3 +321,37 @@ jobs:
           url="$(gh release view "$tag" --json url --jq .url)"
           echo "公開しました: $url"
           printf '\n---\n公開したリリース: %s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
+
+      # 公開したリリースを、利用者のアプリと同じ道筋（利用者のアプリが見る latest.json → インストーラ → 署名）で確かめる。
+      # 確かめられなければ、リリースをプレリリースに戻して、利用者のアプリに配られないようにしてから失敗にする
+      # （プレリリースは「最新のリリース」にならないので、利用者のアプリは 1 つ前のリリースを最新として扱う）
+      - name: 公開したリリースの確認
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          INSTALLER: ${{ steps.assets.outputs.installer }}
+          PREVIOUS_CONFIG: ${{ steps.previous.outputs.config }}
+        run: |
+          args=(--repo "$GH_REPO" --version "$VERSION" --installer "$INSTALLER" --sums "$SUMS_FILE" \
+            --config src-tauri/tauri.conf.json)
+          if [ -n "$PREVIOUS_CONFIG" ]; then
+            args+=(--previous-config "$PREVIOUS_CONFIG")
+          fi
+          case "$VERSION" in
+            *-*) args+=(--prerelease) ;;
+          esac
+          ok=true
+          node scripts/verify-published-release.mjs "${args[@]}" || ok=false
+          # ビルドの来歴の証明（attestation）が、公開したインストーラに対して確かめられること
+          if [ "$ok" = true ]; then
+            gh attestation verify "$INSTALLER" --repo "$GH_REPO" || ok=false
+          fi
+          if [ "$ok" != true ]; then
+            echo "::error title=公開したリリースを確かめられませんでした::利用者のアプリに配られないよう、$TAG をプレリリースに戻します。上のログで原因を確かめ、直してから、このワークフローを実行し直してください。"
+            gh release edit "$TAG" --prerelease
+            exit 1
+          fi
+          printf '\n---\n公開したリリースを、利用者のアプリと同じ道筋で確かめました。\n' >> "$GITHUB_STEP_SUMMARY"
