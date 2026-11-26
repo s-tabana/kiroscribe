@@ -41,34 +41,23 @@ env:
   SUMS_FILE: release-assets/SHA256SUMS.txt
 
 jobs:
-  # 本物のインストーラでの、インストールとアプリ内更新の通しのテスト（installer-e2e.yml と同じ内容）。
-  # 署名鍵は使わない（使い捨ての鍵で署名する）。これが通らなければ、下のビルドと公開は始まらない
-  installer-e2e:
-    name: インストールと更新のテスト
-    uses: ./.github/workflows/installer-e2e.yml
-
-  release:
-    name: Windows（署名付きインストーラ・リリース）
-    needs: installer-e2e
-    runs-on: windows-latest
-    # 署名鍵を使い、Release を公開するジョブ。Environment に承認者を設定すると、承認されるまで始まらない
-    environment: release
-    permissions:
-      contents: write # Release の作成と、ファイルの添付
-      id-token: write # ビルドの来歴の証明（attestation）に署名するための、短時間だけ有効な証明書の取得
-      attestations: write # 証明をこのリポジトリに登録する
+  # タグ・バージョン・CHANGELOG の確認。版番号の誤りや CHANGELOG の書き忘れのように数秒で分かる間違いは、
+  # 時間のかかるテスト（installer-e2e。約 30 分）の前に止める。署名鍵は使わない
+  preflight:
+    name: タグ・バージョン・CHANGELOG の確認
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
     steps:
-      # persist-credentials: false … トークンを .git/config に残さない（後のステップで動く依存関係のコードから読めないようにする）
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      # スクリプトは Node.js の標準の機能だけを使うので、依存関係のインストールは要らない
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-          cache: npm
-
-      # ---- ビルドは時間がかかるので、すぐ分かる間違いは先に止める ----
 
       # タグの push ならそのタグ、手動の実行なら入力したバージョンから「v0.2.0」の形のタグ名を決める
       - name: リリースするタグの決定
@@ -126,6 +115,43 @@ jobs:
         run: |
           node scripts/release-notes.mjs --version "$VERSION" --output "$NOTES_FILE"
           cat "$NOTES_FILE" >> "$GITHUB_STEP_SUMMARY"
+
+  # 本物のインストーラでの、インストールとアプリ内更新の通しのテスト（installer-e2e.yml と同じ内容）。
+  # 署名鍵は使わない（使い捨ての鍵で署名する）。これが通らなければ、下のビルドと公開は始まらない
+  installer-e2e:
+    name: インストールと更新のテスト
+    needs: preflight
+    uses: ./.github/workflows/installer-e2e.yml
+
+  release:
+    name: Windows（署名付きインストーラ・リリース）
+    needs: [preflight, installer-e2e]
+    runs-on: windows-latest
+    # 署名鍵を使い、Release を公開するジョブ。Environment に承認者を設定すると、承認されるまで始まらない
+    environment: release
+    permissions:
+      contents: write # Release の作成と、ファイルの添付
+      id-token: write # ビルドの来歴の証明（attestation）に署名するための、短時間だけ有効な証明書の取得
+      attestations: write # 証明をこのリポジトリに登録する
+    steps:
+      # persist-credentials: false … トークンを .git/config に残さない（後のステップで動く依存関係のコードから読めないようにする）
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      # ---- 時間のかかるビルドの前に、すぐ分かる間違いを止める ----
+
+      # 本文に使う。CHANGELOG.md の節があることは、preflight のジョブで確かめてある
+      - name: リリースノートを CHANGELOG.md から取り出す
+        shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: node scripts/release-notes.mjs --version "$VERSION" --output "$NOTES_FILE"
 
       - name: 署名鍵の Secret の確認
         shell: bash
@@ -193,7 +219,7 @@ jobs:
         id: assets
         shell: bash
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           # ファイル名は「<tauri.conf.json の productName>_<バージョン>_x64-setup.exe」
           name="Kiroscribe_${VERSION}_x64-setup.exe"
@@ -231,7 +257,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.preflight.outputs.tag }}
           INSTALLER: ${{ steps.assets.outputs.installer }}
         run: |
           previous="$(gh release list --exclude-drafts --exclude-pre-releases --limit 50 --json tagName \
@@ -283,8 +309,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }} # checkout でトークンを残していないので、対象のリポジトリを明示する
-          TAG: ${{ steps.tag.outputs.tag }}
-          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
           INSTALLER: ${{ steps.assets.outputs.installer }}
         run: |
           tag="$TAG"
@@ -302,8 +328,14 @@ jobs:
             # latest.json は、指している先のインストーラを置き換えたあとで置き換える
             gh release upload "$tag" "$INSTALLER" "$INSTALLER.sig" "$SUMS_FILE" --clobber
             gh release upload "$tag" "$LATEST_JSON" --clobber
+            # 確認に失敗してプレリリースに戻したリリースを実行し直すときは、「最新のリリース」にも戻す
+            # （--prerelease=false だけでは、より新しい日付の別のリリースが「最新」のまま残ることがある）
+            latest_option=()
+            if [ "$prerelease" = false ]; then
+              latest_option=(--latest)
+            fi
             gh release edit "$tag" --title "$title" --notes-file "$NOTES_FILE" \
-              --draft=false --prerelease="$prerelease"
+              --draft=false --prerelease="$prerelease" "${latest_option[@]}"
           else
             # タグの push で始まったときは、そのタグがあることを確かめる。
             # 手動の実行では、いまビルドしたコミットにタグを付けて公開する
@@ -330,8 +362,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ steps.tag.outputs.tag }}
-          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
           INSTALLER: ${{ steps.assets.outputs.installer }}
           PREVIOUS_CONFIG: ${{ steps.previous.outputs.config }}
         run: |
@@ -346,8 +378,20 @@ jobs:
           ok=true
           node scripts/verify-published-release.mjs "${args[@]}" || ok=false
           # ビルドの来歴の証明（attestation）が、公開したインストーラに対して確かめられること
+          # 一時的な通信のエラーでプレリリースに戻さないよう、間を空けて 3 回まで試す
           if [ "$ok" = true ]; then
-            gh attestation verify "$INSTALLER" --repo "$GH_REPO" || ok=false
+            verified=false
+            for attempt in 1 2 3; do
+              if gh attestation verify "$INSTALLER" --repo "$GH_REPO"; then
+                verified=true
+                break
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                echo "ビルドの来歴の証明を確かめられませんでした（${attempt} 回目）。30 秒後に確かめ直します"
+                sleep 30
+              fi
+            done
+            [ "$verified" = true ] || ok=false
           fi
           if [ "$ok" != true ]; then
             echo "::error title=公開したリリースを確かめられませんでした::利用者のアプリに配られないよう、$TAG をプレリリースに戻します。上のログで原因を確かめ、直してから、このワークフローを実行し直してください。"
