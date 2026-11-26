@@ -184,7 +184,7 @@ test("[REC-022] Windows のプライバシー設定でマイクが許可され�
     await sleep(1_000);
     await pressBarButton(session, "録音を開始");
     const shown = await toastText(session, "マイクを使う許可がありません");
-    assert.ok(shown.includes("プライバシーとセキュリティ"), shown);
+    assert.ok(shown.includes("プライバシーとセキュリティ") && shown.includes("Windows 10 では「プライバシー」"), shown);
     assert.ok(!/access is denied|os error/i.test(shown), `Windows の技術的な文が出ている: ${shown}`);
     assert.equal(await session.exists(`${sel.noteItems} [aria-label="録音中"]`), false, "許可がないのに、録音中になった");
   } finally {

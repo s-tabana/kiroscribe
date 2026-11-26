@@ -25,11 +25,14 @@ tokio.workspace = true
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
-tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tauri-plugin-updater = "2"
 tauri-plugin-opener = "2"
+
+# 起動時に起動する登録は、Windows では自前で行う（background.rs）。ほかの OS でだけ、このライブラリを使う
+[target.'cfg(not(windows))'.dependencies]
+tauri-plugin-autostart = "2"
 
 [dev-dependencies]
 # コマンドを模擬のランタイムで呼ぶテスト（src/ipc_tests.rs）用: tauri::test と、外部の API の模擬サーバー
