@@ -87,6 +87,11 @@ struct ActiveRecording {
 }
 
 impl ActiveRecording {
+    /// `note_id` の録音で、止める時刻が `deadline` の確認を、いま出しているか。
+    fn asks(&self, note_id: &str, deadline: i64) -> bool {
+        self.note_id == note_id && self.check.deadline() == Some(deadline)
+    }
+
     /// 一時停止していた時間を除いた録音の時間。
     fn elapsed_ms(&self, now_ms: i64) -> i64 {
         self.elapsed_before_ms + self.running_since.map_or(0, |since| (now_ms - since).max(0))
@@ -123,6 +128,14 @@ pub struct CheckStep {
     pub deadline: Option<i64>,
 }
 
+/// 確認への答えを受け付けた結果（[`RecorderState::keep`]・[`RecorderState::take_for_answer`]）。
+pub enum Answer<T> {
+    /// その確認を出している録音に、答えを当てはめた
+    Applied(T),
+    /// その確認はもう有効でない。`note_busy` は、そのノートがいまも録音中・仕上げ中か
+    Stale { note_busy: bool },
+}
+
 impl RecorderState {
     /// 録音中（または仕上げ中）のノート ID。
     pub async fn busy_note_id(&self) -> Option<String> {
@@ -132,8 +145,15 @@ impl RecorderState {
         self.finishing.lock().unwrap().clone()
     }
 
-    /// 長い録音で、会議が続いているかを確かめる（数秒ごとに呼ぶ）。確認を出す・止める・取り下げるときだけ返す。
-    pub async fn check(&self, meeting_detected: bool, now_ms: i64) -> Option<CheckStep> {
+    /// 長い録音で、会議が続いているかを確かめる（数秒ごとに呼ぶ）。確認を出す・止める・取り下げるときだけ、
+    /// 録音のロックを持ったまま `on_step` を呼ぶ（その間に、録音が止まったり、答えが届いたりしないように）。
+    /// 止めるときは、同じロックの中で録音を取り出して返す（仕上げは [`finish_stop`] で行う）。
+    pub(crate) async fn check(
+        &self,
+        meeting_detected: bool,
+        now_ms: i64,
+        on_step: impl FnOnce(&CheckStep),
+    ) -> Option<(CheckStep, Option<TakenRecording>)> {
         let mut active = self.active.lock().await;
         let recording = active.as_mut()?;
         let signals = Signals {
@@ -143,21 +163,63 @@ impl RecorderState {
             quiet_ms: now_ms - recording.last_speech.load(Ordering::SeqCst),
         };
         let action = recording.check.tick(&signals, now_ms)?;
-        Some(CheckStep {
+        let step = CheckStep {
             note_id: recording.note_id.clone(),
             auto: recording.auto,
             action,
             deadline: recording.check.deadline(),
-        })
+        };
+        let taken = matches!(action, CheckAction::Stop(_)).then(|| self.take(&mut active)).flatten();
+        on_step(&step);
+        Some((step, taken))
     }
 
-    /// 確認に「続ける」と答えた。そのノートを録音していなければ `None`。
-    pub async fn keep(&self, note_id: &str, now_ms: i64) -> Option<Option<MeetingApp>> {
+    /// 確認に「続ける」と答えた。`deadline` は、答えた確認の、止める時刻（どの確認への答えかを表す）。
+    /// その確認をいま出している録音なら、30 分後まで確かめないようにし、録音のロックを持ったまま `on_kept` を呼ぶ。
+    pub(crate) async fn keep(
+        &self,
+        note_id: &str,
+        deadline: i64,
+        now_ms: i64,
+        on_kept: impl FnOnce(Option<MeetingApp>),
+    ) -> Answer<()> {
         let mut active = self.active.lock().await;
-        let recording = active.as_mut().filter(|recording| recording.note_id == note_id)?;
-        let elapsed = recording.elapsed_ms(now_ms);
-        recording.check.keep(elapsed);
-        Some(recording.auto)
+        match active.as_mut().filter(|recording| recording.asks(note_id, deadline)) {
+            Some(recording) => {
+                let elapsed = recording.elapsed_ms(now_ms);
+                recording.check.keep(elapsed);
+                on_kept(recording.auto);
+                Answer::Applied(())
+            }
+            None => Answer::Stale {
+                note_busy: self.busy_with(&active, note_id),
+            },
+        }
+    }
+
+    /// 確認に「止める」と答えた。その確認をいま出している録音なら、取り出して返す（仕上げは [`finish_stop`] で行う）。
+    pub(crate) async fn take_for_answer(&self, note_id: &str, deadline: i64) -> Answer<TakenRecording> {
+        let mut active = self.active.lock().await;
+        if active.as_ref().is_some_and(|recording| recording.asks(note_id, deadline)) {
+            if let Some(taken) = self.take(&mut active) {
+                return Answer::Applied(taken);
+            }
+        }
+        Answer::Stale {
+            note_busy: self.busy_with(&active, note_id),
+        }
+    }
+
+    /// 録音を取り出し、仕上げ中にする（録音のロックを持ったまま呼ぶ。録音中でも仕上げ中でもない間ができないように）。
+    fn take(&self, active: &mut Option<ActiveRecording>) -> Option<TakenRecording> {
+        let recording = active.take()?;
+        *self.finishing.lock().unwrap() = Some(recording.note_id.clone());
+        Some(TakenRecording(recording))
+    }
+
+    fn busy_with(&self, active: &Option<ActiveRecording>, note_id: &str) -> bool {
+        active.as_ref().is_some_and(|recording| recording.note_id == note_id)
+            || self.finishing.lock().unwrap().as_deref() == Some(note_id)
     }
 
     /// 録音を `ms` だけ前に始めたことにする（長い録音を確かめるテスト用。話した時刻は動かさない）。
@@ -165,6 +227,14 @@ impl RecorderState {
     pub async fn backdate(&self, ms: i64) {
         if let Some(recording) = self.active.lock().await.as_mut() {
             recording.elapsed_before_ms += ms;
+        }
+    }
+
+    /// 最後に話した時刻を `at_ms` にする（長い録音を確かめるテスト用。先の時刻なら、話し声が戻ったことになる）。
+    #[cfg(test)]
+    pub async fn set_last_speech(&self, at_ms: i64) {
+        if let Some(recording) = self.active.lock().await.as_ref() {
+            recording.last_speech.store(at_ms, Ordering::SeqCst);
         }
     }
 
@@ -240,15 +310,17 @@ impl RecorderSink for TauriSink {
             let Some(stopped) = stop_active(&app, Some(&note_id)).await else {
                 return;
             };
-            // 自動で始めた録音なら、ポップアップでも知らせる（メインウィンドウを閉じていても分かるように）
-            if let Some(meeting) = stopped.auto {
-                show_popup(
+            match stopped.auto {
+                // 自動で始めた録音なら、ポップアップでも知らせる（メインウィンドウを閉じていても分かるように）
+                Some(meeting) => show_popup(
                     &app,
                     PopupPayload::Error {
                         app: meeting.label().into(),
                         message,
                     },
-                );
+                ),
+                // 手動の録音で、会議が終わったかの確認を出していたら、停止の表示にする（答えられない確認を残さない）
+                None => popup_recording_stopped(&app, &stopped.note_id),
             }
         });
     }
@@ -392,22 +464,31 @@ pub struct Stopped {
     pub auto: Option<MeetingApp>,
 }
 
+/// 止めるために取り出した録音（録音のロックの中で取り出し、仕上げ中にしてある）。
+pub(crate) struct TakenRecording(ActiveRecording);
+
 /// 録音を止め、残りの文字起こしが終わるまで待つ。録音していなければ `None`。
 /// `only_note` を渡したときは、そのノートの録音だけを止める（その間に始まった別のノートの録音には触れない）。
 pub async fn stop_active(app: &AppHandle, only_note: Option<&str>) -> Option<Stopped> {
     let recorder = app.state::<RecorderState>();
-    let recording = {
+    let taken = {
         let mut active = recorder.active.lock().await;
         let matches = active
             .as_ref()
             .is_some_and(|current| only_note.is_none_or(|note_id| note_id == current.note_id));
         if matches {
-            active.take()
+            recorder.take(&mut active)
         } else {
             None
         }
     }?;
-    *recorder.finishing.lock().unwrap() = Some(recording.note_id.clone());
+    Some(finish_stop(app, taken).await)
+}
+
+/// 取り出した録音を止め、残りの文字起こしが終わるまで待つ。
+pub(crate) async fn finish_stop(app: &AppHandle, taken: TakenRecording) -> Stopped {
+    let recorder = app.state::<RecorderState>();
+    let TakenRecording(recording) = taken;
     emit_status(app, &recorder.status().await);
 
     let stopped = Stopped {
@@ -418,7 +499,7 @@ pub async fn stop_active(app: &AppHandle, only_note: Option<&str>) -> Option<Sto
 
     *recorder.finishing.lock().unwrap() = None;
     emit_status(app, &recorder.status().await);
-    Some(stopped)
+    stopped
 }
 
 /// 録音を止め、残りの文字起こしが終わるまで待ってから、いまの状態を返す。

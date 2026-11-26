@@ -23,8 +23,8 @@ type Emitted<K extends Method> = Backend[K] extends (cb: (payload: infer T) => v
 
 export const called = {
   answerRecordingCheck: [
-    ["…",true],
-    ["…",false],
+    ["…",0,true],
+    ["…",0,false],
   ] satisfies Called<"answerRecordingCheck">[],
   cancelAi: [
     ["…","enhance"],

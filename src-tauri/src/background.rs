@@ -75,6 +75,8 @@ pub struct BackgroundState {
     tray_stop_item: Mutex<Option<MenuItem<Runtime>>>,
     /// 出した Windows の通知の文（テストで確かめる）
     notices: Mutex<Vec<String>>,
+    /// トレイの「録音を停止」を選べるようにしているか（トレイを作れない環境とテストでも、録音の状態に合わせて持つ）
+    tray_stop_enabled: AtomicBool,
     quitting: AtomicBool,
 }
 
@@ -87,6 +89,12 @@ impl BackgroundState {
     #[cfg(test)]
     pub fn notices(&self) -> Vec<String> {
         self.notices.lock().unwrap().clone()
+    }
+
+    /// トレイの「録音を停止」を選べるようにしているか。
+    #[cfg(test)]
+    pub fn tray_stop_enabled(&self) -> bool {
+        self.tray_stop_enabled.load(Ordering::SeqCst)
     }
 }
 
@@ -107,9 +115,11 @@ pub fn recording_changed(app: &AppHandle, state: RecordingState) {
     let Some(background) = app.try_state::<BackgroundState>() else {
         return;
     };
+    let enabled = can_stop_from_tray(state);
+    background.tray_stop_enabled.store(enabled, Ordering::SeqCst);
     let item = background.tray_stop_item.lock().unwrap().clone();
     if let Some(item) = item {
-        let _ = item.set_enabled(can_stop_from_tray(state));
+        let _ = item.set_enabled(enabled);
     }
 }
 
@@ -134,11 +144,17 @@ pub fn main_window_visible(app: &AppHandle) -> bool {
 
 /// ポップアップを表示する（既にあれば内容を差し替える）。会議中の画面からフォーカスを奪わないよう、作るときに focus しない。
 pub fn show_popup(app: &AppHandle, payload: PopupPayload) {
-    let background = app.state::<BackgroundState>();
-    *background.popup.lock().unwrap() = Some(payload.clone());
+    *app.state::<BackgroundState>().popup.lock().unwrap() = Some(payload.clone());
+    present_popup(app, payload, true);
+}
 
+/// ポップアップの内容を画面に送る。ウィンドウがなければ、`open` のときだけ作る。
+fn present_popup(app: &AppHandle, payload: PopupPayload, open: bool) {
     if app.get_webview_window(POPUP_LABEL).is_some() {
         let _ = app.emit_to(POPUP_LABEL, EVENT_POPUP, payload);
+        return;
+    }
+    if !open {
         return;
     }
 
@@ -194,71 +210,78 @@ fn popup_position(monitor_position: &PhysicalPosition<i32>, monitor_size: &Physi
     )
 }
 
+/// ポップアップに出すノートのタイトル（空なら「無題のノート」）。ノートがなければ `None`。
+pub fn popup_note_title(app: &AppHandle, note_id: &str) -> Option<String> {
+    let title = app.state::<AppState>().db().get_note(note_id).ok()?.title;
+    Some(display_title(&title))
+}
+
+fn display_title(title: &str) -> String {
+    match title.trim() {
+        "" => UNTITLED.to_string(),
+        title => title.to_string(),
+    }
+}
+
+/// タイトルが空のノートの呼び名（画面の notes.ts の UNTITLED と同じ）。
+const UNTITLED: &str = "無題のノート";
+
+/// ポップアップがいま出している内容を、`replace` が返すものに入れ替える（`None` を返したら、そのまま）。
+/// 確かめてから入れ替えるまでの間に、ほかの知らせが割り込まないよう、1 回のロックで行う。
+/// 入れ替えたら、その内容を返す（`Some(None)` は、ポップアップを閉じる）。
+fn replace_popup(
+    app: &AppHandle,
+    replace: impl FnOnce(&PopupPayload) -> Option<Option<PopupPayload>>,
+) -> Option<Option<PopupPayload>> {
+    let background = app.state::<BackgroundState>();
+    let mut popup = background.popup.lock().unwrap();
+    let next = replace(popup.as_ref()?)?;
+    *popup = next.clone();
+    Some(next)
+}
+
 /// 自動で始めた録音が、会議の終了を待たずに止まった（利用者がメインウィンドウで止めた）ときに、
 /// ポップアップを停止の表示に変える。録音中の表示のまま残さない
 /// （残ると、その「停止」が、あとから始めた別の録音を止めてしまう）。
 pub fn popup_recording_stopped(app: &AppHandle, note_id: &str) {
-    let background = app.state::<BackgroundState>();
-    let shown = background.popup.lock().unwrap().clone();
-    let Some((label, shown_id, title)) = shown
-        .as_ref()
-        .and_then(PopupPayload::live_recording)
-        .map(|(label, id, title)| (label.to_string(), id.to_string(), title.to_string()))
-    else {
-        return;
-    };
-    if shown_id != note_id {
-        return;
-    }
     // 録音のあいだにタイトルを直していたら、いまのタイトルを出す
-    let title = app
-        .state::<AppState>()
-        .db()
-        .get_note(note_id)
-        .map(|note| note.title)
-        .unwrap_or(title);
-    let payload = PopupPayload::Stopped {
-        app: label,
-        note_id: shown_id,
-        title,
-    };
-    if app.get_webview_window(POPUP_LABEL).is_some() {
-        show_popup(app, payload);
-    } else {
-        // 利用者がポップアップを閉じていたら、出し直さない（自分で止めたことは分かっている）
-        *background.popup.lock().unwrap() = Some(payload);
+    let current_title = popup_note_title(app, note_id);
+    let replaced = replace_popup(app, |shown| {
+        let (label, shown_id, title) = shown.live_recording()?;
+        (shown_id == note_id).then(|| {
+            Some(PopupPayload::Stopped {
+                app: label.to_string(),
+                note_id: shown_id.to_string(),
+                title: current_title.unwrap_or_else(|| display_title(title)),
+            })
+        })
+    });
+    // 利用者がポップアップを閉じていたら、出し直さない（自分で止めたことは分かっている）
+    if let Some(Some(payload)) = replaced {
+        present_popup(app, payload, false);
     }
 }
 
 /// ポップアップが `note_id` の録音についての確認を出していたら、取り下げる。
 /// 自動で始めた録音なら録音中の表示に戻し、手動の録音ならポップアップを閉じる。
+/// 利用者がポップアップを閉じていたら、出し直さない。
 pub fn withdraw_confirm_end(app: &AppHandle, note_id: &str, auto: Option<&str>) {
-    let background = app.state::<BackgroundState>();
-    let shown = background.popup.lock().unwrap().clone();
-    let Some(PopupPayload::ConfirmEnd {
-        note_id: shown_id,
-        title,
-        ..
-    }) = shown
-    else {
-        return;
-    };
-    if shown_id != note_id {
-        return;
-    }
-    match auto {
-        Some(label) => show_popup(
-            app,
-            PopupPayload::Recording {
-                app: label.to_string(),
-                note_id: shown_id,
-                title,
-            },
-        ),
-        None => {
-            *background.popup.lock().unwrap() = None;
-            close_popup_window(app);
-        }
+    let replaced = replace_popup(app, |shown| match shown {
+        PopupPayload::ConfirmEnd {
+            note_id: shown_id,
+            title,
+            ..
+        } if shown_id == note_id => Some(auto.map(|label| PopupPayload::Recording {
+            app: label.to_string(),
+            note_id: shown_id.clone(),
+            title: title.clone(),
+        })),
+        _ => None,
+    });
+    match replaced {
+        Some(Some(payload)) => present_popup(app, payload, false),
+        Some(None) => close_popup_window(app),
+        None => {}
     }
 }
 
@@ -464,6 +487,14 @@ mod tests {
         assert!(can_stop_from_tray(RecordingState::Paused));
         assert!(!can_stop_from_tray(RecordingState::Finishing));
         assert!(!can_stop_from_tray(RecordingState::Idle));
+    }
+
+    /// ポップアップに出すタイトルは、空白だけなら「無題のノート」にする（一覧の表示と同じ）。
+    // [POP-015]
+    #[test]
+    fn a_blank_title_is_shown_as_untitled() {
+        assert_eq!(display_title(" \u{3000}\n"), "無題のノート");
+        assert_eq!(display_title(" 週次の定例 "), "週次の定例");
     }
 
     /// ポップアップの位置は、表示の拡大率が変わっても、見た目で右端から 16px・下端から 64px 内側になる。

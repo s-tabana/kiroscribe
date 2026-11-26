@@ -58,7 +58,7 @@ export interface MemoryBackend extends Backend {
   setPopup(payload: PopupPayload | null): void;
   readonly popupClosed: boolean;
   /** 会議が終わったかの確認への答え（テスト用） */
-  readonly recordingCheckAnswers: { noteId: string; keep: boolean }[];
+  readonly recordingCheckAnswers: { noteId: string; deadline: number; keep: boolean }[];
   /** 最後にコピー・保存した内容（テスト用） */
   readonly lastCopied: string | null;
   readonly lastSaved: { fileName: string; markdown: string } | null;
@@ -183,6 +183,9 @@ function nextMinorVersion(version: string): string {
 
 const DEMO_UPDATE_NOTES = "### 新しい機能\n\n- 話者ごとに名前を付けられます\n- 議事録を Word 形式で保存できます\n\n### 修正\n\n- 長い会議で文字起こしの表示が遅くなる問題を直しました";
 
+/** 手動で始めた録音のときに、ポップアップの見出しに出す名前（本体の recording_check.rs と同じ） */
+const MANUAL_POPUP_LABEL = "Kiroscribe";
+
 const MSG_UPDATE_WHILE_RECORDING = "録音を停止してから更新してください";
 
 const DEMO_DEVICES: AudioDevice[] = [
@@ -221,7 +224,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
   const popupEvents = new Emitter<PopupPayload>();
   let popup: PopupPayload | null = null;
   let popupClosed = false;
-  const recordingCheckAnswers: { noteId: string; keep: boolean }[] = [];
+  const recordingCheckAnswers: { noteId: string; deadline: number; keep: boolean }[] = [];
   let lastSaved: { fileName: string; markdown: string } | null = null;
 
   let appVersion = options.version ?? packageVersion;
@@ -586,17 +589,25 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       openSettingsEvents.emit();
       popupClosed = true;
     },
-    async answerRecordingCheck(noteId, keep) {
-      recordingCheckAnswers.push({ noteId, keep });
+    async answerRecordingCheck(noteId, deadline, keep) {
+      recordingCheckAnswers.push({ noteId, deadline, keep });
       const shown = popup;
-      if (shown?.kind !== "confirmEnd" || shown.noteId !== noteId) return;
+      // 本体と同じく、いま出している確認への答えだけを受け付ける
+      if (shown?.kind !== "confirmEnd" || shown.noteId !== noteId || shown.deadline !== deadline) return;
+      if (recording.noteId !== noteId || recording.state === "idle" || recording.state === "finishing") return;
+      const { app, title } = shown;
       if (keep) {
-        popup = null;
-        popupClosed = true;
+        // 自動で始めた録音なら録音中の表示に戻し、手動の録音ならポップアップを閉じる
+        if (app === MANUAL_POPUP_LABEL) {
+          popup = null;
+          popupClosed = true;
+        } else {
+          this.setPopup({ kind: "recording", app, noteId, title });
+        }
         return;
       }
-      if (recording.noteId === noteId) await this.stopRecording();
-      this.setPopup({ kind: "stopped", app: shown.app, noteId, title: shown.title });
+      await this.stopRecording();
+      this.setPopup({ kind: "stopped", app, noteId, title });
     },
     get recordingCheckAnswers() {
       return recordingCheckAnswers;

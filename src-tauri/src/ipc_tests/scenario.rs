@@ -347,14 +347,17 @@ fn ipc_contract_matches_the_frontend() {
         tauri::async_runtime::block_on(async move { crate::recording_check::tick(&handle, now).await });
     };
     check_at(61);
-    assert_eq!(s.wait_for_popup("confirmEnd")["noteId"], long.as_str());
-    assert_eq!(s.ok("answer_recording_check", json!({ "noteId": long, "keep": true })), Value::Null);
+    let asked = s.wait_for_popup("confirmEnd");
+    assert_eq!(asked["noteId"], long.as_str());
+    let answer = json!({ "noteId": long, "deadline": asked["deadline"], "keep": true });
+    assert_eq!(s.ok("answer_recording_check", answer), Value::Null);
     check_at(31);
-    s.wait_for_popup("confirmEnd");
+    let asked = s.wait_for_popup("confirmEnd");
     check_at(34);
     assert_eq!(s.wait_for_popup("stoppedUnanswered")["noteId"], long.as_str());
     // 止まったあとに答えても、何も変わらない
-    assert_eq!(s.ok("answer_recording_check", json!({ "noteId": long, "keep": false })), Value::Null);
+    let late = json!({ "noteId": long, "deadline": asked["deadline"], "keep": false });
+    assert_eq!(s.ok("answer_recording_check", late), Value::Null);
     assert_eq!(s.ok("get_popup_state", json!({}))["kind"], "stoppedUnanswered");
     assert_eq!(s.ok("delete_note", json!({ "id": long })), Value::Null);
     assert_eq!(s.ok("close_popup", json!({})), Value::Null);
