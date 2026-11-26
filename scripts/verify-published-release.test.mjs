@@ -173,14 +173,14 @@ test("[REL-012] 公開したファイルどうしが一時的に食い違って�
   assert.equal(sigCalls, 2);
 
   // latest.json と .sig が、同じタグで実行し直す前のもの（別の鍵の署名）のまま
-  const { own } = publish();
+  const { own, signature: newSignature } = publish();
   const oldSignature = signForTest(otherKey, INSTALLER, { file: NAME, version: VERSION });
   const old = latestJson(VERSION, oldSignature);
   const download = `/${REPO}/releases/download/v${VERSION}`;
   let ownCalls = 0;
   const current = () => ownCalls <= 1;
   routes.pages.set(`${download}/latest.json`, () => (++ownCalls <= 1 ? old : own));
-  routes.pages.set(`${download}/${NAME}.sig`, () => (current() ? oldSignature : signature));
+  routes.pages.set(`${download}/${NAME}.sig`, () => (current() ? oldSignature : newSignature));
   routes.pages.set(`/${REPO}/releases/latest/download/latest.json`, () => (current() ? old : own));
   const report = await verify({ timeoutMs: 60_000 });
   assert.equal(ownCalls, 2);
