@@ -139,6 +139,7 @@ mod federation {
             let body = read(response, "GitHub の ID のトークンの発行").await;
             let token = body["value"]
                 .as_str()
+                .filter(|token| !token.is_empty())
                 .expect("GitHub の応答に value がありません")
                 .to_string();
             mask(&token);
@@ -147,10 +148,16 @@ mod federation {
     }
 
     /// GitHub Actions の中では、受け取ったトークンを実行記録で伏せ字にするよう伝える
-    /// （テストは `--nocapture` で走らせ、公開のリポジトリの実行記録はだれでも読めるため）
-    fn mask(token: &str) {
+    /// （公開のリポジトリの実行記録は、だれでも読めるため）。
+    /// libtest の出力の捕捉（`--nocapture` の有無）に左右されないよう、標準出力に直接書き込む。
+    /// ほかの出力の行の途中に入っても読まれるよう、改行で始める。空のトークンは、伏せ字にできないので拒む
+    pub fn mask(token: &str) {
+        use std::io::Write;
+        assert!(!token.trim().is_empty(), "伏せ字にするトークンが空です");
         if std::env::var_os("GITHUB_ACTIONS").is_some() {
-            println!("::add-mask::{token}");
+            let mut out = std::io::stdout().lock();
+            write!(out, "\n::add-mask::{token}\n").expect("伏せ字の指示を出せません");
+            out.flush().expect("伏せ字の指示を出せません");
         }
     }
 
@@ -433,4 +440,93 @@ async fn federation_exchanges_github_id_tokens_in_each_documented_form() {
         service_account_id: "svc_acct_test".into(),
     };
     assert_eq!(openai.access_token(&github).await, "openai-access-token");
+}
+
+const EMIT_MASK_ENV: &str = "KIROSCRIBE_TEST_EMIT_MASK";
+/// テスト用のダミーの値（本物のトークンではない）
+const DUMMY_TOKEN: &str = "dummy-token-for-mask-test";
+
+/// 下のテストが、別のプロセスで動かす（ふだんは何もしない）
+#[test]
+fn emits_the_mask_when_asked() {
+    if std::env::var_os(EMIT_MASK_ENV).is_some() {
+        federation::mask(DUMMY_TOKEN);
+    }
+}
+
+/// 伏せ字の指示は、`--nocapture` のない通常の `cargo test` でも、成功したテストから実行記録に出る
+#[test]
+fn the_mask_reaches_the_actions_log_without_nocapture() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["emits_the_mask_when_asked", "--exact", "--test-threads=1"])
+        .env(EMIT_MASK_ENV, "1")
+        .env("GITHUB_ACTIONS", "true")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.contains("1 passed"), "{stdout}");
+    let expected = format!("::add-mask::{DUMMY_TOKEN}");
+    assert!(stdout.lines().any(|line| line == expected), "伏せ字の指示の行がない:\n{stdout}");
+}
+
+#[test]
+#[should_panic(expected = "伏せ字にするトークンが空です")]
+fn an_empty_token_is_not_masked() {
+    federation::mask(" ");
+}
+
+/// GitHub の ID のトークンや、交換したアクセストークンが空なら、使わずに止める
+#[tokio::test]
+async fn empty_tokens_from_github_or_the_exchange_are_rejected() {
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn panic_message(task: impl std::future::Future<Output = String> + Send + 'static) -> String {
+        let err = tokio::spawn(task).await.expect_err("空のトークンを受け付けた");
+        let payload = err.into_panic();
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default()
+    }
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/empty-id-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "count": 1, "value": "" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/github-id-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "count": 1, "value": "dummy-jwt" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "access_token": "", "expires_in": 600 })))
+        .mount(&server)
+        .await;
+
+    let github = federation::GitHubIdToken {
+        request_url: format!("{}/empty-id-token?api-version=2.0", server.uri()),
+        request_token: "dummy-request-token".into(),
+    };
+    let message = panic_message(async move { github.issue(federation::OPENAI_AUDIENCE).await }).await;
+    assert!(message.contains("value がありません"), "{message}");
+
+    let github = federation::GitHubIdToken {
+        request_url: format!("{}/github-id-token?api-version=2.0", server.uri()),
+        request_token: "dummy-request-token".into(),
+    };
+    let openai = federation::OpenAiFederation {
+        token_url: format!("{}/oauth/token", server.uri()),
+        audience: federation::OPENAI_AUDIENCE.into(),
+        identity_provider_id: "idp_dummy".into(),
+        service_account_id: "svc_acct_dummy".into(),
+    };
+    let message = panic_message(async move { openai.access_token(&github).await }).await;
+    assert!(message.contains("access_token がありません"), "{message}");
 }
