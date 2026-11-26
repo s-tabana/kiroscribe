@@ -51,7 +51,8 @@ pub struct Observation {
     pub windows: Vec<WindowInfo>,
 }
 
-const BROWSERS: &[&str] = &[
+/// マイクを使っていると、見えているウィンドウの題から会議を探すブラウザ（実行ファイル名、小文字）
+pub(crate) const BROWSERS: &[&str] = &[
     "chrome.exe",
     "msedge.exe",
     "firefox.exe",
@@ -66,18 +67,40 @@ pub fn exe_name(id: &str) -> String {
     id.rsplit(['\\', '/']).next().unwrap_or(id).to_lowercase()
 }
 
+/// パッケージ名（小文字）の先頭と、その会議アプリ。ストアアプリ・MSIX のアプリは、パッケージ名で記録される。
+const PACKAGE_PREFIXES: &[(&str, MeetingApp)] = &[
+    // Microsoft Store 版の Slack（https://slack.com/help/articles/360048367814 ）
+    ("91750d7e.slack_", MeetingApp::SlackHuddle),
+    // MSIX 版の Slack（https://slack.com/help/articles/212475728 ）
+    ("com.tinyspeck.slackdesktop_", MeetingApp::SlackHuddle),
+    ("msteams_", MeetingApp::Teams),
+    ("microsoftteams_", MeetingApp::Teams),
+];
+
+/// パッケージ名（小文字）から会議アプリを判定する。パス（区切りを含むもの）と実行ファイル名（.exe で終わるもの）は、
+/// パッケージ名ではないので対象にしない（記録では、フルパスを実行ファイル名だけに縮めるため）。
+fn packaged_app(lower_id: &str) -> Option<MeetingApp> {
+    if lower_id.contains(['\\', '/']) || lower_id.ends_with(".exe") {
+        return None;
+    }
+    PACKAGE_PREFIXES.iter().find_map(|(prefix, app)| {
+        let rest = lower_id.strip_prefix(prefix)?;
+        (!rest.is_empty()).then_some(*app)
+    })
+}
+
 fn desktop_app(id: &str) -> Option<MeetingApp> {
     let lower = id.to_lowercase();
-    // ストアアプリ（新しい Teams など）はパッケージ名で記録される
-    if lower.starts_with("msteams_") || lower.starts_with("microsoftteams_") {
-        return Some(MeetingApp::Teams);
+    if let Some(app) = packaged_app(&lower) {
+        return Some(app);
     }
     match exe_name(&lower).as_str() {
         "slack.exe" => Some(MeetingApp::SlackHuddle),
         "zoom.exe" | "cpthost.exe" => Some(MeetingApp::Zoom),
-        "ms-teams.exe" | "teams.exe" => Some(MeetingApp::Teams),
-        // Discord はボイスチャンネル・通話に入っている間だけマイクを使う（PTB・Canary 版も対象）
-        "discord.exe" | "discordptb.exe" | "discordcanary.exe" => Some(MeetingApp::Discord),
+        // ms-teams_modulehost.exe は、新しい Teams の通話を受け持つプロセス（Microsoft 365 メッセージセンター MC1189656）
+        "ms-teams.exe" | "ms-teams_modulehost.exe" | "teams.exe" => Some(MeetingApp::Teams),
+        // Discord はボイスチャンネル・通話に入っている間だけマイクを使う（PTB・Canary・Development 版も対象）
+        "discord.exe" | "discordptb.exe" | "discordcanary.exe" | "discorddevelopment.exe" => Some(MeetingApp::Discord),
         _ => None,
     }
 }

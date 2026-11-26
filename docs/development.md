@@ -116,7 +116,7 @@ WebDriver が届かないところは、次の方法で確かめます。どれ�
 
 ### インターネットの先の本物を使うテスト
 
-- **ヘルプの取得元**: `KIROSCRIBE_LIVE_TESTS=1 cargo test -p kiroscribe-core --test live_github` で、本物の GitHub から使い方とリリースノートを読めることを確かめます（CI の `ci.yml` で毎回）。
+- **ヘルプの取得元**: `KIROSCRIBE_LIVE_TESTS=1 cargo test -p kiroscribe-core --test live_github` で、本物の GitHub から使い方とリリースノートを読めることを確かめます（CI の `ci.yml` で毎回）。リリース一覧は認証なしで GitHub の API に問い合わせるため、共有のランナーで利用回数の上限（IP アドレスごとに 1 時間 60 回）に達して断られたときは、確かめずに警告を出して終えます。
 - **AI の API**: `cargo test -p kiroscribe-core --test live_api -- --nocapture` は、設定画面で選べるすべてのモデルに、アプリと同じ送り方でごく短い問い合わせを送ります（料金がかかります。1 回で数円）。手元では `KIROSCRIBE_LIVE_OPENAI_KEY`・`KIROSCRIBE_LIVE_ANTHROPIC_KEY` に API キーを入れて走らせます。CI では `live-api.yml` が、手動と週に 1 回（既定のブランチ `main` のファイルで）走らせます。資格情報は、次の「鍵なしでの設定」を勧めます（API キーを同じ名前の Secret に登録しても動きます。そのときは、テスト専用のキーに使える金額の上限を付けます）。どちらもないサービスは、確かめずに終わります。
 
 #### 本物の AI の API のテストを、鍵なしで動かす（ID の連携）

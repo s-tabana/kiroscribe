@@ -374,6 +374,8 @@ describe("SettingsDialog: 会議の検出の記録", () => {
     expect(await screen.findByText("会議の検出の記録を保存しました（12 件）: C:\\Users\\me\\record.json")).toBeInTheDocument();
     // 何が入るかを、押す前に読める
     expect(screen.getByText(/マイクを使ったアプリの名前と、マイクを使っているブラウザのタブの名前だけ/)).toBeInTheDocument();
+    // タブの名前に、会議でないページやメールの件名が入りうることと、送る前に確かめることを添える
+    expect(screen.getByText(/会議でないページやメールの件名も入ることがあります。人に送る前に、見せたくない内容がないか確かめてください。/)).toBeInTheDocument();
   });
 
   it("[MTG-026] 保存ダイアログを取り消したら何も表示せず、保存できなかったら理由を表示する", async () => {

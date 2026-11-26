@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
-use crate::meetings::{exe_name, MeetingEvent, MeetingTracker, MicUser, Observation, WindowInfo};
+use crate::meetings::{exe_name, BROWSERS, MeetingEvent, MeetingTracker, MicUser, Observation, WindowInfo};
 
 /// 書き出すファイルの形式の名前。形を変えたら、末尾の番号を上げる。
 pub const FORMAT: &str = "kiroscribe-meeting-record/1";
@@ -21,16 +21,6 @@ pub const FORMAT: &str = "kiroscribe-meeting-record/1";
 pub const CAPACITY: usize = 300;
 /// 製品が検出を調べる間隔（ミリ秒）。再生もこの間隔で行う。
 pub const POLL_MS: i64 = 2_000;
-
-const BROWSERS: &[&str] = &[
-    "chrome.exe",
-    "msedge.exe",
-    "firefox.exe",
-    "brave.exe",
-    "vivaldi.exe",
-    "opera.exe",
-    "arc.exe",
-];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
