@@ -36,7 +36,7 @@ fn browser_in(app: MeetingApp, exe: &str) -> Option<Detection> {
     Some(Detection::in_browser(app, exe))
 }
 
-// [MTG-001]
+// [MTG-001][MTG-003]
 #[test]
 fn every_listed_desktop_app_is_a_meeting_while_it_uses_the_mic() {
     let cases = [
@@ -59,6 +59,7 @@ fn every_listed_desktop_app_is_a_meeting_while_it_uses_the_mic() {
         (r"C:\Users\me\AppData\Local\Discord\app-1.0.9163\Discord.exe", MeetingApp::Discord),
         (r"C:\Users\me\AppData\Local\DiscordPTB\app-1.0.1\DiscordPTB.exe", MeetingApp::Discord),
         (r"C:\Users\me\AppData\Local\DiscordCanary\app-1.0.1\DISCORDCANARY.EXE", MeetingApp::Discord),
+        (r"C:\Users\me\AppData\Local\DiscordDevelopment\app-1.0.1\DiscordDevelopment.exe", MeetingApp::Discord),
     ];
     for (id, app) in cases {
         assert_eq!(detect(&observation(vec![mic(id)], vec![]), None), desktop(app), "{id}");
@@ -81,6 +82,12 @@ fn every_listed_desktop_app_is_a_meeting_while_it_uses_the_mic() {
         "com.tinyspeck.slackdesktopbeta",
         "com.tinyspeck.other_8yrtsj140pw4g",
         r"C:\Tools\ms-teams_helper.exe",
+        // 会議アプリと一緒に入る更新・起動のためのプロセスと、ほかのアプリも使う部品
+        r"C:\Users\me\AppData\Local\slack\Update.exe",
+        r"C:\Program Files\WindowsApps\MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe\ms-teamsupdate.exe",
+        r"C:\Program Files\WindowsApps\MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe\msteams_autostarter.exe",
+        r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\131.0.2903.112\msedgewebview2.exe",
+        r"C:\Program Files\Contoso\zcscpthost.exe",
     ] {
         assert_eq!(detect(&observation(vec![mic(id)], vec![]), None), None, "{id}");
     }

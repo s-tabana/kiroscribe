@@ -87,7 +87,7 @@ fn desktop_app(id: &str) -> Option<MeetingApp> {
         // ms-teams_modulehost.exe は、新しい Teams の通話を受け持つプロセス（Microsoft 365 メッセージセンター MC1189656）
         "ms-teams.exe" | "ms-teams_modulehost.exe" | "teams.exe" => Some(MeetingApp::Teams),
         // Discord はボイスチャンネル・通話に入っている間だけマイクを使う（PTB・Canary 版も対象）
-        "discord.exe" | "discordptb.exe" | "discordcanary.exe" => Some(MeetingApp::Discord),
+        "discord.exe" | "discordptb.exe" | "discordcanary.exe" | "discorddevelopment.exe" => Some(MeetingApp::Discord),
         _ => None,
     }
 }

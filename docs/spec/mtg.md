@@ -2,9 +2,9 @@
 
 会議が始まったことを検出して自動で録音し、終わったら止める（Windows）。
 
-- **MTG-001** ［単体］ 次のデスクトップアプリがマイクを使っている間は、会議中とみなす: Slack（slack.exe、またはパッケージ名が 91750D7E.Slack_（Microsoft Store 版）・com.tinyspeck.slackdesktop_（MSIX 版）で始まるもの）、Zoom（zoom.exe・cpthost.exe）、Teams（ms-teams.exe・ms-teams_modulehost.exe・teams.exe、またはパッケージ名が MSTeams_・MicrosoftTeams_ で始まるもの）、Discord（discord.exe・discordptb.exe・discordcanary.exe）。大文字小文字は区別しない。
+- **MTG-001** ［単体］ 次のデスクトップアプリがマイクを使っている間は、会議中とみなす: Slack（slack.exe、またはパッケージ名が 91750D7E.Slack_（Microsoft Store 版）・com.tinyspeck.slackdesktop_（MSIX 版）で始まるもの）、Zoom（zoom.exe・cpthost.exe）、Teams（ms-teams.exe・ms-teams_modulehost.exe・teams.exe、またはパッケージ名が MSTeams_・MicrosoftTeams_ で始まるもの）、Discord（discord.exe・discordptb.exe・discordcanary.exe・discorddevelopment.exe）。大文字小文字は区別しない。
 - **MTG-002** ［単体］ ブラウザ（chrome・msedge・firefox・brave・vivaldi・opera・arc）がマイクを使っていて、そのブラウザ自身の表示中のウィンドウのタイトルが会議のものなら、会議中とみなす（マイクを使っているのとは別のブラウザのウィンドウのタイトルでは、会議とみなさない）。Google Meet は「google meet」「meet.google.com」「 - meet - 」を含むか、「meet - 」「meet – 」「meet: 」「meet：」で始まるもの。Slack は「slack」と「huddle」か「ハドル」を含むもの（ハドルを別のウィンドウにしたときの「Huddle: 相手 - ワークスペース - Slack」など）。ハドルを示す語のない Slack の画面（「相手 - ワークスペース - Slack」など）は、会議とみなさない。Teams は「microsoft teams」と「meeting」「会議」「call」「通話」のどれかを含むもの。Zoom は「zoom」と「meeting」か「ミーティング」を含むもの。Discord は、Discord の画面のタブ名の形のもの（「Discord | 」で始まる、または「 | Discord」「 - Discord」で終わる。前に未読の印「(3)」「•」が付いていても、後ろにブラウザの名前が付いていてもよい）。タイトルに「discord」を含むだけのページ（Discord についての記事や検索結果など）は、会議とみなさない。
-- **MTG-003** ［単体］ 会議アプリ以外がマイクを使っていても、ブラウザが会議以外のサイトでマイクを使っていても、会議とはみなさない。
+- **MTG-003** ［単体］ 会議アプリ以外がマイクを使っていても、ブラウザが会議以外のサイトでマイクを使っていても、会議とはみなさない。会議アプリと一緒に入る更新・起動のためのプロセス（Slack の update.exe、Teams の ms-teamsupdate.exe・msteams_autostarter.exe）、ほかのアプリも使う部品（msedgewebview2.exe、Zoom の SDK 用の zcscpthost.exe）、会議アプリのパッケージ名に似ているだけのものも、会議とはみなさない。
 - **MTG-004** ［単体］ 会議のページを開いているだけ（ブラウザがマイクを使っていない）では、会議とはみなさない。以前マイクを使っていて、いまは使っていないアプリも対象にしない。
 - **MTG-005** ［単体］ Kiroscribe 自身がマイクを使っていること（録音中）は、判定に入れない。
 - **MTG-006** ［単体］ デスクトップの会議アプリとブラウザの会議の両方が当てはまるときは、デスクトップの会議アプリとして扱う。
