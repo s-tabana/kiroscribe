@@ -18,6 +18,7 @@ pub mod notes;
 pub mod prompts;
 pub mod recorder;
 pub mod retry;
+pub mod search;
 pub mod secrets;
 pub mod session;
 pub mod settings;

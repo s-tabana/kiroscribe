@@ -67,11 +67,13 @@ pub fn save_settings(
     state: State<'_, AppState>,
     settings: Settings,
 ) -> CmdResult<Settings> {
-    let (was_auto_recording, saved) = {
+    let (before, saved) = {
         let db = state.db();
-        let before = db.load_settings().map(|before| before.auto_record_meetings).unwrap_or(false);
+        let before = db.load_settings().ok();
         (before, db.save_settings(settings)?)
     };
+    let was_auto_recording = before.as_ref().is_some_and(|before| before.auto_record_meetings);
+    crate::companion::settings_changed(&app, before.as_ref(), &saved);
     crate::background::apply_settings(&app, &saved);
     crate::update::apply_settings(&app, &saved);
     crate::meeting_watch::settings_changed(&app, was_auto_recording, &saved);

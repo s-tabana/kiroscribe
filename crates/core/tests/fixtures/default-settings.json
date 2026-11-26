@@ -7,5 +7,7 @@
   "myName": "",
   "autoRecordMeetings": true,
   "launchAtLogin": true,
-  "autoUpdate": false
+  "autoUpdate": false,
+  "companion": true,
+  "companionModel": "claude-haiku-5-5"
 }

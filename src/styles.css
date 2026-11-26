@@ -742,6 +742,78 @@ kbd {
   color: var(--ink-2);
 }
 
+.companion-sends {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 12px 0 14px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+
+.companion-sends dt {
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.companion-sends dd {
+  margin: 0;
+}
+
+.companion-folders h4 {
+  margin: 16px 0 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.folder-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.folder-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+}
+
+.folder-row + .folder-row {
+  border-top: 1px solid var(--line);
+}
+
+.folder-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.folder-path {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-meta {
+  color: var(--ink-3);
+}
+
+.folder-row .check {
+  margin-top: 0;
+  white-space: nowrap;
+}
+
+.folder-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .api-key {
   margin-top: 12px;
   padding: 12px 14px 14px;

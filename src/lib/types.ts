@@ -40,6 +40,10 @@ export interface Settings {
   launchAtLogin: boolean;
   /** 見つけた新しいバージョンを自動でインストールする（既定はオフで、知らせるだけ） */
   autoUpdate: boolean;
+  /** 会議の相棒（録音中に、聞かれたことに答える資料を探す） */
+  companion: boolean;
+  /** 会議の相棒の判定と選択に使う Claude のモデル */
+  companionModel: string;
 }
 
 export type Provider = "openai" | "anthropic";
@@ -61,7 +65,39 @@ export const DEFAULT_SETTINGS: Settings = {
   autoRecordMeetings: true,
   launchAtLogin: true,
   autoUpdate: false,
+  companion: true,
+  companionModel: "claude-haiku-5-5",
 };
+
+// ---- 会議の相棒の資料の索引 ----
+
+/** off = 相棒がオフで索引を作っていない、building = 作っている・更新している、ready = できている */
+export type IndexState = "off" | "building" | "ready";
+
+/** 探すフォルダの一覧の 1 行 */
+export interface SearchFolderStatus {
+  path: string;
+  /** 「中身を送らない」 */
+  noContent: boolean;
+  /** 索引に入っているファイルの件数 */
+  files: number;
+  /** フォルダが見つからない（ドライブが外れているなど） */
+  missing: boolean;
+  /** ファイルが多く、一部だけを索引に入れている */
+  truncated: boolean;
+}
+
+export interface SearchIndexStatus {
+  state: IndexState;
+  /** 作っている途中なら、調べ終えたファイルの数と、見つけたファイルの数 */
+  done: number;
+  total: number;
+  /** 索引に入っているファイルの件数 */
+  files: number;
+  /** 最後に索引を更新し終えた時刻 */
+  updatedAt: number | null;
+  folders: SearchFolderStatus[];
+}
 
 // ---- 録音・文字起こし ----
 

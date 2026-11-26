@@ -21,6 +21,7 @@ import type {
   Provider,
   RecordingErrorEvent,
   RecordingStatus,
+  SearchIndexStatus,
   ReleaseNotes,
   Segment,
   Settings,
@@ -54,6 +55,17 @@ export interface Backend {
   setApiKey(provider: Provider, value: string): Promise<ApiKeyStatus>;
   /** 確認ダイアログ。kind は見た目（既定は警告。削除などの取り消せない操作用） */
   confirm(message: string, title?: string, kind?: "warning" | "info"): Promise<boolean>;
+
+  // ---- 会議の相棒の資料の索引 ----
+  getSearchIndexStatus(): Promise<SearchIndexStatus>;
+  /** フォルダを選ぶダイアログ（本体が出す）で選んだフォルダを、探すフォルダに足す。取り消したら null */
+  addSearchFolder(): Promise<SearchIndexStatus | null>;
+  removeSearchFolder(path: string): Promise<SearchIndexStatus>;
+  /** 「中身を送らない」を切り替える */
+  setSearchFolderNoContent(path: string, value: boolean): Promise<SearchIndexStatus>;
+  /** 索引を空にして作り直す（相棒がオフなら、理由のメッセージで reject する） */
+  rebuildSearchIndex(): Promise<SearchIndexStatus>;
+  onSearchIndexStatus(cb: (status: SearchIndexStatus) => void): Unsubscribe;
 
   // ---- 録音・文字起こし ----
   listAudioDevices(): Promise<AudioDevice[]>;
@@ -157,6 +169,13 @@ export function createTauriBackend(): Backend {
     getApiKeyStatus: () => invoke("get_api_key_status"),
     setApiKey: (provider, value) => invoke("set_api_key", { provider, value }),
     confirm: (message, title = "Kiroscribe", kind = "warning") => ask(message, { title, kind }),
+
+    getSearchIndexStatus: () => invoke("get_search_index_status"),
+    addSearchFolder: () => invoke("add_search_folder"),
+    removeSearchFolder: (path) => invoke("remove_search_folder", { path }),
+    setSearchFolderNoContent: (path, value) => invoke("set_search_folder_no_content", { path, value }),
+    rebuildSearchIndex: () => invoke("rebuild_search_index"),
+    onSearchIndexStatus: (cb) => subscribe("search-index-status", cb),
 
     listAudioDevices: () => invoke("list_audio_devices"),
     listSegments: (noteId) => invoke("list_segments", { noteId }),

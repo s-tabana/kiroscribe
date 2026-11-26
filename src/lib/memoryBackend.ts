@@ -18,6 +18,8 @@ import {
   type Provider,
   type RecordingErrorEvent,
   type RecordingStatus,
+  type SearchFolderStatus,
+  type SearchIndexStatus,
   type ReleaseNote,
   type Segment,
   type Settings,
@@ -44,6 +46,8 @@ interface MemoryOptions {
   updateStepDelayMs?: number;
   /** 設定の初期値（指定した項目だけ既定値から変える） */
   settings?: Partial<Settings>;
+  /** 「フォルダを追加…」のダイアログで選ぶフォルダ（null なら取り消し。既定はプレビュー用のフォルダ） */
+  pickFolder?: () => string | null;
 }
 
 /** テストから文字起こしやエラーを発生させるための追加機能 */
@@ -80,6 +84,8 @@ export interface MemoryBackend extends Backend {
   setWindowVisible(visible: boolean): void;
   /** 「更新を確認」を失敗させる（null で元に戻す） */
   setUpdateCheckError(message: string | null): void;
+  /** 資料の索引の状態を差し替えて知らせる（作っている途中・見つからないフォルダなどの再現） */
+  setSearchIndexStatus(status: Partial<SearchIndexStatus>): void;
 }
 
 class Emitter<T> {
@@ -244,6 +250,34 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
   let updatedNotice: string | null = null;
   const mainShownEvents = new Emitter<void>();
   const settingsEvents = new Emitter<Settings>();
+  /** プレビューで、索引に入っていることにするファイルの件数（フォルダごと） */
+  const FOLDER_FILES = 12;
+  let searchFolders: SearchFolderStatus[] = [];
+  let searchIndex: SearchIndexStatus = {
+    state: settings.companion ? "ready" : "off",
+    done: 0,
+    total: 0,
+    files: 0,
+    updatedAt: settings.companion ? now() : null,
+    folders: [],
+  };
+  const searchIndexEvents = new Emitter<SearchIndexStatus>();
+  const publishSearchIndex = (next: Partial<SearchIndexStatus> = {}) => {
+    const on = settings.companion;
+    searchFolders = searchFolders.map((folder) => ({ ...folder, files: on ? FOLDER_FILES : 0 }));
+    searchIndex = {
+      ...searchIndex,
+      state: on ? "ready" : "off",
+      done: 0,
+      total: 0,
+      updatedAt: on ? now() : null,
+      ...next,
+      folders: next.folders ?? searchFolders.map((folder) => ({ ...folder })),
+    };
+    searchIndex.files = searchIndex.folders.reduce((sum, folder) => sum + folder.files, 0);
+    searchIndexEvents.emit({ ...searchIndex });
+    return { ...searchIndex, folders: searchIndex.folders.map((folder) => ({ ...folder })) };
+  };
   const UPDATE_BYTES = 8_400_000;
   const updateStep = () =>
     new Promise((resolve) => setTimeout(resolve, options.updateStepDelayMs ?? (options.demo ? 220 : 0)));
@@ -477,6 +511,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       return { ...settings };
     },
     async saveSettings(next) {
+      const companionBefore = settings.companion;
       settings = {
         ...next,
         language: next.language.trim() || DEFAULT_SETTINGS.language,
@@ -484,7 +519,9 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
         claudeModel: next.claudeModel.trim() || DEFAULT_SETTINGS.claudeModel,
         myName: next.myName.trim(),
         inputDeviceId: next.inputDeviceId?.trim() || null,
+        companionModel: next.companionModel.trim() || DEFAULT_SETTINGS.companionModel,
       };
+      if (settings.companion !== companionBefore) publishSearchIndex();
       // 自動更新の切り替えは、すぐに効く（オフにしたら、待っている自動インストールをやめる）
       if (!settings.autoUpdate && update.ready) setUpdate({ ...update, ready: false });
       void backgroundDownload();
@@ -499,6 +536,38 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
     },
     async confirm(message) {
       return options.confirm ? options.confirm(message) : window.confirm(message);
+    },
+
+    async getSearchIndexStatus() {
+      return { ...searchIndex, folders: searchIndex.folders.map((folder) => ({ ...folder })) };
+    },
+    async addSearchFolder() {
+      const path = options.pickFolder ? options.pickFolder() : "C:\\Users\\preview\\Documents\\共有資料";
+      if (!path) return null;
+      if (!searchFolders.some((folder) => folder.path === path)) {
+        searchFolders.push({ path, noContent: false, files: 0, missing: false, truncated: false });
+      }
+      return publishSearchIndex();
+    },
+    async removeSearchFolder(path) {
+      searchFolders = searchFolders.filter((folder) => folder.path !== path);
+      return publishSearchIndex();
+    },
+    async setSearchFolderNoContent(path, value) {
+      const folder = searchFolders.find((f) => f.path === path);
+      if (!folder) throw "このフォルダは一覧にありません";
+      folder.noContent = value;
+      return publishSearchIndex();
+    },
+    async rebuildSearchIndex() {
+      if (!settings.companion) throw "会議の相棒がオフのときは、索引を作り直せません";
+      return publishSearchIndex();
+    },
+    onSearchIndexStatus: (cb) => searchIndexEvents.on(cb),
+    setSearchIndexStatus(status) {
+      if (status.folders) searchFolders = status.folders.map((folder) => ({ ...folder }));
+      searchIndex = { ...searchIndex, ...status };
+      searchIndexEvents.emit({ ...searchIndex });
     },
 
     async listAudioDevices() {

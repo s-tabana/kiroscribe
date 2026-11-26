@@ -9,6 +9,8 @@ use crate::error::Result;
 pub const DEFAULT_TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe";
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
 pub const DEFAULT_LANGUAGE: &str = "ja";
+/// 会議の相棒の判定と選択に使う Claude のモデルの初期値。
+pub const DEFAULT_COMPANION_MODEL: &str = "claude-haiku-5-5";
 
 const SETTINGS_KEY: &str = "app";
 
@@ -34,6 +36,10 @@ pub struct Settings {
     pub launch_at_login: bool,
     /// 見つけた新しいバージョンを自動でインストールする（既定はオフで、知らせるだけ）。
     pub auto_update: bool,
+    /// 会議の相棒（録音中に、聞かれたことに答える資料を探す）。
+    pub companion: bool,
+    /// 会議の相棒の判定と選択に使う Claude のモデル。
+    pub companion_model: String,
 }
 
 impl Default for Settings {
@@ -48,6 +54,8 @@ impl Default for Settings {
             auto_record_meetings: true,
             launch_at_login: true,
             auto_update: false,
+            companion: true,
+            companion_model: DEFAULT_COMPANION_MODEL.to_string(),
         }
     }
 }
@@ -63,6 +71,7 @@ impl Settings {
         fix(&mut self.language, defaults.language);
         fix(&mut self.transcription_model, defaults.transcription_model);
         fix(&mut self.claude_model, defaults.claude_model);
+        fix(&mut self.companion_model, defaults.companion_model);
         self.my_name = self.my_name.trim().to_string();
         self.input_device_id = self
             .input_device_id
@@ -208,6 +217,32 @@ mod tests {
         assert!(loaded.auto_record_meetings);
         assert!(loaded.launch_at_login);
         assert!(!loaded.auto_update);
+        // 会議の相棒はオン、相棒のモデルは claude-haiku-5-5
+        assert!(loaded.companion);
+        assert_eq!(loaded.companion_model, DEFAULT_COMPANION_MODEL);
+    }
+
+    // [SET-001][CMP-036][CMP-037]
+    #[test]
+    fn companion_is_on_with_haiku_by_default() {
+        let defaults = Settings::default();
+        assert!(defaults.companion);
+        assert_eq!(defaults.companion_model, "claude-haiku-5-5");
+        let json = serde_json::to_value(&defaults).unwrap();
+        assert_eq!((&json["companion"], &json["companionModel"]), (&serde_json::json!(true), &serde_json::json!("claude-haiku-5-5")));
+
+        let db = Database::open_in_memory().unwrap();
+        let saved = db
+            .save_settings(Settings { companion: false, companion_model: " claude-sonnet-5-5 ".into(), ..Default::default() })
+            .unwrap();
+        assert!(!saved.companion);
+        assert_eq!(saved.companion_model, "claude-sonnet-5-5");
+        assert_eq!(db.load_settings().unwrap(), saved);
+        // 一覧にないモデルも、そのまま保存する（SET-009 と同じ）。空なら初期値に戻す
+        let saved = db.save_settings(Settings { companion_model: "claude-future-9".into(), ..Default::default() }).unwrap();
+        assert_eq!(saved.companion_model, "claude-future-9");
+        let saved = db.save_settings(Settings { companion_model: "  ".into(), ..Default::default() }).unwrap();
+        assert_eq!(saved.companion_model, DEFAULT_COMPANION_MODEL);
     }
 
     #[test]

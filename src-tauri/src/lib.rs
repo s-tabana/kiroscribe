@@ -1,6 +1,7 @@
 mod ai;
 mod background;
 mod commands;
+mod companion;
 #[cfg(feature = "e2e")]
 mod e2e;
 mod meeting_watch;
@@ -60,6 +61,7 @@ pub fn run() {
             // アプリ内更新で再起動した直後か（下で、ウィンドウを出すかどうかを決める）
             let version = app.package_info().version.to_string();
             let restart = update::take_restart(&db, &version, now_ms());
+            let search_folders = db.load_search_folders().unwrap_or_default();
             app.manage(UpdateState::new(settings.auto_update, update::auto_skip_version(&db)));
             app.manage(AppState::new(db, secrets));
             app.manage(RecorderState::default());
@@ -67,6 +69,8 @@ pub fn run() {
             app.manage(MeetingState::default());
 
             let handle = app.handle().clone();
+            // 会議の相棒の資料の索引（相棒がオンなら、裏で作り始める）
+            companion::setup(&handle, &data_dir, &settings, search_folders);
             // トレイが使えない環境でも起動は続ける
             if let Err(err) = background::setup_tray(&handle, &settings) {
                 eprintln!("タスクトレイを作成できませんでした: {err}");
@@ -124,6 +128,11 @@ fn register_commands(builder: tauri::Builder<Runtime>) -> tauri::Builder<Runtime
             commands::get_api_key_status,
             commands::set_api_key,
             commands::export_markdown,
+            companion::get_search_index_status,
+            companion::add_search_folder,
+            companion::remove_search_folder,
+            companion::set_search_folder_no_content,
+            companion::rebuild_search_index,
             commands::save_markdown,
             recording::list_audio_devices,
             recording::list_segments,

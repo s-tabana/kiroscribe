@@ -201,6 +201,53 @@ fn ipc_contract_matches_the_frontend() {
     assert_eq!(status["anthropic"], true);
     assert!(!status.to_string().contains("sk-ant-test"), "キーの値は画面に返さない");
 
+    // ---- 会議の相棒の資料の索引（フォルダを選ぶダイアログは dialogs.json の答え） ----
+    let answers = fixture.dir.join("dialogs.json");
+    let folder = fixture.dir.join("共有資料");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("経費精算の手順.txt"), "申請は月末まで").unwrap();
+    let folder_path = folder.to_string_lossy().to_string();
+    assert_eq!(s.ok("get_search_index_status", json!({}))["state"], "off");
+    std::fs::write(&answers, "{}").unwrap();
+    assert_eq!(s.ok("add_search_folder", json!({})), Value::Null, "ダイアログを取り消したら何も足さない");
+    std::fs::write(&answers, json!({ "folderPath": folder_path }).to_string()).unwrap();
+    let status = s.ok("add_search_folder", json!({}));
+    assert_eq!(status["folders"][0]["path"], folder_path.as_str());
+    assert_eq!(status["folders"][0]["noContent"], false);
+    std::fs::remove_file(&answers).unwrap();
+    // 相棒をオフにしてから、オンにして保存すると、索引を作る
+    let mut companion = settings.clone();
+    companion["companion"] = json!(false);
+    s.ok("save_settings", json!({ "settings": companion }));
+    companion["companion"] = json!(true);
+    s.ok("save_settings", json!({ "settings": companion }));
+    wait_until("索引の作成", || {
+        let status = s.peek("get_search_index_status", json!({}));
+        (status["state"] == "ready" && status["files"] == 1).then_some(())
+    });
+    let status = s.ok("get_search_index_status", json!({}));
+    assert_eq!(status["folders"][0]["files"], 1);
+    assert!(events_named(&events, "search-index-status").iter().any(|status| status["state"] == "building"));
+    let status = s.ok("set_search_folder_no_content", json!({ "path": folder_path, "value": true }));
+    assert_eq!(status["folders"][0]["noContent"], true);
+    s.ok("rebuild_search_index", json!({}));
+    wait_until("索引の作り直し", || {
+        let status = s.peek("get_search_index_status", json!({}));
+        (status["state"] == "ready" && status["files"] == 1).then_some(())
+    });
+    let status = s.ok("remove_search_folder", json!({ "path": folder_path }));
+    assert_eq!(status["folders"], json!([]));
+    companion["companion"] = json!(false);
+    s.ok("save_settings", json!({ "settings": companion }));
+    let refused = s.call("rebuild_search_index", json!({})).unwrap_err();
+    assert!(refused.contains("会議の相棒がオフ"), "{refused}");
+    s.ok("save_settings", json!({ "settings": settings }));
+    // 相棒をオンに戻すと、空の索引を作る（終わるまで待つ。見本に入るイベントが、その時々で変わらないように）
+    wait_until("空の索引", || {
+        let ready = |status: &Value| status["state"] == "ready" && status["folders"] == json!([]);
+        events_named(&events, "search-index-status").iter().any(ready).then_some(())
+    });
+
     // ---- トレイのメニューでの切り替え（開いている設定画面に、変わった設定を知らせる）----
     crate::background::toggle_auto_record(app.handle()).unwrap();
     crate::background::toggle_auto_record(app.handle()).unwrap();

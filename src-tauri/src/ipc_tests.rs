@@ -352,10 +352,20 @@ fn mock_app(update_endpoint: &str) -> (tauri::App<MockRuntime>, WebviewWindow<Mo
     app.manage(BackgroundState::default());
     app.manage(crate::meeting_watch::MeetingState::default());
     app.manage(UpdateState::new(false, None));
+    // 資料の索引は、テストごとの一時フォルダに作る（相棒がオフのまま始める）
+    let index_dir = std::env::temp_dir().join(format!("kiroscribe-ipc-{}", uuid_like()));
+    crate::companion::setup(app.handle(), &index_dir, &kiroscribe_core::settings::Settings { companion: false, ..Default::default() }, Vec::new());
     let window = WebviewWindowBuilder::new(&app, MAIN_LABEL, Default::default())
         .build()
         .expect("模擬のウィンドウを作れません");
     (app, window)
+}
+
+/// 一時フォルダの名前に使う、ほかのテストと重ならない文字列。
+fn uuid_like() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!("{}-{}-{}", std::process::id(), kiroscribe_core::time::now_ms(), NEXT.fetch_add(1, Ordering::SeqCst))
 }
 
 /// 画面の `invoke(command, args)` と同じ経路でコマンドを呼ぶ。
