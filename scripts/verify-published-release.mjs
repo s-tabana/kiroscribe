@@ -18,7 +18,9 @@
 //    公開鍵（利用者のアプリが信頼している鍵）の両方で検証できる
 //
 // 公開の直後は、配信（とくに「最新のリリース」への転送）が追いつくのに時間がかかることがあるので、
-// 合わないときは --timeout-seconds（既定 600 秒）のあいだ確かめ直す。
+// 合わないときは --timeout-seconds（既定 600 秒）のあいだ確かめ直す。同じタグで実行し直した直後は、配信の
+// キャッシュに新旧のファイルが混ざることがあるので、公開したファイルどうしの食い違い（.sig と latest.json の
+// 署名、署名の検証）も確かめ直す。
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -45,7 +47,7 @@ export function parseSums(text) {
   return sums;
 }
 
-/** 合わなかった理由（確かめ直す価値がある、つまり配信が追いついていないだけかもしれないもの） */
+/** 合わなかった理由（確かめ直す価値がある、つまり配信が追いついていない・キャッシュに新旧が混ざっているだけかもしれないもの） */
 class NotYet extends Error {}
 
 async function get(fetchImpl, url, { as = "text" } = {}) {
@@ -118,7 +120,7 @@ export async function verifyPublishedRelease(options, { fetch: fetchImpl = globa
     }
     const publishedSig = (await get(fetchImpl, `${expectedUrl}.sig`)).trim();
     if (publishedSig !== own.platforms[WINDOWS_TARGET].signature.trim()) {
-      throw new UsageError("このリリースの .sig と、latest.json の signature が違います");
+      throw new NotYet("このリリースの .sig と、latest.json の signature が違います");
     }
     report.push(`このリリースの latest.json・SHA256SUMS.txt・.sig: ${download}/`);
 
@@ -153,7 +155,7 @@ export async function verifyPublishedRelease(options, { fetch: fetchImpl = globa
       try {
         sig = verifySignature(fetched, own.platforms[WINDOWS_TARGET].signature, pubkey);
       } catch (error) {
-        throw new UsageError(`latest.json の署名を、${label}で検証できません: ${error.message}`);
+        throw new NotYet(`latest.json の署名を、${label}で検証できません: ${error.message}`);
       }
       report.push(`署名を${label}で確認しました（鍵 ID ${formatKeyId(sig.keyId)}）`);
     }
