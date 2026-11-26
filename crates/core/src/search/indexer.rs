@@ -501,7 +501,8 @@ impl Worker {
                 done,
                 total,
                 files,
-                updated_at: shared.status.updated_at,
+                // オフのあいだは索引を持たないので、更新した時刻も持たない
+                updated_at: if enabled { shared.status.updated_at } else { None },
                 folders: rows,
             };
             shared.status.clone()
