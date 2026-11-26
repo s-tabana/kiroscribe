@@ -149,7 +149,8 @@ export const called = {
 export const returned = {
   addSearchFolder: [
     null,
-    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"state":"off","total":0,"updatedAt":null},
+    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"revision":0,"state":"off","total":0,"updatedAt":null},
+    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"revision":0,"state":"ready","total":0,"updatedAt":0},
   ] satisfies Returned<"addSearchFolder">[],
   cancelAi: [
     null,
@@ -202,8 +203,8 @@ export const returned = {
     {"fetchedAt":0,"releases":[{"body":"…","htmlUrl":"…","name":"…","publishedAt":"…","tagName":"…","version":"…"}],"source":"network"},
   ] satisfies Returned<"getReleaseNotes">[],
   getSearchIndexStatus: [
-    {"done":0,"files":0,"folders":[],"state":"off","total":0,"updatedAt":null},
-    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"state":"ready","total":0,"updatedAt":0},
+    {"done":0,"files":0,"folders":[],"revision":0,"state":"off","total":0,"updatedAt":null},
+    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"revision":0,"state":"ready","total":0,"updatedAt":0},
   ] satisfies Returned<"getSearchIndexStatus">[],
   getSettings: [
     {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":true,"companionModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
@@ -237,10 +238,10 @@ export const returned = {
     {"elapsedMs":0,"noteId":"…","runningSince":null,"sources":["me","them"],"state":"paused"},
   ] satisfies Returned<"pauseRecording">[],
   rebuildSearchIndex: [
-    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":true,"path":"…","truncated":false}],"state":"building","total":0,"updatedAt":0},
+    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":true,"path":"…","truncated":false}],"revision":0,"state":"building","total":0,"updatedAt":0},
   ] satisfies Returned<"rebuildSearchIndex">[],
   removeSearchFolder: [
-    {"done":0,"files":0,"folders":[],"state":"building","total":0,"updatedAt":0},
+    {"done":0,"files":0,"folders":[],"revision":0,"state":"building","total":0,"updatedAt":0},
   ] satisfies Returned<"removeSearchFolder">[],
   resumeRecording: [
     {"elapsedMs":0,"noteId":"…","runningSince":0,"sources":["me","them"],"state":"recording"},
@@ -260,7 +261,7 @@ export const returned = {
     {"anthropic":true,"openai":true,"storage":"…"},
   ] satisfies Returned<"setApiKey">[],
   setSearchFolderNoContent: [
-    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":true,"path":"…","truncated":false}],"state":"building","total":0,"updatedAt":0},
+    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":true,"path":"…","truncated":false}],"revision":0,"state":"ready","total":0,"updatedAt":0},
   ] satisfies Returned<"setSearchFolderNoContent">[],
   startRecording: [
     {"elapsedMs":0,"noteId":"…","runningSince":0,"sources":["me","them"],"state":"recording"},
@@ -309,15 +310,15 @@ export const emitted = {
     {"elapsedMs":0,"noteId":null,"runningSince":null,"sources":[],"state":"idle"},
   ] satisfies Emitted<"onRecordingStatus">[],
   onSearchIndexStatus: [
-    {"done":0,"files":0,"folders":[],"state":"building","total":0,"updatedAt":0},
-    {"done":0,"files":0,"folders":[],"state":"building","total":0,"updatedAt":null},
-    {"done":0,"files":0,"folders":[],"state":"off","total":0,"updatedAt":null},
-    {"done":0,"files":0,"folders":[],"state":"ready","total":0,"updatedAt":0},
-    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"state":"building","total":0,"updatedAt":null},
-    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"state":"off","total":0,"updatedAt":null},
-    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"state":"ready","total":0,"updatedAt":0},
-    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":true,"path":"…","truncated":false}],"state":"building","total":0,"updatedAt":0},
-    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":true,"path":"…","truncated":false}],"state":"ready","total":0,"updatedAt":0},
+    {"done":0,"files":0,"folders":[],"revision":0,"state":"building","total":0,"updatedAt":0},
+    {"done":0,"files":0,"folders":[],"revision":0,"state":"building","total":0,"updatedAt":null},
+    {"done":0,"files":0,"folders":[],"revision":0,"state":"off","total":0,"updatedAt":null},
+    {"done":0,"files":0,"folders":[],"revision":0,"state":"ready","total":0,"updatedAt":0},
+    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"revision":0,"state":"building","total":0,"updatedAt":null},
+    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"revision":0,"state":"off","total":0,"updatedAt":null},
+    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"revision":0,"state":"ready","total":0,"updatedAt":0},
+    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":true,"path":"…","truncated":false}],"revision":0,"state":"building","total":0,"updatedAt":0},
+    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":true,"path":"…","truncated":false}],"revision":0,"state":"ready","total":0,"updatedAt":0},
   ] satisfies Emitted<"onSearchIndexStatus">[],
   onSegment: [
     {"endedAt":0,"id":0,"noteId":"…","speaker":"me","startedAt":0,"text":"…"},

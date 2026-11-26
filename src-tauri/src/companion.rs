@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use kiroscribe_core::search::{IndexStatus, Indexer, SearchFolder, INDEX_FILE};
+use kiroscribe_core::search::{overlap, IndexStatus, Indexer, Overlap, SearchFolder, INDEX_FILE};
 use kiroscribe_core::settings::Settings;
 use tauri::{Emitter, Manager, State};
 
@@ -95,9 +95,19 @@ pub async fn add_search_folder(
     }
     let path = path.to_string_lossy().to_string();
     let mut folders = state.db().load_search_folders()?;
-    if !folders.iter().any(|folder| folder.path == path) {
-        folders.push(SearchFolder { path, no_content: false });
+    match overlap(&folders, &path) {
+        // 一覧にあるフォルダなら、何も変えない（調べ直さない）
+        Some(Overlap::Same(_)) => return Ok(Some(companion.indexer.status())),
+        // 同じファイルを 2 つのフォルダで数えないよう、重なるフォルダは足さない
+        Some(Overlap::Nested(existing)) => {
+            return Err(CommandError(format!(
+                "追加したフォルダ（{}）と中身が重なるため、追加できません。中のフォルダや、それを含むフォルダは、どちらか一方だけを追加してください",
+                existing.path
+            )))
+        }
+        None => {}
     }
+    folders.push(SearchFolder { path, no_content: false });
     save_folders(&state, &companion, folders).map(Some)
 }
 
@@ -125,8 +135,13 @@ pub fn set_search_folder_no_content(
     let Some(folder) = folders.iter_mut().find(|folder| folder.path == path) else {
         return Err(CommandError("このフォルダは一覧にありません".into()));
     };
-    folder.no_content = value;
-    save_folders(&state, &companion, folders)
+    if folder.no_content != value {
+        folder.no_content = value;
+        state.db().save_search_folders(&folders)?;
+        // 索引の中身は変わらないので、調べ直さない（作っている途中の処理も止めない）
+        companion.indexer.set_folder_options(folders);
+    }
+    Ok(companion.indexer.status())
 }
 
 /// 「索引を作り直す」: 索引を空にしてから作り直す。相棒がオフのときは作り直さない。

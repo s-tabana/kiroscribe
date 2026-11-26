@@ -63,6 +63,10 @@ test(
     await saveSettings(session);
     await session.waitForText(indexStatus, "会議の相棒がオフのため、索引は作っていません");
     await session.waitForText(row(folder), "0 件");
+    // 「オフ」と表示するのは、索引のファイルを消し終えてから
+    for (const suffix of ["", "-wal", "-shm"]) {
+      assert.equal(fs.existsSync(path.join(ctx.work.dataDir, `search-index.db${suffix}`)), false, `search-index.db${suffix} を消す`);
+    }
     assert.equal(await (await session.$(button("索引を作り直す"))).isEnabled(), false);
     assert.equal(await (await session.$(sel.settingsDialog)).isDisplayed(), true);
   },

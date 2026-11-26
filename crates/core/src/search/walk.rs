@@ -1,7 +1,8 @@
 //! 追加したフォルダの中の、索引に入れるファイルを集める。
 //!
 //! 隠しフォルダ・システムのフォルダ・「.」で始まるフォルダ・`node_modules`・ごみ箱は下りない。
-//! シンボリックリンク・ジャンクション（Windows の再解析ポイント）・ショートカット（.lnk）はたどらない。
+//! シンボリックリンク・ジャンクション・ショートカット（.lnk）はたどらない。
+//! OneDrive の同期したファイルのような、別の場所を指さない再解析ポイントは、ふつうのファイルとして扱う。
 
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,8 @@ pub struct FileEntry {
     /// 更新日時（ミリ秒）
     pub modified: i64,
     pub size: u64,
+    /// クラウドにだけあるファイル。ダウンロードさせないよう、中身を読まずに名前だけで探す
+    pub online_only: bool,
 }
 
 #[derive(Debug, Default)]
@@ -42,34 +45,42 @@ pub struct Walked {
     pub truncated: bool,
 }
 
-/// 再解析ポイント（シンボリックリンク・ジャンクションなど）か。
-fn is_link(meta: &Metadata) -> bool {
-    if meta.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return true;
-        }
-    }
-    false
+const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+const FILE_ATTRIBUTE_OFFLINE: u32 = 0x1000;
+const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x4_0000;
+const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
+
+/// ファイルやフォルダの扱い方（Windows の属性から決める）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Traits {
+    /// たどらないリンク（シンボリックリンク・ジャンクション）
+    link: bool,
+    hidden_or_system: bool,
+    /// クラウドにだけある（OneDrive の「オンライン時のみ」など。読むとダウンロードが始まる）
+    online_only: bool,
 }
 
-/// 隠し属性かシステム属性か（Windows だけ。ほかの OS では、名前の「.」で決める）。
-fn is_hidden_or_system(_meta: &Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-        const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
-        if _meta.file_attributes() & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0 {
-            return true;
-        }
+/// `name_surrogate` は、別の場所を指す再解析ポイント（シンボリックリンク・ジャンクション）か
+/// （Rust の `FileType::is_symlink` が、Windows ではこれを返す）。
+/// OneDrive の同期済みのファイルのような、ほかの再解析ポイントは、ふつうのファイルとして扱う。
+fn traits(name_surrogate: bool, attributes: u32) -> Traits {
+    Traits {
+        link: name_surrogate,
+        hidden_or_system: attributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0,
+        online_only: attributes & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0,
     }
-    false
+}
+
+fn traits_of(meta: &Metadata) -> Traits {
+    #[cfg(windows)]
+    let attributes = {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes()
+    };
+    #[cfg(not(windows))]
+    let attributes = 0;
+    traits(meta.file_type().is_symlink(), attributes)
 }
 
 /// 下りないフォルダの名前か。
@@ -104,10 +115,11 @@ pub fn inspect_file(path: &Path, limits: Limits) -> Option<FileEntry> {
     }
     let kind = kind_of(path)?;
     let meta = std::fs::symlink_metadata(path).ok()?;
-    if !meta.is_file() || is_link(&meta) || is_hidden_or_system(&meta) || meta.len() > limits.max_bytes {
+    let traits = traits_of(&meta);
+    if !meta.is_file() || traits.link || traits.hidden_or_system || meta.len() > limits.max_bytes {
         return None;
     }
-    Some(FileEntry { path: path.to_path_buf(), kind, modified: modified_ms(&meta), size: meta.len() })
+    Some(FileEntry { path: path.to_path_buf(), kind, modified: modified_ms(&meta), size: meta.len(), online_only: traits.online_only })
 }
 
 /// `path` が `root` の中にあり、途中のフォルダを含めて、リンクをたどらずに届き、除くフォルダを通らないか。
@@ -125,11 +137,12 @@ pub fn reachable_without_links(root: &Path, path: &Path) -> bool {
         let Ok(meta) = std::fs::symlink_metadata(&current) else {
             return false;
         };
-        if is_link(&meta) {
+        let traits = traits_of(&meta);
+        if traits.link {
             return false;
         }
         let last = index + 1 == parts.len();
-        if !last && (is_hidden_or_system(&meta) || name.to_str().is_none_or(is_skipped_dir_name)) {
+        if !last && (traits.hidden_or_system || name.to_str().is_none_or(is_skipped_dir_name)) {
             return false;
         }
     }
@@ -155,7 +168,8 @@ pub fn walk(root: &Path, limits: Limits) -> std::io::Result<Walked> {
             let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
                 continue;
             };
-            if is_link(&meta) || is_hidden_or_system(&meta) {
+            let traits = traits_of(&meta);
+            if traits.link || traits.hidden_or_system {
                 continue;
             }
             let name = entry.file_name();
@@ -288,6 +302,40 @@ mod tests {
         let walked = walk(root, Limits::default()).unwrap();
         assert_eq!(names(&walked, root), ["中.txt"]);
         assert!(!reachable_without_links(root, &root.join("ジャンクション").join("外.txt")));
+    }
+
+    // [IDX-027]
+    #[test]
+    fn only_links_to_other_places_are_skipped() {
+        const REPARSE_POINT: u32 = 0x400;
+        const PINNED: u32 = 0x8_0000;
+        // OneDrive の同期済みのファイル・フォルダ（クラウドの再解析ポイント。別の場所は指さない）
+        let synced = traits(false, REPARSE_POINT | PINNED);
+        assert_eq!(synced, Traits { link: false, hidden_or_system: false, online_only: false });
+        // OneDrive の「オンライン時のみ」のファイル（中身を読むとダウンロードが始まる）
+        let online = traits(false, REPARSE_POINT | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS);
+        assert_eq!(online, Traits { link: false, hidden_or_system: false, online_only: true });
+        assert!(traits(false, FILE_ATTRIBUTE_OFFLINE).online_only);
+        // シンボリックリンク・ジャンクション
+        assert!(traits(true, REPARSE_POINT).link);
+        assert!(traits(false, FILE_ATTRIBUTE_HIDDEN).hidden_or_system);
+        assert!(traits(false, FILE_ATTRIBUTE_SYSTEM).hidden_or_system);
+        assert_eq!(traits(false, 0), Traits { link: false, hidden_or_system: false, online_only: false });
+    }
+
+    // [IDX-003]
+    #[test]
+    fn exactly_the_file_limit_is_not_marked_partial() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..3 {
+            touch(&root.join(format!("{i}.txt")));
+        }
+        let exact = walk(root, Limits { max_files: 3, ..Limits::default() }).unwrap();
+        assert_eq!(exact.files.len(), 3);
+        assert!(!exact.truncated, "上限ちょうどなら、一部だけではない");
+        let over = walk(root, Limits { max_files: 2, ..Limits::default() }).unwrap();
+        assert!(over.truncated);
     }
 
     // [IDX-003]

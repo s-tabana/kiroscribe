@@ -202,9 +202,12 @@ fn ipc_contract_matches_the_frontend() {
     assert!(!status.to_string().contains("sk-ant-test"), "キーの値は画面に返さない");
 
     // ---- 会議の相棒の資料の索引（フォルダを選ぶダイアログは dialogs.json の答え） ----
+    // 索引の状態は裏で変わるので、命令のたびに、その命令のあとに届いた知らせを待つ（見本に入る知らせが、その時々で変わらないように）
+    let index_events = |since: usize| events_named(&events, "search-index-status").split_off(since);
+    let index_seen = || events_named(&events, "search-index-status").len();
     let answers = fixture.dir.join("dialogs.json");
     let folder = fixture.dir.join("共有資料");
-    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::create_dir_all(folder.join("人事")).unwrap();
     std::fs::write(folder.join("経費精算の手順.txt"), "申請は月末まで").unwrap();
     let folder_path = folder.to_string_lossy().to_string();
     assert_eq!(s.ok("get_search_index_status", json!({}))["state"], "off");
@@ -214,43 +217,65 @@ fn ipc_contract_matches_the_frontend() {
     let status = s.ok("add_search_folder", json!({}));
     assert_eq!(status["folders"][0]["path"], folder_path.as_str());
     assert_eq!(status["folders"][0]["noContent"], false);
-    std::fs::remove_file(&answers).unwrap();
     // 相棒をオフにしてから、オンにして保存すると、索引を作る
     let mut companion = settings.clone();
     companion["companion"] = json!(false);
+    let since = index_seen();
     s.ok("save_settings", json!({ "settings": companion }));
+    wait_until("オフにしたあとの、索引を消し終えた知らせ", || {
+        index_events(since).iter().any(|status| status["state"] == "off").then_some(())
+    });
     companion["companion"] = json!(true);
+    let since = index_seen();
     s.ok("save_settings", json!({ "settings": companion }));
     wait_until("索引の作成", || {
-        let status = s.peek("get_search_index_status", json!({}));
-        (status["state"] == "ready" && status["files"] == 1).then_some(())
+        index_events(since).iter().any(|status| status["state"] == "ready" && status["files"] == 1).then_some(())
     });
+    assert!(index_events(since).iter().any(|status| status["state"] == "building"));
     let status = s.ok("get_search_index_status", json!({}));
     assert_eq!(status["folders"][0]["files"], 1);
-    assert!(events_named(&events, "search-index-status").iter().any(|status| status["state"] == "building"));
+    let ready_at = status["updatedAt"].clone();
+    // 一覧にあるフォルダを選び直しても、何も変えない（調べ直さない）
+    let since = index_seen();
+    let status = s.ok("add_search_folder", json!({}));
+    assert_eq!(status["state"], "ready");
+    assert_eq!(status["folders"].as_array().unwrap().len(), 1);
+    // 一覧のフォルダの中のフォルダは足さない
+    std::fs::write(&answers, json!({ "folderPath": folder.join("人事").to_string_lossy() }).to_string()).unwrap();
+    let refused = s.call("add_search_folder", json!({})).unwrap_err();
+    assert!(refused.contains("中身が重なる"), "{refused}");
+    std::fs::remove_file(&answers).unwrap();
+    // 「中身を送らない」は、調べ直さず、状態と更新した時刻も変えない
     let status = s.ok("set_search_folder_no_content", json!({ "path": folder_path, "value": true }));
     assert_eq!(status["folders"][0]["noContent"], true);
+    assert_eq!(status["state"], "ready");
+    assert_eq!(status["updatedAt"], ready_at);
+    assert_eq!(index_events(since), Vec::<Value>::new(), "選び直しと「中身を送らない」では、調べ直さない");
+    let since = index_seen();
     s.ok("rebuild_search_index", json!({}));
     wait_until("索引の作り直し", || {
-        let status = s.peek("get_search_index_status", json!({}));
-        (status["state"] == "ready" && status["files"] == 1).then_some(())
+        index_events(since).iter().any(|status| status["state"] == "ready" && status["files"] == 1).then_some(())
     });
+    let since = index_seen();
     let status = s.ok("remove_search_folder", json!({ "path": folder_path }));
     assert_eq!(status["folders"], json!([]));
-    // 外したあとの索引の更新が終わるまで待つ（見本に入るイベントの順が、その時々で変わらないように）
-    wait_until("外したあとの索引", || {
-        let ready = |status: &Value| status["state"] == "ready" && status["folders"] == json!([]);
-        events_named(&events, "search-index-status").iter().any(ready).then_some(())
+    wait_until("フォルダを外したあとの索引", || {
+        index_events(since).iter().any(|status| status["state"] == "ready").then_some(())
     });
     companion["companion"] = json!(false);
+    let since = index_seen();
     s.ok("save_settings", json!({ "settings": companion }));
     let refused = s.call("rebuild_search_index", json!({})).unwrap_err();
     assert!(refused.contains("会議の相棒がオフ"), "{refused}");
+    wait_until("オフにしたあとの、索引を消し終えた知らせ", || {
+        index_events(since).iter().any(|status| status["state"] == "off").then_some(())
+    });
+    // 相棒をオンに戻すと、空の索引を作る（終わるまで待つ）
+    let since = index_seen();
     s.ok("save_settings", json!({ "settings": settings }));
-    // 相棒をオンに戻すと、空の索引を作る（終わるまで待つ。見本に入るイベントが、その時々で変わらないように）
     wait_until("空の索引", || {
         let ready = |status: &Value| status["state"] == "ready" && status["folders"] == json!([]);
-        events_named(&events, "search-index-status").iter().any(ready).then_some(())
+        index_events(since).iter().any(ready).then_some(())
     });
 
     // ---- トレイのメニューでの切り替え（開いている設定画面に、変わった設定を知らせる）----

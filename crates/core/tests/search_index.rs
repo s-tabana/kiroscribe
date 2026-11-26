@@ -8,12 +8,19 @@ use std::time::{Duration, Instant, SystemTime};
 use kiroscribe_core::search::store::SearchIndex;
 use kiroscribe_core::search::{IndexState, IndexStatus, Indexer, SearchFolder, INDEX_FILE};
 
+/// 知らせた状態と、知らせた時点で索引のファイルに資料の中身（[`MARKER`]）が残っていたか。
+type Events = Arc<Mutex<Vec<(IndexStatus, bool)>>>;
+
+/// 資料の中身に入れておく、ファイルに残っていないかを確かめるための文字。
+const MARKER: &str = "KIROSCRIBE-MARKER";
+
+// 作業用のスレッド（indexer）を、一時フォルダ（_dir）より先に止める（フィールドは書いた順に片付く）
 struct Fixture {
-    _dir: tempfile::TempDir,
+    indexer: Indexer,
     root: PathBuf,
     index_path: PathBuf,
-    indexer: Indexer,
-    events: Arc<Mutex<Vec<IndexStatus>>>,
+    events: Events,
+    _dir: tempfile::TempDir,
 }
 
 fn fixture() -> Fixture {
@@ -21,10 +28,26 @@ fn fixture() -> Fixture {
     let root = dir.path().join("共有資料");
     std::fs::create_dir_all(&root).unwrap();
     let index_path = dir.path().join("data").join(INDEX_FILE);
-    let events = Arc::new(Mutex::new(Vec::new()));
+    let events: Events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
-    let indexer = Indexer::spawn(index_path.clone(), move |status| sink.lock().unwrap().push(status.clone()));
-    Fixture { _dir: dir, root, index_path, indexer, events }
+    let path = index_path.clone();
+    let indexer = Indexer::spawn(index_path.clone(), move |status| {
+        sink.lock().unwrap().push((status.clone(), left_on_disk(&path)));
+    });
+    Fixture { indexer, root, index_path, events, _dir: dir }
+}
+
+/// 索引のファイル（本体・-wal・-shm）のどこかに、資料の中身（[`MARKER`]）が残っているか。
+fn left_on_disk(index_path: &Path) -> bool {
+    ["", "-wal", "-shm"].iter().any(|suffix| {
+        let mut name = index_path.as_os_str().to_os_string();
+        name.push(suffix);
+        std::fs::read(PathBuf::from(name)).is_ok_and(|bytes| bytes.windows(MARKER.len()).any(|w| w == MARKER.as_bytes()))
+    })
+}
+
+fn events(f: &Fixture) -> Vec<IndexStatus> {
+    f.events.lock().unwrap().iter().map(|(status, _)| status.clone()).collect()
 }
 
 fn folder(path: &Path) -> SearchFolder {
@@ -80,8 +103,7 @@ fn builds_in_the_background_only_when_enabled() {
     let status = f.indexer.status();
     assert!(status.updated_at.is_some(), "更新した時刻");
     assert_eq!(status.folders[0].files, 30);
-    let events = f.events.lock().unwrap().clone();
-    assert!(events.iter().any(|s| s.state == IndexState::Building), "作っている途中の状態を知らせる");
+    assert!(events(&f).iter().any(|s| s.state == IndexState::Building), "作っている途中の状態を知らせる");
     assert_eq!(search(&f, "経費").len(), 8);
 }
 
@@ -202,4 +224,162 @@ fn turning_off_clears_the_index_and_keeps_the_folders() {
     // 次にオンにしたときに作り直す
     f.indexer.enable(vec![folder(&f.root)]);
     wait_ready(&f, 2);
+}
+
+/// オフにしたら、索引のファイルを消し終えてから「オフ」を知らせる。資料の中身は、本体にも -wal にも残らない。
+// [IDX-028]
+#[test]
+fn turning_off_erases_the_files_before_reporting_off() {
+    let f = fixture();
+    for i in 0..20 {
+        write(&f.root.join(format!("{i}.txt")), &format!("{MARKER} 経費 {i} {}", "x".repeat(3_000)));
+    }
+    f.indexer.enable(vec![folder(&f.root)]);
+    wait_ready(&f, 20);
+    assert!(left_on_disk(&f.index_path), "作ったあとは、ファイルにある");
+
+    // オフにした直後に一覧を変えても、消し終える前に「オフ」を知らせない
+    let before = f.events.lock().unwrap().len();
+    f.indexer.disable();
+    f.indexer.set_folders(vec![folder(&f.root)]);
+    wait_until("オフ", Duration::from_secs(20), || f.indexer.status().state == IndexState::Off);
+    let after: Vec<(IndexStatus, bool)> = f.events.lock().unwrap()[before..].to_vec();
+    assert!(!after.is_empty());
+    for (status, left) in &after {
+        assert_eq!(status.state, IndexState::Off, "オフにしたあとに、ほかの状態を知らせない: {after:?}");
+        assert!(!left, "「オフ」を知らせた時点で、中身は消えている");
+    }
+    assert!(!left_on_disk(&f.index_path), "資料の中身がファイルに残らない");
+    assert!(!f.index_path.exists(), "索引のファイルも消す");
+    assert_eq!(f.indexer.status().updated_at, None);
+}
+
+/// 索引のファイルを消せないとき（ほかのプログラムが開いているなど）も、中身は空にする。
+// [IDX-028]
+#[cfg(unix)]
+#[test]
+fn turning_off_empties_the_index_even_when_the_files_cannot_be_removed() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    write(&f.root.join("a.txt"), &format!("{MARKER} 経費"));
+    f.indexer.enable(vec![folder(&f.root)]);
+    wait_ready(&f, 1);
+    let data = f.index_path.parent().unwrap().to_path_buf();
+    // フォルダを読み取りだけにすると、中のファイルを消せない（管理者で動かしているときは消せてしまう）
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o555)).unwrap();
+    f.indexer.disable();
+    wait_until("オフ", Duration::from_secs(20), || f.indexer.status().state == IndexState::Off);
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!left_on_disk(&f.index_path), "消せなくても、中身は残さない");
+}
+
+/// 「中身を送らない」を切り替えても、調べ直さず、作っている途中の処理を止めず、状態と更新した時刻も変えない。
+// [IDX-034]
+#[test]
+fn no_content_option_does_not_rescan() {
+    let f = fixture();
+    write(&f.root.join("a.txt"), "経費");
+    f.indexer.enable(vec![folder(&f.root)]);
+    wait_ready(&f, 1);
+    let before = f.indexer.status();
+    let emitted = f.events.lock().unwrap().len();
+    let mut changed = folder(&f.root);
+    changed.no_content = true;
+    f.indexer.set_folder_options(vec![changed]);
+    let after = f.indexer.status();
+    assert!(after.folders[0].no_content);
+    assert_eq!(after.state, IndexState::Ready);
+    assert_eq!(after.updated_at, before.updated_at);
+    assert!(after.revision > before.revision, "画面が新しい状態として受け取れる");
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(f.events.lock().unwrap().len(), emitted, "調べ直さない");
+
+    // 作っている途中に切り替えても、作り終える
+    for i in 0..300 {
+        write(&f.root.join(format!("{i}.txt")), "経費");
+    }
+    assert!(f.indexer.rebuild());
+    let mut back = folder(&f.root);
+    back.no_content = false;
+    f.indexer.set_folder_options(vec![back]);
+    wait_ready(&f, 301);
+    assert!(!f.indexer.status().folders[0].no_content, "作り終えたあとも、切り替えたあとの値");
+}
+
+/// 状態の番号は、知らせるたびに増える（画面は、古い戻り値で新しい知らせを上書きしない）。
+// [IDX-008]
+#[test]
+fn revisions_increase_with_every_status() {
+    let f = fixture();
+    write(&f.root.join("a.txt"), "経費");
+    f.indexer.enable(vec![folder(&f.root)]);
+    wait_ready(&f, 1);
+    let revisions: Vec<u64> = events(&f).iter().map(|s| s.revision).collect();
+    assert!(revisions.windows(2).all(|w| w[0] < w[1]), "{revisions:?}");
+    assert_eq!(f.indexer.status().revision, *revisions.last().unwrap());
+}
+
+/// 変更の知らせが途切れずに続いても、反映を後回しにし続けない。
+// [IDX-009]
+#[test]
+fn changes_are_reflected_while_other_files_keep_changing() {
+    let f = fixture();
+    write(&f.root.join("log.txt"), "0");
+    f.indexer.enable(vec![folder(&f.root)]);
+    wait_ready(&f, 1);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let busy = {
+        let stop = stop.clone();
+        let log = f.root.join("log.txt");
+        std::thread::spawn(move || {
+            let mut i = 0;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                i += 1;
+                std::fs::write(&log, i.to_string()).unwrap();
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        })
+    };
+    write(&f.root.join("出張.txt"), "宿泊の上限");
+    let started = Instant::now();
+    wait_until("書き込みが続くあいだの反映", Duration::from_secs(25), || search(&f, "宿泊") == ["出張.txt"]);
+    let elapsed = started.elapsed();
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    busy.join().unwrap();
+    assert!(elapsed < Duration::from_secs(20), "{elapsed:?}");
+}
+
+/// 見張っているフォルダが見つからなくなっても（ドライブが外れたなど）、索引は消さずに「見つかりません」にする。
+// [IDX-010]
+#[test]
+fn a_watched_folder_that_disappears_keeps_its_index() {
+    let f = fixture();
+    write(&f.root.join("a.txt"), "経費");
+    f.indexer.enable(vec![folder(&f.root)]);
+    wait_ready(&f, 1);
+    let moved = f.root.parent().unwrap().join("退避");
+    std::fs::rename(&f.root, &moved).unwrap();
+    wait_until("見つからない表示", Duration::from_secs(30), || f.indexer.status().folders[0].missing);
+    assert_eq!(search(&f, "経費"), ["a.txt"], "索引は消さずに残す");
+    assert_eq!(f.indexer.status().files, 1);
+}
+
+/// 作業用のスレッドは、最後の窓口がなくなったら止まり、一時フォルダを作り直さない。
+// [IDX-012]
+#[test]
+fn dropping_the_indexer_stops_the_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("資料");
+    write(&root.join("a.txt"), "経費");
+    let index_path = dir.path().join("data").join(INDEX_FILE);
+    let indexer = Indexer::spawn(index_path.clone(), |_| {});
+    let copy = indexer.clone();
+    indexer.enable(vec![folder(&root)]);
+    drop(indexer);
+    wait_until("索引", Duration::from_secs(20), || copy.status().state == IndexState::Ready);
+    drop(copy);
+    let path = dir.path().to_path_buf();
+    drop(dir);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!path.exists(), "止めたあとに、索引のフォルダを作り直さない");
 }

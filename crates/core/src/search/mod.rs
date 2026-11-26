@@ -20,6 +20,46 @@ use crate::error::Result;
 /// 探すフォルダの一覧を保存する、設定のテーブルのキー（追加と外すは、その場で保存する）。
 const FOLDERS_KEY: &str = "companion.folders";
 
+/// フォルダのパスを、比べるための形にする（区切りの違いと末尾の区切りを除く。Windows では大文字と小文字を区別しない）。
+fn folder_key(path: &str) -> Vec<String> {
+    std::path::Path::new(path)
+        .components()
+        .filter(|part| !matches!(part, std::path::Component::CurDir))
+        .map(|part| {
+            let text = part.as_os_str().to_string_lossy();
+            if cfg!(windows) {
+                text.to_lowercase()
+            } else {
+                text.into_owned()
+            }
+        })
+        .collect()
+}
+
+/// 足そうとしているフォルダと、すでにある一覧のフォルダとの重なり。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Overlap<'a> {
+    /// 同じフォルダ
+    Same(&'a SearchFolder),
+    /// 一覧のフォルダの中か、一覧のフォルダを含む
+    Nested(&'a SearchFolder),
+}
+
+/// `path` が、一覧のどれかのフォルダと同じか、中か、それを含むか。
+pub fn overlap<'a>(folders: &'a [SearchFolder], path: &str) -> Option<Overlap<'a>> {
+    let key = folder_key(path);
+    folders.iter().find_map(|folder| {
+        let other = folder_key(&folder.path);
+        if other == key {
+            Some(Overlap::Same(folder))
+        } else if other.starts_with(&key) || key.starts_with(&other) {
+            Some(Overlap::Nested(folder))
+        } else {
+            None
+        }
+    })
+}
+
 impl Database {
     /// 探すフォルダの一覧（何も保存していなければ空）。
     pub fn load_search_folders(&self) -> Result<Vec<SearchFolder>> {
@@ -54,5 +94,18 @@ mod tests {
         assert!(!db.load_search_folders().unwrap()[0].no_content);
         // 設定（「設定を保存」で保存するもの）とは別に保存する
         assert_eq!(db.load_settings().unwrap(), crate::settings::Settings::default());
+    }
+
+    // [IDX-001]
+    #[test]
+    fn overlapping_folders_are_detected() {
+        let folders = vec![SearchFolder { path: "/home/a/資料".into(), no_content: false }];
+        assert_eq!(overlap(&folders, "/home/a/資料"), Some(Overlap::Same(&folders[0])));
+        assert_eq!(overlap(&folders, "/home/a/資料/"), Some(Overlap::Same(&folders[0])), "末尾の区切り");
+        assert_eq!(overlap(&folders, "/home/a/資料/人事"), Some(Overlap::Nested(&folders[0])), "中のフォルダ");
+        assert_eq!(overlap(&folders, "/home/a"), Some(Overlap::Nested(&folders[0])), "含むフォルダ");
+        assert_eq!(overlap(&folders, "/home/a/資料2"), None, "名前の先頭が同じだけのフォルダ");
+        assert_eq!(overlap(&folders, "/home/b"), None);
+        assert_eq!(overlap(&[], "/home/b"), None);
     }
 }

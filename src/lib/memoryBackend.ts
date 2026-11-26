@@ -260,6 +260,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
     files: 0,
     updatedAt: settings.companion ? now() : null,
     folders: [],
+    revision: 0,
   };
   const searchIndexEvents = new Emitter<SearchIndexStatus>();
   const publishSearchIndex = (next: Partial<SearchIndexStatus> = {}) => {
@@ -273,6 +274,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       updatedAt: on ? now() : null,
       ...next,
       folders: next.folders ?? searchFolders.map((folder) => ({ ...folder })),
+      revision: searchIndex.revision + 1,
     };
     searchIndex.files = searchIndex.folders.reduce((sum, folder) => sum + folder.files, 0);
     searchIndexEvents.emit({ ...searchIndex });
@@ -544,9 +546,9 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
     async addSearchFolder() {
       const path = options.pickFolder ? options.pickFolder() : "C:\\Users\\preview\\Documents\\共有資料";
       if (!path) return null;
-      if (!searchFolders.some((folder) => folder.path === path)) {
-        searchFolders.push({ path, noContent: false, files: 0, missing: false, truncated: false });
-      }
+      // 一覧にあるフォルダなら、何も変えない
+      if (searchFolders.some((folder) => folder.path === path)) return this.getSearchIndexStatus();
+      searchFolders.push({ path, noContent: false, files: 0, missing: false, truncated: false });
       return publishSearchIndex();
     },
     async removeSearchFolder(path) {
@@ -557,7 +559,8 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       const folder = searchFolders.find((f) => f.path === path);
       if (!folder) throw "このフォルダは一覧にありません";
       folder.noContent = value;
-      return publishSearchIndex();
+      // 調べ直さないので、状態と更新した時刻は変えない
+      return publishSearchIndex({ state: searchIndex.state, updatedAt: searchIndex.updatedAt });
     },
     async rebuildSearchIndex() {
       if (!settings.companion) throw "会議の相棒がオフのときは、索引を作り直せません";
@@ -566,7 +569,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
     onSearchIndexStatus: (cb) => searchIndexEvents.on(cb),
     setSearchIndexStatus(status) {
       if (status.folders) searchFolders = status.folders.map((folder) => ({ ...folder }));
-      searchIndex = { ...searchIndex, ...status };
+      searchIndex = { ...searchIndex, ...status, revision: status.revision ?? searchIndex.revision + 1 };
       searchIndexEvents.emit({ ...searchIndex });
     },
 

@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { errorMessage, useBackend } from "../lib/backend";
-import { hourlyCostText, indexStatusText } from "../lib/companion";
+import { hourlyCostText, hourlyCostUsd, indexStatusText } from "../lib/companion";
 import type { SearchIndexStatus, Settings } from "../lib/types";
 
 interface CompanionSectionProps {
@@ -20,13 +20,17 @@ export function CompanionSection({ settings, modelSelect, onCompanionChange, onE
   const [index, setIndex] = useState<SearchIndexStatus | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // 戻り値と知らせは、届く順が前後することがある。番号（revision）が小さい古い状態で、新しい状態を上書きしない
+  const apply = (next: SearchIndexStatus) =>
+    setIndex((current) => (current && current.revision > next.revision ? current : next));
+
   useEffect(() => {
     let active = true;
     backend
       .getSearchIndexStatus()
-      .then((status) => active && setIndex(status))
+      .then((status) => active && apply(status))
       .catch((err) => onError(errorMessage(err)));
-    const off = backend.onSearchIndexStatus(setIndex);
+    const off = backend.onSearchIndexStatus(apply);
     return () => {
       active = false;
       off();
@@ -38,7 +42,7 @@ export function CompanionSection({ settings, modelSelect, onCompanionChange, onE
     setBusy(true);
     try {
       const next = await task();
-      if (next) setIndex(next);
+      if (next) apply(next);
     } catch (err) {
       onError(errorMessage(err));
     } finally {
@@ -75,7 +79,7 @@ export function CompanionSection({ settings, modelSelect, onCompanionChange, onE
         <dt>費用</dt>
         <dd>
           {`お使いの Anthropic の API キーに請求されます。${hourlyCostText(settings.companionModel)}` +
-            "（選んでいる相棒のモデルで、多めに見積もった額）"}
+            (hourlyCostUsd(settings.companionModel) === null ? "" : "（選んでいる相棒のモデルで、多めに見積もった額）")}
         </dd>
       </dl>
       <div className="field-row">

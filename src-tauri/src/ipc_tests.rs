@@ -352,8 +352,8 @@ fn mock_app(update_endpoint: &str) -> (tauri::App<MockRuntime>, WebviewWindow<Mo
     app.manage(BackgroundState::default());
     app.manage(crate::meeting_watch::MeetingState::default());
     app.manage(UpdateState::new(false, None));
-    // 資料の索引は、テストごとの一時フォルダに作る（相棒がオフのまま始める）
-    let index_dir = std::env::temp_dir().join(format!("kiroscribe-ipc-{}", uuid_like()));
+    // 資料の索引は、テストごとのフォルダに作る（相棒がオフのまま始める）
+    let index_dir = index_root().join(uuid_like());
     crate::companion::setup(app.handle(), &index_dir, &kiroscribe_core::settings::Settings { companion: false, ..Default::default() }, Vec::new());
     let window = WebviewWindowBuilder::new(&app, MAIN_LABEL, Default::default())
         .build()
@@ -361,7 +361,22 @@ fn mock_app(update_endpoint: &str) -> (tauri::App<MockRuntime>, WebviewWindow<Mo
     (app, window)
 }
 
-/// 一時フォルダの名前に使う、ほかのテストと重ならない文字列。
+/// 資料の索引を作るフォルダ（target の下。前に動かしたテストの残りは、最初に使うときに消す）。
+fn index_root() -> &'static std::path::Path {
+    static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let exe = std::env::current_exe().expect("テストの実行ファイルの場所が分かりません");
+        let dir = exe
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("target の場所が分かりません")
+            .join("ipc-search-index");
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    })
+}
+
+/// フォルダの名前に使う、ほかのテストと重ならない文字列。
 fn uuid_like() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);

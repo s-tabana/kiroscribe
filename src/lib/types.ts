@@ -97,6 +97,8 @@ export interface SearchIndexStatus {
   /** 最後に索引を更新し終えた時刻 */
   updatedAt: number | null;
   folders: SearchFolderStatus[];
+  /** 状態が変わるたびに増える番号（これが小さい状態は古いので、新しい状態を上書きしない） */
+  revision: number;
 }
 
 // ---- 録音・文字起こし ----

@@ -152,7 +152,7 @@ describe("会議の相棒の設定", () => {
   });
 
   it("[IDX-008] 索引の状態の文", () => {
-    const base = { done: 0, total: 0, files: 0, updatedAt: null, folders: [] };
+    const base = { done: 0, total: 0, files: 0, updatedAt: null, folders: [], revision: 0 };
     expect(indexStatusText({ ...base, state: "building", done: 1234, total: 5000 })).toBe("索引を作っています（1,234 / 5,000 件）");
     expect(indexStatusText({ ...base, state: "ready", files: 5000, updatedAt: new Date(2026, 0, 1, 9, 5).getTime() })).toBe(
       "索引に入っています: 5,000 件（9:05 に更新）",
@@ -177,5 +177,47 @@ describe("会議の相棒の設定", () => {
     expect(within(area).getByText(FOLDER)).toBeInTheDocument();
     expect(within(area).getByRole("button", { name: "索引を作り直す" })).toBeDisabled();
     await expect(backend.rebuildSearchIndex()).rejects.toBe("会議の相棒がオフのときは、索引を作り直せません");
+  });
+
+  it("[IDX-008] 戻り値より先に届いた新しい知らせを、古い戻り値で上書きしない", async () => {
+    const user = userEvent.setup();
+    const { backend } = setup();
+    const area = await section();
+    // 作り直しの戻り値（作っている途中）が届く前に、作り終えた知らせが届く
+    vi.spyOn(backend, "rebuildSearchIndex").mockImplementation(async () => {
+      const building = { ...(await backend.getSearchIndexStatus()), state: "building" as const };
+      backend.setSearchIndexStatus({ state: "ready", files: 7, updatedAt: new Date(2026, 10, 27, 9, 0).getTime(), revision: building.revision + 2 });
+      return { ...building, revision: building.revision + 1 };
+    });
+    await user.click(within(area).getByRole("button", { name: "索引を作り直す" }));
+    expect(await within(area).findByText("索引に入っています: 7 件（9:00 に更新）")).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(within(area).getByText("索引に入っています: 7 件（9:00 に更新）")).toBeInTheDocument();
+  });
+
+  it("[IDX-034] 「中身を送らない」を切り替えても、索引の状態と更新した時刻は変わらない", async () => {
+    const user = userEvent.setup();
+    const { backend } = setup();
+    const area = await section();
+    await user.click(within(area).getByRole("button", { name: "フォルダを追加…" }));
+    await within(area).findByText("12 件");
+    const before = await backend.getSearchIndexStatus();
+    await user.click(within(area).getByLabelText("中身を送らない"));
+    await waitFor(async () => expect((await backend.getSearchIndexStatus()).folders[0].noContent).toBe(true));
+    const after = await backend.getSearchIndexStatus();
+    expect(after.state).toBe(before.state);
+    expect(after.updatedAt).toBe(before.updatedAt);
+
+    // 一覧にあるフォルダを選び直しても、何も変えない
+    await user.click(within(area).getByRole("button", { name: "フォルダを追加…" }));
+    expect((await backend.getSearchIndexStatus()).revision).toBe(after.revision);
+  });
+
+  it("[CMP-036] 料金の分からないモデルでは、多めに見積もった額とは書かない", async () => {
+    setup({ companionModel: "claude-future-9" });
+    const area = await section();
+    const list = within(area).getByLabelText("会議の相棒が PC の外に送るもの");
+    expect(list).toHaveTextContent("このモデルの料金は、Anthropic の料金表で確かめてください");
+    expect(list).not.toHaveTextContent("多めに見積もった額");
   });
 });

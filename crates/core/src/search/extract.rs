@@ -260,44 +260,71 @@ fn walk_xml(xml: &str, mut f: impl FnMut(Xml)) -> Option<()> {
     }
 }
 
+/// 要素の名前から、名前空間の接頭辞（`w:` など）を除く。
+fn local(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
+}
+
+/// Word の段落スタイルが見出しか（英語版は Heading1・Title、日本語版の組み込みの見出しは 1〜9）。
+fn is_heading_style(style: &str) -> bool {
+    let style = style.to_ascii_lowercase();
+    style.starts_with("heading") || style == "title" || (style.len() == 1 && style.chars().all(|c| c.is_ascii_digit()))
+}
+
 /// Word: 本文と、最初の見出し（見出しの段落スタイルか、アウトラインのレベルがある段落）。
+/// テキストボックスの中の段落のように、段落の中にある段落は、外の段落と分けて読む。
 fn docx(bytes: &[u8]) -> Option<(Option<String>, String)> {
     let mut archive = open_zip(bytes)?;
     let xml = zip_entry(&mut archive, "word/document.xml")?;
     let mut body = String::new();
-    let mut paragraph = String::new();
-    let mut heading = false;
+    // 読んでいる段落（外から順に）の、文字と、見出しか
+    let mut paragraphs: Vec<(String, bool)> = Vec::new();
     let mut in_text = false;
     let mut title = None;
     walk_xml(&xml, |event| match event {
         Xml::Start(e) => match e.name().as_ref() {
-            "w:p" => {
-                paragraph.clear();
-                heading = false;
-            }
+            "w:p" => paragraphs.push((String::new(), false)),
             "w:pStyle" => {
-                let style = attr(e, "w:val").unwrap_or_default().to_ascii_lowercase();
-                // 英語版は Heading1・Title、日本語版の組み込みの見出しは 1〜9
-                if style.starts_with("heading") || style == "title" || (style.len() == 1 && style.chars().all(|c| c.is_ascii_digit())) {
-                    heading = true;
+                if let Some(paragraph) = paragraphs.last_mut() {
+                    paragraph.1 |= is_heading_style(&attr(e, "w:val").unwrap_or_default());
                 }
             }
-            "w:outlineLvl" => heading = true,
+            // アウトラインのレベルは 0〜8 が見出し。9 は本文
+            "w:outlineLvl" => {
+                let level = attr(e, "w:val").and_then(|v| v.parse::<u8>().ok());
+                if let Some(paragraph) = paragraphs.last_mut() {
+                    paragraph.1 |= level.is_some_and(|level| level < 9);
+                }
+            }
             "w:t" => in_text = true,
-            "w:tab" => paragraph.push('\t'),
-            "w:br" => paragraph.push('\n'),
+            "w:tab" => {
+                if let Some(paragraph) = paragraphs.last_mut() {
+                    paragraph.0.push('\t');
+                }
+            }
+            "w:br" | "w:cr" => {
+                if let Some(paragraph) = paragraphs.last_mut() {
+                    paragraph.0.push('\n');
+                }
+            }
             _ => {}
         },
-        Xml::Text(text) if in_text => paragraph.push_str(text),
+        Xml::Text(text) if in_text => {
+            if let Some(paragraph) = paragraphs.last_mut() {
+                paragraph.0.push_str(text);
+            }
+        }
         Xml::Text(_) => {}
         Xml::End(name) => match name {
             "w:t" => in_text = false,
             "w:p" => {
-                if heading && title.is_none() && !paragraph.trim().is_empty() {
-                    title = Some(paragraph.clone());
+                if let Some((paragraph, heading)) = paragraphs.pop() {
+                    if heading && title.is_none() && !paragraph.trim().is_empty() {
+                        title = Some(paragraph.clone());
+                    }
+                    body.push_str(&paragraph);
+                    body.push('\n');
                 }
-                body.push_str(&paragraph);
-                body.push('\n');
             }
             _ => {}
         },
@@ -319,28 +346,74 @@ fn numbered_entries(archive: &zip::ZipArchive<std::io::Cursor<&[u8]>>, prefix: &
     names.into_iter().map(|(_, name)| name).collect()
 }
 
-/// `tag` の中の文字を、段落（`paragraph` の要素）ごとに改行して集める。
-fn texts(xml: &str, tag: &str, paragraph: &str, out: &mut String) -> Option<()> {
-    let mut inside = false;
+/// Excel の文字列（`si`・`is`）の中の文字。ふりがな（`rPh`）は除く。`End` の要素で改行する。
+fn excel_strings(xml: &str, end: &str, out: &mut String) -> Option<()> {
+    let mut in_text = false;
+    let mut phonetic = 0usize;
     walk_xml(xml, |event| match event {
-        Xml::Start(e) if e.name().as_ref() == tag => inside = true,
-        Xml::Text(text) if inside => out.push_str(text),
-        Xml::End(name) if name == tag => inside = false,
-        Xml::End(name) if name == paragraph => out.push('\n'),
-        _ => {}
+        Xml::Start(e) => match local(e.name().as_ref()) {
+            "t" => in_text = true,
+            "rPh" => phonetic += 1,
+            _ => {}
+        },
+        Xml::Text(text) if in_text && phonetic == 0 => out.push_str(text),
+        Xml::Text(_) => {}
+        Xml::End(name) => match local(name) {
+            "t" => in_text = false,
+            "rPh" => phonetic = phonetic.saturating_sub(1),
+            name if name == end => out.push('\n'),
+            _ => {}
+        },
     })
 }
 
-/// Excel: 共有の文字列と、シートの中の文字列（題名は持たない）。
+/// Excel のシートの、セルの値。共有の文字列を指すセル（`t="s"`）は、共有の文字列の側で読む。
+/// 文字列のセル（`inlineStr`）、数式の結果の文字列（`str`）、数値と日付は値を読む。真偽値とエラーは読まない。
+fn excel_sheet(xml: &str, out: &mut String) -> Option<()> {
+    let mut cell_type: Option<String> = None;
+    let mut in_value = false;
+    let mut in_text = false;
+    let mut phonetic = 0usize;
+    walk_xml(xml, |event| match event {
+        Xml::Start(e) => match local(e.name().as_ref()) {
+            "c" => cell_type = attr(e, "t"),
+            "v" => in_value = true,
+            "t" => in_text = true,
+            "rPh" => phonetic += 1,
+            _ => {}
+        },
+        Xml::Text(text) => {
+            let value = in_value && matches!(cell_type.as_deref(), None | Some("n" | "str" | "d"));
+            let inline = in_text && phonetic == 0 && cell_type.as_deref() == Some("inlineStr");
+            if value || inline {
+                out.push_str(text);
+            }
+        }
+        Xml::End(name) => match local(name) {
+            "v" => in_value = false,
+            "t" => in_text = false,
+            "rPh" => phonetic = phonetic.saturating_sub(1),
+            "c" => {
+                if !out.ends_with('\n') && !out.is_empty() {
+                    out.push('\n');
+                }
+                cell_type = None;
+            }
+            _ => {}
+        },
+    })
+}
+
+/// Excel: 共有の文字列と、シートの中の値（題名は持たない）。
 fn xlsx(bytes: &[u8]) -> Option<(Option<String>, String)> {
     let mut archive = open_zip(bytes)?;
     let mut body = String::new();
     if let Some(xml) = zip_entry(&mut archive, "xl/sharedStrings.xml") {
-        texts(&xml, "t", "si", &mut body)?;
+        excel_strings(&xml, "si", &mut body)?;
     }
     for name in numbered_entries(&archive, "xl/worksheets/sheet") {
         if let Some(xml) = zip_entry(&mut archive, &name) {
-            texts(&xml, "t", "is", &mut body)?;
+            excel_sheet(&xml, &mut body)?;
         }
     }
     Some((None, body))
@@ -424,7 +497,12 @@ fn pdf(bytes: &[u8]) -> Option<(Option<String>, String)> {
         return None;
     }
     let title = pdf_title(&doc);
-    let text = pdf_extract::extract_text_from_mem(bytes).ok()?;
+    // 読み込んだ文書から文字を取り出す（もう一度ファイルを解析しない）
+    let mut text = String::new();
+    {
+        let mut output = pdf_extract::PlainTextOutput::new(&mut text);
+        pdf_extract::output_doc(&doc, &mut output).ok()?;
+    }
     Some((title, text))
 }
 
@@ -581,6 +659,56 @@ pub(crate) mod tests {
         let long = "長".repeat(61);
         assert_eq!(extract_bytes(&docx_of(&long, "本文"), Kind::Docx).title, None);
         assert_eq!(extract_bytes(&docx_of(&"長".repeat(60), "本文"), Kind::Docx).title, Some("長".repeat(60)));
+    }
+
+    // [IDX-004]
+    #[test]
+    fn excel_skips_furigana_and_reads_cell_values() {
+        let sheet = zip_of(&[
+            (
+                "xl/sharedStrings.xml",
+                r#"<sst><si><t>経費</t><rPh sb="0" eb="2"><t>ケイヒ</t></rPh><phoneticPr fontId="1"/></si><si><r><t>精算</t></r><rPh><t>セイサン</t></rPh></si></sst>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<worksheet><sheetData><row>
+                <c r="A1" t="s"><v>0</v></c>
+                <c r="B1"><v>125000</v></c>
+                <c r="C1" t="str"><f>A1&amp;"の上限"</f><v>経費の上限</v></c>
+                <c r="D1" t="b"><v>1</v></c>
+                <c r="E1" t="inlineStr"><is><t>出張</t><rPh><t>シュッチョウ</t></rPh></is></c>
+                </row></sheetData></worksheet>"#,
+            ),
+            ("xl/worksheets/sheet2.xml", r#"<x:worksheet xmlns:x="x"><x:c t="inlineStr"><x:is><x:t>宿泊</x:t></x:is></x:c></x:worksheet>"#),
+        ]);
+        let body = extract_bytes(&sheet, Kind::Xlsx).body;
+        for text in ["経費", "精算", "125000", "経費の上限", "出張", "宿泊"] {
+            assert!(body.contains(text), "{text} がありません: {body}");
+        }
+        for text in ["ケイヒ", "セイサン", "シュッチョウ", "の上限\"", "A1&"] {
+            assert!(!body.contains(text), "{text} は入れない: {body}");
+        }
+        assert!(!body.lines().any(|line| line == "0" || line == "1"), "共有の文字列の番号と真偽値は入れない: {body}");
+    }
+
+    // [IDX-006]
+    #[test]
+    fn word_outline_level_9_is_body_text_and_nested_paragraphs_are_separate() {
+        let document = |paragraphs: &str| {
+            zip_of(&[("word/document.xml", &format!(r#"<w:document xmlns:w="w"><w:body>{paragraphs}</w:body></w:document>"#))])
+        };
+        let level = |n: u8, text: &str| format!(r#"<w:p><w:pPr><w:outlineLvl w:val="{n}"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#);
+        let word = extract_bytes(&document(&format!("{}{}", level(9, "本文のレベル"), level(8, "見出し 9"))), Kind::Docx);
+        assert_eq!(word.title.as_deref(), Some("見出し 9"), "レベル 9 は本文、8（見出し 9）は見出し");
+
+        // 本文の段落の中のテキストボックスに、見出しの段落がある
+        let nested = r#"<w:p><w:r><w:t>前半</w:t></w:r><w:r><w:pict><w:txbxContent>
+            <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>箱の見出し</w:t></w:r></w:p>
+            </w:txbxContent></w:pict></w:r><w:r><w:t>後半</w:t></w:r></w:p>"#;
+        let word = extract_bytes(&document(nested), Kind::Docx);
+        assert_eq!(word.title.as_deref(), Some("箱の見出し"), "外の段落の見出しにしない");
+        assert!(word.body.contains("前半後半"), "外の段落の文字は消えない: {}", word.body);
+        assert!(word.body.contains("箱の見出し"), "{}", word.body);
     }
 
     // [IDX-003]

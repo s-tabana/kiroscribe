@@ -14,6 +14,8 @@ use crate::error::Result;
 pub const INDEX_FILE: &str = "search-index.db";
 /// 抜粋の長さの上限（文字）。
 pub const EXCERPT_CHARS: usize = 600;
+/// 抜粋の位置を決めるときに数える、1 つの検索語の一致の数の上限。
+const MAX_HITS_PER_TERM: usize = 5_000;
 
 const SCHEMA_VERSION: i64 = 1;
 const SCHEMA: &str = r#"
@@ -57,12 +59,25 @@ pub struct SearchIndex {
     conn: Connection,
 }
 
-fn remove_db_files(path: &Path) {
-    for suffix in ["", "-wal", "-shm"] {
+/// 索引のファイル（本体と、書き込みの途中の内容を持つ `-wal`・`-shm`）のパス。
+pub fn index_files(path: &Path) -> [PathBuf; 3] {
+    ["", "-wal", "-shm"].map(|suffix| {
         let mut name = path.as_os_str().to_os_string();
         name.push(suffix);
-        let _ = std::fs::remove_file(PathBuf::from(name));
+        PathBuf::from(name)
+    })
+}
+
+/// 索引のファイルをすべて消す（もともとないファイルは、消せたものとみなす）。
+pub fn remove_index_files(path: &Path) -> std::io::Result<()> {
+    let mut result = Ok(());
+    for file in index_files(path) {
+        match std::fs::remove_file(&file) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound && result.is_ok() => result = Err(err),
+            _ => {}
+        }
     }
+    result
 }
 
 impl SearchIndex {
@@ -74,7 +89,7 @@ impl SearchIndex {
         match Self::try_open(path) {
             Ok(index) => Ok(index),
             Err(_) => {
-                remove_db_files(path);
+                let _ = remove_index_files(path);
                 Self::try_open(path)
             }
         }
@@ -95,6 +110,8 @@ impl SearchIndex {
     }
 
     fn init(conn: Connection) -> Result<Self> {
+        // 消した行の中身を、ファイルの空き領域に残さない
+        conn.execute_batch("PRAGMA secure_delete = ON;")?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version != SCHEMA_VERSION {
             // 索引は作り直せるので、形が違えば捨てて作る
@@ -154,12 +171,32 @@ impl SearchIndex {
         Ok(())
     }
 
-    /// 索引を空にする。
+    /// 索引を空にする。消した内容が、本体と `-wal` のファイルに残らないところまで済ませる。
     pub fn clear(&self) -> Result<()> {
         self.conn.execute("DELETE FROM docs", [])?;
-        // 消した内容がファイルに残らないよう、空き領域も詰める
+        // 空き領域を詰めてから、書き込みの途中の内容（-wal）を本体に反映して空にする
         self.conn.execute_batch("VACUUM;")?;
+        let busy: i64 = self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        if busy != 0 {
+            return Err(crate::CoreError::Other("索引の書き込みを、ファイルに反映できません".into()));
+        }
         Ok(())
+    }
+
+    /// 接続を閉じる（閉じられないときはエラー）。
+    pub fn close(self) -> Result<()> {
+        self.conn.close().map_err(|(_, err)| err)?;
+        Ok(())
+    }
+
+    /// そのパスのファイルの、索引にある更新日時と大きさ（なければ None）。
+    pub fn stamp(&self, path: &Path) -> Result<Option<(i64, u64)>> {
+        let mut stmt = self.conn.prepare("SELECT modified, size FROM docs WHERE path = ?1")?;
+        let mut rows = stmt.query([path.to_string_lossy()])?;
+        Ok(match rows.next()? {
+            Some(row) => Some((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? as u64)),
+            None => None,
+        })
     }
 
     pub fn count_folder(&self, folder: &Path) -> Result<usize> {
@@ -224,11 +261,13 @@ impl SearchIndex {
 /// 中身のうち、検索語（正規化したもの）が最も集まっている部分の前後を、`max_chars` 文字までで返す。
 /// 中身に検索語がなければ（題名やファイル名だけに一致したとき）、先頭から返す。
 pub fn excerpt(body: &str, terms: &[String], max_chars: usize) -> Option<String> {
+    // 空白をまとめてから切り出す（空白が続く部分で、文字数の上限を使い切らないように）
+    let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
     let original: Vec<char> = body.chars().collect();
     if original.is_empty() {
         return None;
     }
-    let (normalized, map) = normalize_with_map(body);
+    let (normalized, map) = normalize_with_map(&body);
     let normalized: Vec<char> = normalized.chars().collect();
     // 一致した位置（元の文字の位置。始まりと終わり）
     let mut hits: Vec<(usize, usize)> = Vec::new();
@@ -237,11 +276,14 @@ pub fn excerpt(body: &str, terms: &[String], max_chars: usize) -> Option<String>
         if needle.is_empty() || needle.len() > normalized.len() {
             continue;
         }
+        // 語ごとに上限を付ける（よく出る語が、ほかの語の一致を数えさせなくしないように）
+        let mut found = 0;
         let mut i = 0;
-        while i + needle.len() <= normalized.len() && hits.len() < 5_000 {
+        while i + needle.len() <= normalized.len() && found < MAX_HITS_PER_TERM {
             if normalized[i..i + needle.len()] == needle[..] {
                 let end = map.get(i + needle.len()).copied().unwrap_or(original.len());
                 hits.push((map[i], end));
+                found += 1;
                 i += needle.len();
             } else {
                 i += 1;
@@ -272,8 +314,8 @@ pub fn excerpt(body: &str, terms: &[String], max_chars: usize) -> Option<String>
         (end.saturating_sub(max_chars), end)
     };
     let text: String = original[start..end].iter().collect();
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!text.is_empty()).then_some(text)
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 #[cfg(test)]
@@ -282,7 +324,7 @@ mod tests {
     use crate::search::extract::Kind;
 
     fn entry(path: &str, modified: i64) -> FileEntry {
-        FileEntry { path: PathBuf::from(path), kind: Kind::Text, modified, size: 1 }
+        FileEntry { path: PathBuf::from(path), kind: Kind::Text, modified, size: 1, online_only: false }
     }
 
     fn content(title: Option<&str>, body: &str) -> Extracted {
@@ -377,9 +419,56 @@ mod tests {
             assert_eq!(index.count().unwrap(), 1);
         }
         assert_eq!(SearchIndex::open(&path).unwrap().count().unwrap(), 1, "開き直しても残る");
-        remove_db_files(&path);
+        remove_index_files(&path).unwrap();
         std::fs::write(&path, b"this is not a sqlite database at all, just garbage bytes......").unwrap();
         let index = SearchIndex::open(&path).unwrap();
         assert_eq!(index.count().unwrap(), 0, "壊れていたら作り直す");
+    }
+
+    /// 索引のファイル（本体・-wal・-shm）のどこかに、`marker` の文字が残っているか。
+    pub(crate) fn left_on_disk(path: &Path, marker: &str) -> bool {
+        index_files(path).iter().any(|file| {
+            std::fs::read(file).is_ok_and(|bytes| bytes.windows(marker.len()).any(|w| w == marker.as_bytes()))
+        })
+    }
+
+    // [IDX-011][IDX-028]
+    #[test]
+    fn clearing_leaves_no_contents_in_the_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(INDEX_FILE);
+        let index = SearchIndex::open(&path).unwrap();
+        for i in 0..50 {
+            let file = entry(&format!("/a/{i}.txt"), 1);
+            index.upsert(Path::new("/a"), &file, &content(None, &format!("ZEBRA-SECRET-{i} {}", "x".repeat(2_000)))).unwrap();
+        }
+        assert!(left_on_disk(&path, "ZEBRA-SECRET-1"), "消す前は、ファイルにある");
+        index.clear().unwrap();
+        assert_eq!(index.count().unwrap(), 0);
+        assert!(!left_on_disk(&path, "ZEBRA-SECRET"), "空にしたら、本体にも -wal にも残らない");
+        index.close().unwrap();
+        remove_index_files(&path).unwrap();
+        assert!(index_files(&path).iter().all(|file| !file.exists()));
+        remove_index_files(&path).unwrap();
+    }
+
+    // [IDX-015]
+    #[test]
+    fn excerpt_boundaries() {
+        let exact = "あ".repeat(EXCERPT_CHARS);
+        assert_eq!(excerpt(&exact, &terms(&["あ"]), EXCERPT_CHARS).unwrap().chars().count(), EXCERPT_CHARS, "ちょうど 600 文字");
+        let over = format!("{}い", "あ".repeat(EXCERPT_CHARS));
+        assert_eq!(excerpt(&over, &terms(&["い"]), EXCERPT_CHARS).unwrap().chars().count(), EXCERPT_CHARS, "601 文字なら 600 文字に切る");
+        assert!(excerpt(&over, &terms(&["い"]), EXCERPT_CHARS).unwrap().ends_with('い'));
+        assert_eq!(excerpt("   \n\t  ", &terms(&["x"]), EXCERPT_CHARS), None, "空白だけ");
+
+        // 先頭の空白で上限を使い切らない
+        let spaced = format!("{}経費の手順{}", " ".repeat(2_000), "\n".repeat(2_000));
+        assert_eq!(excerpt(&spaced, &terms(&["どこにもない"]), EXCERPT_CHARS).unwrap(), "経費の手順");
+
+        // よく出る語があっても、ほかの語が集まっている部分を選ぶ
+        let body = format!("{}経費と精算と申請", format!("また{}", "ー".repeat(30)).repeat(MAX_HITS_PER_TERM + 10));
+        let text = excerpt(&body, &terms(&["また", "経費", "精算", "申請"]), 20).unwrap();
+        assert!(text.contains("経費と精算と申請"), "{text}");
     }
 }
