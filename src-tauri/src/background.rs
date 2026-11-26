@@ -10,7 +10,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::error::CmdResult;
-use crate::recording::stop_now;
+use crate::recording::{stop_by_user, stop_now, RecordingState};
 use crate::runtime::{AppHandle, Runtime};
 use crate::state::AppState;
 
@@ -48,18 +48,68 @@ pub enum PopupPayload {
     /// 自動で録音できなかった
     #[serde(rename_all = "camelCase")]
     Error { app: String, message: String },
+    /// 長い録音で、会議が終わったかを聞いている（`deadline` は、答えがなければ止める時刻。UNIX ミリ秒）
+    #[serde(rename_all = "camelCase")]
+    ConfirmEnd { app: String, note_id: String, title: String, deadline: i64 },
+    /// 会議が終わったかの確認に答えがなかったので、録音を止めた
+    #[serde(rename_all = "camelCase")]
+    StoppedUnanswered { app: String, note_id: String, title: String },
+}
+
+impl PopupPayload {
+    /// 録音中のノートについての表示（録音中・会議が終わったかの確認）なら、その見出しとノート。
+    fn live_recording(&self) -> Option<(&str, &str, &str)> {
+        match self {
+            PopupPayload::Recording { app, note_id, title } | PopupPayload::ConfirmEnd { app, note_id, title, .. } => {
+                Some((app, note_id, title))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default)]
 pub struct BackgroundState {
     popup: Mutex<Option<PopupPayload>>,
     tray_auto_item: Mutex<Option<CheckMenuItem<Runtime>>>,
+    tray_stop_item: Mutex<Option<MenuItem<Runtime>>>,
+    /// 出した Windows の通知の文（テストで確かめる）
+    notices: Mutex<Vec<String>>,
     quitting: AtomicBool,
 }
 
 impl BackgroundState {
     pub fn is_quitting(&self) -> bool {
         self.quitting.load(Ordering::SeqCst)
+    }
+
+    /// これまでに出した Windows の通知の文。
+    #[cfg(test)]
+    pub fn notices(&self) -> Vec<String> {
+        self.notices.lock().unwrap().clone()
+    }
+}
+
+/// Windows の通知を出す（アクション センターにも残る）。E2E テスト用のビルドとテストでは、出さずに記録だけする。
+pub fn notify(app: &AppHandle, body: &str) {
+    app.state::<BackgroundState>().notices.lock().unwrap().push(body.to_string());
+    #[cfg(not(any(test, feature = "e2e")))]
+    {
+        use tauri_plugin_notification::NotificationExt;
+        if let Err(err) = app.notification().builder().title("Kiroscribe").body(body).show() {
+            eprintln!("通知を出せませんでした: {err}");
+        }
+    }
+}
+
+/// 録音の状態が変わった: トレイの「録音を停止」を、録音中・一時停止中だけ選べるようにする。
+pub fn recording_changed(app: &AppHandle, state: RecordingState) {
+    let Some(background) = app.try_state::<BackgroundState>() else {
+        return;
+    };
+    let item = background.tray_stop_item.lock().unwrap().clone();
+    if let Some(item) = item {
+        let _ = item.set_enabled(can_stop_from_tray(state));
     }
 }
 
@@ -150,11 +200,10 @@ fn popup_position(monitor_position: &PhysicalPosition<i32>, monitor_size: &Physi
 pub fn popup_recording_stopped(app: &AppHandle, note_id: &str) {
     let background = app.state::<BackgroundState>();
     let shown = background.popup.lock().unwrap().clone();
-    let Some(PopupPayload::Recording {
-        app: label,
-        note_id: shown_id,
-        title,
-    }) = shown
+    let Some((label, shown_id, title)) = shown
+        .as_ref()
+        .and_then(PopupPayload::live_recording)
+        .map(|(label, id, title)| (label.to_string(), id.to_string(), title.to_string()))
     else {
         return;
     };
@@ -178,6 +227,38 @@ pub fn popup_recording_stopped(app: &AppHandle, note_id: &str) {
     } else {
         // 利用者がポップアップを閉じていたら、出し直さない（自分で止めたことは分かっている）
         *background.popup.lock().unwrap() = Some(payload);
+    }
+}
+
+/// ポップアップが `note_id` の録音についての確認を出していたら、取り下げる。
+/// 自動で始めた録音なら録音中の表示に戻し、手動の録音ならポップアップを閉じる。
+pub fn withdraw_confirm_end(app: &AppHandle, note_id: &str, auto: Option<&str>) {
+    let background = app.state::<BackgroundState>();
+    let shown = background.popup.lock().unwrap().clone();
+    let Some(PopupPayload::ConfirmEnd {
+        note_id: shown_id,
+        title,
+        ..
+    }) = shown
+    else {
+        return;
+    };
+    if shown_id != note_id {
+        return;
+    }
+    match auto {
+        Some(label) => show_popup(
+            app,
+            PopupPayload::Recording {
+                app: label.to_string(),
+                note_id: shown_id,
+                title,
+            },
+        ),
+        None => {
+            *background.popup.lock().unwrap() = None;
+            close_popup_window(app);
+        }
     }
 }
 
@@ -300,6 +381,32 @@ pub fn quit(app: &AppHandle) {
     });
 }
 
+/// トレイのメニューの項目が選ばれた。
+pub(crate) fn on_tray_menu(app: &AppHandle, id: &str) {
+    match id {
+        "open" => show_main(app),
+        // メインウィンドウの「停止」と同じ（ポップアップが知らせている録音なら、停止の表示にする）
+        "stop-recording" => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                stop_by_user(&app).await;
+            });
+        }
+        "auto-record" => {
+            if let Err(err) = toggle_auto_record(app) {
+                eprintln!("設定を保存できませんでした: {}", err.0);
+            }
+        }
+        "quit" => quit(app),
+        _ => {}
+    }
+}
+
+/// トレイの「録音を停止」を選べるか（録音中・一時停止中だけ）。
+fn can_stop_from_tray(state: RecordingState) -> bool {
+    matches!(state, RecordingState::Recording | RecordingState::Paused)
+}
+
 pub fn setup_tray(app: &AppHandle, settings: &Settings) -> tauri::Result<()> {
     // E2E テスト用のビルドでだけ、トレイを作れない環境のふりができる（src/e2e.rs）
     #[cfg(feature = "e2e")]
@@ -315,25 +422,19 @@ pub fn setup_tray(app: &AppHandle, settings: &Settings) -> tauri::Result<()> {
         settings.auto_record_meetings,
         None::<&str>,
     )?;
+    // 録音中・一時停止中だけ選べる（recording_changed）
+    let stop = MenuItem::with_id(app, "stop-recording", "録音を停止", false, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit_item = MenuItem::with_id(app, "quit", "Kiroscribe を終了", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &auto, &separator, &quit_item])?;
+    let menu = Menu::with_items(app, &[&open, &stop, &auto, &separator, &quit_item])?;
     *app.state::<BackgroundState>().tray_auto_item.lock().unwrap() = Some(auto);
+    *app.state::<BackgroundState>().tray_stop_item.lock().unwrap() = Some(stop);
 
     let mut builder = TrayIconBuilder::with_id("kiroscribe")
         .tooltip("Kiroscribe（会議の自動検出）")
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "open" => show_main(app),
-            "auto-record" => {
-                if let Err(err) = toggle_auto_record(app) {
-                    eprintln!("設定を保存できませんでした: {}", err.0);
-                }
-            }
-            "quit" => quit(app),
-            _ => {}
-        })
+        .on_menu_event(|app, event| on_tray_menu(app, event.id.as_ref()))
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
@@ -354,6 +455,16 @@ pub fn setup_tray(app: &AppHandle, settings: &Settings) -> tauri::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// トレイの「録音を停止」は、録音中と一時停止中だけ選べる（仕上げ中・録音していないときは選べない）。
+    // [TRY-011]
+    #[test]
+    fn the_tray_stop_item_is_enabled_only_while_recording() {
+        assert!(can_stop_from_tray(RecordingState::Recording));
+        assert!(can_stop_from_tray(RecordingState::Paused));
+        assert!(!can_stop_from_tray(RecordingState::Finishing));
+        assert!(!can_stop_from_tray(RecordingState::Idle));
+    }
 
     /// ポップアップの位置は、表示の拡大率が変わっても、見た目で右端から 16px・下端から 64px 内側になる。
     // [POP-001]

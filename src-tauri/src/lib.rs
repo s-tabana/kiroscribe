@@ -9,6 +9,7 @@ mod help;
 #[cfg(test)]
 mod ipc_tests;
 mod recording;
+mod recording_check;
 mod runtime;
 mod startup;
 mod state;
@@ -34,6 +35,8 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        // 長い録音を答えがなく止めたときの知らせ（recording_check.rs）。Rust 側からだけ出す
+        .plugin(tauri_plugin_notification::init())
         // 更新の確認とインストールは Rust 側（update.rs）から呼ぶ。画面には権限を渡さない
         .plugin(tauri_plugin_updater::Builder::new().build());
     // 起動時に起動する登録は、Windows では自前で行う（background.rs の set_launch_at_login）。
@@ -73,6 +76,7 @@ pub fn run() {
             }
             background::apply_settings(&handle, &settings);
             meeting_watch::spawn(handle.clone());
+            recording_check::spawn(handle.clone());
             update::spawn_auto_check(handle.clone());
 
             // Windows の起動時に自動で起動したときは、ウィンドウを出さずトレイに常駐する。
@@ -132,6 +136,7 @@ fn register_commands(builder: tauri::Builder<Runtime>) -> tauri::Builder<Runtime
             recording::pause_recording,
             recording::resume_recording,
             recording::stop_recording,
+            recording_check::answer_recording_check,
             ai::enhance_note,
             ai::cancel_ai,
             ai::list_chat_messages,

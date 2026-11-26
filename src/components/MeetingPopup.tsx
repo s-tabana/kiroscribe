@@ -21,7 +21,7 @@ export function MeetingPopup() {
   const [stoppedHere, setStoppedHere] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status] = useRecordingStatus(backend);
-  const now = useNow(payload?.kind === "recording");
+  const now = useNow(payload?.kind === "recording" || payload?.kind === "confirmEnd");
 
   useEffect(() => {
     let active = true;
@@ -47,7 +47,7 @@ export function MeetingPopup() {
   // 録音中の表示のまま残ると、その「停止」が、あとから始めた別の録音を止めてしまう
   const sawRecording = useRef<string | null>(null);
   useEffect(() => {
-    if (!payload || payload.kind === "error" || payload.kind === "stopped") return;
+    if (!payload || payload.kind === "error" || payload.kind === "stopped" || payload.kind === "stoppedUnanswered") return;
     const mine = status.noteId === payload.noteId;
     const ended = !mine || status.state === "idle";
     if (payload.kind === "recording") {
@@ -89,8 +89,27 @@ export function MeetingPopup() {
     }
   };
 
-  const recordingThis =
-    payload.kind === "recording" && status.noteId === payload.noteId && status.state !== "idle";
+  /** 会議が終わったかの確認に答える（keep なら録音を続ける） */
+  const answer = async (keep: boolean) => {
+    if (payload.kind !== "confirmEnd") return;
+    const { app, noteId, title } = payload;
+    setBusy(true);
+    try {
+      if (!keep) {
+        setStoppedHere(true);
+        setPayload({ kind: "finishing", app, noteId, title });
+      }
+      await backend.answerRecordingCheck(noteId, keep);
+      // 止めたときは、本体が停止の表示を知らせる。知らせが先に届いていなければ、ここで停止の表示にする
+      if (!keep) setPayload((shown) => (shown?.kind === "stopped" ? shown : { kind: "stopped", app, noteId, title }));
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const recordingThis = (noteId: string) => status.noteId === noteId && status.state !== "idle";
 
   return (
     <div className={`popup popup-${payload.kind}`} role="alertdialog" aria-label="会議の自動録音">
@@ -115,7 +134,7 @@ export function MeetingPopup() {
           <p className="popup-message">
             <span className="rec-dot is-live" aria-hidden="true" />
             自動で録音・文字起こしを始めました
-            {recordingThis && <strong role="timer">{formatElapsed(elapsedMs(status, now))}</strong>}
+            {recordingThis(payload.noteId) && <strong role="timer">{formatElapsed(elapsedMs(status, now))}</strong>}
           </p>
           <div className="popup-actions">
             <button type="button" className="button" onClick={() => void backend.openNoteFromPopup(payload.noteId, false)}>
@@ -141,6 +160,45 @@ export function MeetingPopup() {
       {payload.kind === "stopped" && (
         <>
           <p className="popup-message">録音を停止しました。「{payload.title}」に保存しています。</p>
+          <div className="popup-actions">
+            <button type="button" className="button" onClick={() => void backend.openNoteFromPopup(payload.noteId, false)}>
+              ノートを開く
+            </button>
+            <button
+              type="button"
+              className="button button-primary"
+              onClick={() => void backend.openNoteFromPopup(payload.noteId, true)}
+            >
+              <SparklesIcon size={14} />
+              議事録を作成
+            </button>
+          </div>
+        </>
+      )}
+
+      {payload.kind === "confirmEnd" && (
+        <>
+          <p className="popup-message">
+            <strong>会議は終わりましたか？</strong>
+            <span>
+              <span role="timer">{formatElapsed(Math.max(0, payload.deadline - now))}</span> 後に止めて保存します
+            </span>
+          </p>
+          <div className="popup-actions">
+            <button type="button" className="button" onClick={() => void answer(true)} disabled={busy}>
+              続ける
+            </button>
+            <button type="button" className="button popup-stop" onClick={() => void answer(false)} disabled={busy}>
+              <StopIcon size={13} />
+              止める
+            </button>
+          </div>
+        </>
+      )}
+
+      {payload.kind === "stoppedUnanswered" && (
+        <>
+          <p className="popup-message">答えがなかったため、録音を停止しました。「{payload.title}」に保存しています。</p>
           <div className="popup-actions">
             <button type="button" className="button" onClick={() => void backend.openNoteFromPopup(payload.noteId, false)}>
               ノートを開く

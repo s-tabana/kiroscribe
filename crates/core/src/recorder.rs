@@ -31,6 +31,9 @@ pub trait RecorderSink: Send + Sync {
     fn on_auth_error(&self, message: String) {
         self.on_error(message);
     }
+    /// 発話を 1 つ区切った（文字起こしに回す前に呼ばれる）。`ended_at` は発話の終わりの時刻（UNIX ミリ秒）。
+    /// 長い録音で、会議が続いているかを確かめる手がかりにする。既定では何もしない。
+    fn on_speech(&self, _speaker: Speaker, _ended_at: i64) {}
 }
 
 /// 取り込んだ音声のひとかたまり。`captured_at` は取り込み時点の時刻（UNIX ミリ秒、かたまりの末尾）。
@@ -172,6 +175,7 @@ impl SourceProcessor {
             ended_at: to_ms(chunk.end_sample()),
             wav: encode_wav_mono_i16(&chunk.samples, TARGET_SAMPLE_RATE),
         };
+        self.sink.on_speech(job.speaker, job.ended_at);
         // 受け手が先に終わっている（停止処理中）なら捨ててよい
         let _ = self.jobs.send(job);
     }
@@ -283,6 +287,7 @@ mod tests {
         transcripts: Mutex<Vec<(Speaker, i64, i64, String)>>,
         levels: Mutex<Vec<(Speaker, f32)>>,
         errors: Mutex<Vec<String>>,
+        speech: Mutex<Vec<(Speaker, i64)>>,
     }
 
     impl RecorderSink for TestSink {
@@ -297,6 +302,9 @@ mod tests {
         }
         fn on_error(&self, message: String) {
             self.errors.lock().unwrap().push(message);
+        }
+        fn on_speech(&self, speaker: Speaker, ended_at: i64) {
+            self.speech.lock().unwrap().push((speaker, ended_at));
         }
     }
 
@@ -460,6 +468,21 @@ mod tests {
         let jobs = h.drain_jobs();
         assert_eq!(jobs.len(), 1);
         assert!((jobs[0].started_at - (T0 + 700)).abs() <= 60, "{}", jobs[0].started_at - T0);
+    }
+
+    /// 発話を区切るたびに、その終わりの時刻を知らせる。無音や一定の音だけでは知らせない。
+    // [REC-024]
+    #[test]
+    fn each_utterance_is_reported_as_speech() {
+        let mut h = harness(Speaker::Them);
+        h.play(&silence(3.0));
+        h.play(&vec![0.2; RATE as usize * 3]);
+        assert!(h.sink.speech.lock().unwrap().is_empty(), "無音・一定の音を発話として知らせている");
+        h.play(&tone(1.5));
+        h.play(&silence(1.5));
+        let jobs = h.drain_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(*h.sink.speech.lock().unwrap(), [(Speaker::Them, jobs[0].ended_at)]);
     }
 
     // [REC-009]

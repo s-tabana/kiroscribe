@@ -1,10 +1,12 @@
 //! 録音の状態管理と、画面へのイベント通知。
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use kiroscribe_core::audio::capture::{self, AudioDevice};
 use kiroscribe_core::meetings::MeetingApp;
 use kiroscribe_core::recorder::RecorderSink;
+use kiroscribe_core::recording_check::{CheckAction, RecordingCheck, Signals};
 use kiroscribe_core::secrets::{require_api_key, Provider};
 use kiroscribe_core::session::{RecordingSession, SessionOptions};
 use kiroscribe_core::time::now_ms;
@@ -13,7 +15,7 @@ use kiroscribe_core::transcript::{Segment, Speaker};
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 
-use crate::background::{popup_recording_stopped, show_popup, PopupPayload};
+use crate::background::{popup_recording_stopped, recording_changed, show_popup, PopupPayload};
 use crate::error::{CmdResult, CommandError};
 use crate::runtime::AppHandle;
 use crate::state::AppState;
@@ -78,9 +80,18 @@ struct ActiveRecording {
     running_since: Option<i64>,
     /// 会議の自動検出で始めた録音なら、その会議アプリ
     auto: Option<MeetingApp>,
+    /// 自分と相手のどちらかが最後に話した時刻（UNIX ミリ秒。録音の開始・再開の時刻も、話したものとして数える）
+    last_speech: Arc<AtomicI64>,
+    /// 長い録音で、会議が続いているかを確かめる状態
+    check: RecordingCheck,
 }
 
 impl ActiveRecording {
+    /// 一時停止していた時間を除いた録音の時間。
+    fn elapsed_ms(&self, now_ms: i64) -> i64 {
+        self.elapsed_before_ms + self.running_since.map_or(0, |since| (now_ms - since).max(0))
+    }
+
     fn status(&self) -> RecordingStatus {
         RecordingStatus {
             note_id: Some(self.note_id.clone()),
@@ -103,6 +114,15 @@ pub struct RecorderState {
     finishing: Mutex<Option<String>>,
 }
 
+/// 確かめた結果（[`RecorderState::check`]）。
+pub struct CheckStep {
+    pub note_id: String,
+    pub auto: Option<MeetingApp>,
+    pub action: CheckAction,
+    /// 確認を出していれば、答えがないときに止める時刻（UNIX ミリ秒）
+    pub deadline: Option<i64>,
+}
+
 impl RecorderState {
     /// 録音中（または仕上げ中）のノート ID。
     pub async fn busy_note_id(&self) -> Option<String> {
@@ -110,6 +130,42 @@ impl RecorderState {
             return Some(active.note_id.clone());
         }
         self.finishing.lock().unwrap().clone()
+    }
+
+    /// 長い録音で、会議が続いているかを確かめる（数秒ごとに呼ぶ）。確認を出す・止める・取り下げるときだけ返す。
+    pub async fn check(&self, meeting_detected: bool, now_ms: i64) -> Option<CheckStep> {
+        let mut active = self.active.lock().await;
+        let recording = active.as_mut()?;
+        let signals = Signals {
+            elapsed_ms: recording.elapsed_ms(now_ms),
+            paused: recording.session.is_paused(),
+            meeting_detected,
+            quiet_ms: now_ms - recording.last_speech.load(Ordering::SeqCst),
+        };
+        let action = recording.check.tick(&signals, now_ms)?;
+        Some(CheckStep {
+            note_id: recording.note_id.clone(),
+            auto: recording.auto,
+            action,
+            deadline: recording.check.deadline(),
+        })
+    }
+
+    /// 確認に「続ける」と答えた。そのノートを録音していなければ `None`。
+    pub async fn keep(&self, note_id: &str, now_ms: i64) -> Option<Option<MeetingApp>> {
+        let mut active = self.active.lock().await;
+        let recording = active.as_mut().filter(|recording| recording.note_id == note_id)?;
+        let elapsed = recording.elapsed_ms(now_ms);
+        recording.check.keep(elapsed);
+        Some(recording.auto)
+    }
+
+    /// 録音を `ms` だけ前に始めたことにする（長い録音を確かめるテスト用。話した時刻は動かさない）。
+    #[cfg(test)]
+    pub async fn backdate(&self, ms: i64) {
+        if let Some(recording) = self.active.lock().await.as_mut() {
+            recording.elapsed_before_ms += ms;
+        }
     }
 
     /// 自動検出で始めた録音が続いていれば、そのノートと会議アプリ。
@@ -138,6 +194,7 @@ impl RecorderState {
 struct TauriSink {
     app: AppHandle,
     note_id: String,
+    last_speech: Arc<AtomicI64>,
 }
 
 impl RecorderSink for TauriSink {
@@ -152,6 +209,10 @@ impl RecorderSink for TauriSink {
             }
             Err(err) => self.on_error(format!("文字起こしを保存できませんでした: {err}")),
         }
+    }
+
+    fn on_speech(&self, _speaker: Speaker, ended_at: i64) {
+        self.last_speech.fetch_max(ended_at, Ordering::SeqCst);
     }
 
     fn on_level(&self, speaker: Speaker, level: f32) {
@@ -194,6 +255,7 @@ impl RecorderSink for TauriSink {
 }
 
 fn emit_status(app: &AppHandle, status: &RecordingStatus) {
+    recording_changed(app, status.state);
     let _ = app.emit(EVENT_STATUS, status.clone());
 }
 
@@ -248,9 +310,11 @@ pub async fn start_for_note(
         &settings.transcription_model,
         &settings.language,
     ));
+    let last_speech = Arc::new(AtomicI64::new(now_ms()));
     let sink = Arc::new(TauriSink {
         app: app.clone(),
         note_id: note_id.clone(),
+        last_speech: last_speech.clone(),
     });
     let session = RecordingSession::start(
         SessionOptions {
@@ -268,6 +332,8 @@ pub async fn start_for_note(
         elapsed_before_ms: 0,
         running_since: Some(now_ms()),
         auto,
+        last_speech,
+        check: RecordingCheck::default(),
     };
     let status = recording.status();
     *active = Some(recording);
@@ -308,7 +374,10 @@ pub async fn resume_recording(
         .as_mut()
         .ok_or_else(|| CommandError("録音していません".into()))?;
     if recording.running_since.is_none() {
-        recording.running_since = Some(now_ms());
+        let now = now_ms();
+        recording.running_since = Some(now);
+        // 一時停止していた間は話せないので、再開した時点を、話したものとして数える
+        recording.last_speech.fetch_max(now, Ordering::SeqCst);
     }
     recording.session.resume();
     let status = recording.status();
@@ -358,13 +427,16 @@ pub async fn stop_now(app: &AppHandle) -> RecordingStatus {
     app.state::<RecorderState>().status().await
 }
 
+/// 利用者が録音を止めた（メインウィンドウの「停止」とトレイの「録音を停止」）。
+/// ポップアップがその録音を知らせていたら（自動で始めた録音・会議が終わったかの確認）、停止の表示にする。
+pub async fn stop_by_user(app: &AppHandle) -> RecordingStatus {
+    if let Some(stopped) = stop_active(app, None).await {
+        popup_recording_stopped(app, &stopped.note_id);
+    }
+    app.state::<RecorderState>().status().await
+}
+
 #[tauri::command]
 pub async fn stop_recording(app: AppHandle) -> CmdResult<RecordingStatus> {
-    if let Some(stopped) = stop_active(&app, None).await {
-        // 自動で始めた録音を利用者が止めたら、ポップアップも停止の表示にする
-        if stopped.auto.is_some() {
-            popup_recording_stopped(&app, &stopped.note_id);
-        }
-    }
-    Ok(app.state::<RecorderState>().status().await)
+    Ok(stop_by_user(&app).await)
 }

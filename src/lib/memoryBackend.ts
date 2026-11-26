@@ -57,6 +57,8 @@ export interface MemoryBackend extends Backend {
   requestOpenNote(request: OpenNoteRequest): void;
   setPopup(payload: PopupPayload | null): void;
   readonly popupClosed: boolean;
+  /** 会議が終わったかの確認への答え（テスト用） */
+  readonly recordingCheckAnswers: { noteId: string; keep: boolean }[];
   /** 最後にコピー・保存した内容（テスト用） */
   readonly lastCopied: string | null;
   readonly lastSaved: { fileName: string; markdown: string } | null;
@@ -219,6 +221,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
   const popupEvents = new Emitter<PopupPayload>();
   let popup: PopupPayload | null = null;
   let popupClosed = false;
+  const recordingCheckAnswers: { noteId: string; keep: boolean }[] = [];
   let lastSaved: { fileName: string; markdown: string } | null = null;
 
   let appVersion = options.version ?? packageVersion;
@@ -582,6 +585,21 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
     async openSettingsFromPopup() {
       openSettingsEvents.emit();
       popupClosed = true;
+    },
+    async answerRecordingCheck(noteId, keep) {
+      recordingCheckAnswers.push({ noteId, keep });
+      const shown = popup;
+      if (shown?.kind !== "confirmEnd" || shown.noteId !== noteId) return;
+      if (keep) {
+        popup = null;
+        popupClosed = true;
+        return;
+      }
+      if (recording.noteId === noteId) await this.stopRecording();
+      this.setPopup({ kind: "stopped", app: shown.app, noteId, title: shown.title });
+    },
+    get recordingCheckAnswers() {
+      return recordingCheckAnswers;
     },
     simulateMeetingNote(title) {
       const t = now();
