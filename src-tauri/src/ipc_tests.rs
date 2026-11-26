@@ -502,7 +502,7 @@ fn normalize(value: &Value) -> Value {
 /// 1 つのメソッドの見本。
 #[derive(Default)]
 struct MethodSamples {
-    /// 配列でない値（重複を除き、出てきた順）
+    /// 配列でない値（重複を除く。見本には並べ替えて出す）
     values: Vec<String>,
     /// 配列の値は、すべての呼び出しの要素をまとめて 1 つの配列にする
     array_items: Option<BTreeSet<String>>,
@@ -516,7 +516,9 @@ impl MethodSamples {
     }
 
     fn lines(&self) -> Vec<String> {
+        // 出てきた順ではなく、並べ替えた順にする（裏で進む処理のイベントは、届く順がその時々で変わるため）
         let mut lines = self.values.clone();
+        lines.sort();
         if let Some(items) = &self.array_items {
             lines.push(format!("[{}]", items.iter().cloned().collect::<Vec<_>>().join(",")));
         }

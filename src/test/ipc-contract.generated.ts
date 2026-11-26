@@ -116,8 +116,8 @@ export const called = {
     [],
   ] satisfies Called<"resumeRecording">[],
   saveSettings: [
-    [{"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":true,"companionModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"}],
     [{"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":false,"companionModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"}],
+    [{"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":true,"companionModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"}],
   ] satisfies Called<"saveSettings">[],
   searchNotes: [
     ["…"],
@@ -126,8 +126,8 @@ export const called = {
     ["…","…"],
   ] satisfies Called<"sendChatMessage">[],
   setApiKey: [
-    ["openai","…"],
     ["anthropic","…"],
+    ["openai","…"],
   ] satisfies Called<"setApiKey">[],
   setSearchFolderNoContent: [
     ["…",true],
@@ -194,9 +194,9 @@ export const returned = {
     {"app":"…","kind":"stopped","noteId":"…","title":"…"},
   ] satisfies Returned<"getPopupState">[],
   getRecordingStatus: [
-    {"elapsedMs":0,"noteId":null,"runningSince":null,"sources":[],"state":"idle"},
-    {"elapsedMs":0,"noteId":"…","runningSince":null,"sources":["me","them"],"state":"paused"},
     {"elapsedMs":0,"noteId":"…","runningSince":0,"sources":["me","them"],"state":"recording"},
+    {"elapsedMs":0,"noteId":"…","runningSince":null,"sources":["me","them"],"state":"paused"},
+    {"elapsedMs":0,"noteId":null,"runningSince":null,"sources":[],"state":"idle"},
   ] satisfies Returned<"getRecordingStatus">[],
   getReleaseNotes: [
     {"fetchedAt":0,"releases":[{"body":"…","htmlUrl":"…","name":"…","publishedAt":"…","tagName":"…","version":"…"}],"source":"network"},
@@ -246,8 +246,8 @@ export const returned = {
     {"elapsedMs":0,"noteId":"…","runningSince":0,"sources":["me","them"],"state":"recording"},
   ] satisfies Returned<"resumeRecording">[],
   saveSettings: [
-    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":true,"companionModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
     {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":false,"companionModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
+    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":true,"companionModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
   ] satisfies Returned<"saveSettings">[],
   searchNotes: [
     ["…"],
@@ -295,8 +295,8 @@ export const emitted = {
   ] satisfies Emitted<"onOpenNote">[],
   onPopupUpdate: [
     {"app":"…","kind":"error","message":"…"},
-    {"app":"…","kind":"recording","noteId":"…","title":"…"},
     {"app":"…","kind":"finishing","noteId":"…","title":"…"},
+    {"app":"…","kind":"recording","noteId":"…","title":"…"},
     {"app":"…","kind":"stopped","noteId":"…","title":"…"},
   ] satisfies Emitted<"onPopupUpdate">[],
   onRecordingError: [
@@ -309,15 +309,15 @@ export const emitted = {
     {"elapsedMs":0,"noteId":null,"runningSince":null,"sources":[],"state":"idle"},
   ] satisfies Emitted<"onRecordingStatus">[],
   onSearchIndexStatus: [
-    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"state":"off","total":0,"updatedAt":null},
+    {"done":0,"files":0,"folders":[],"state":"building","total":0,"updatedAt":0},
+    {"done":0,"files":0,"folders":[],"state":"building","total":0,"updatedAt":null},
+    {"done":0,"files":0,"folders":[],"state":"off","total":0,"updatedAt":null},
+    {"done":0,"files":0,"folders":[],"state":"ready","total":0,"updatedAt":0},
     {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"state":"building","total":0,"updatedAt":null},
+    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"state":"off","total":0,"updatedAt":null},
     {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"state":"ready","total":0,"updatedAt":0},
     {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":true,"path":"…","truncated":false}],"state":"building","total":0,"updatedAt":0},
     {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":true,"path":"…","truncated":false}],"state":"ready","total":0,"updatedAt":0},
-    {"done":0,"files":0,"folders":[],"state":"building","total":0,"updatedAt":0},
-    {"done":0,"files":0,"folders":[],"state":"ready","total":0,"updatedAt":0},
-    {"done":0,"files":0,"folders":[],"state":"off","total":0,"updatedAt":null},
-    {"done":0,"files":0,"folders":[],"state":"building","total":0,"updatedAt":null},
   ] satisfies Emitted<"onSearchIndexStatus">[],
   onSegment: [
     {"endedAt":0,"id":0,"noteId":"…","speaker":"me","startedAt":0,"text":"…"},
@@ -328,8 +328,8 @@ export const emitted = {
     {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":true,"companionModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
   ] satisfies Emitted<"onSettingsChanged">[],
   onUpdateStatus: [
-    {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"idle","ready":false,"totalBytes":null},
-    {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"downloading","ready":false,"totalBytes":null},
     {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"downloading","ready":false,"totalBytes":0},
+    {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"downloading","ready":false,"totalBytes":null},
+    {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"idle","ready":false,"totalBytes":null},
   ] satisfies Emitted<"onUpdateStatus">[],
 };

@@ -237,6 +237,11 @@ fn ipc_contract_matches_the_frontend() {
     });
     let status = s.ok("remove_search_folder", json!({ "path": folder_path }));
     assert_eq!(status["folders"], json!([]));
+    // 外したあとの索引の更新が終わるまで待つ（見本に入るイベントの順が、その時々で変わらないように）
+    wait_until("外したあとの索引", || {
+        let ready = |status: &Value| status["state"] == "ready" && status["folders"] == json!([]);
+        events_named(&events, "search-index-status").iter().any(ready).then_some(())
+    });
     companion["companion"] = json!(false);
     s.ok("save_settings", json!({ "settings": companion }));
     let refused = s.call("rebuild_search_index", json!({})).unwrap_err();
