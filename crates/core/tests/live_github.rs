@@ -4,8 +4,12 @@
 //! 模擬サーバーのテスト（network.rs ほか）では気づけないので、インターネットにつながる CI で、製品と同じ
 //! クライアントのまま問い合わせる。環境変数 `KIROSCRIBE_LIVE_TESTS=1` のときだけ問い合わせ、それ以外では何もせずに通る
 //! （オフラインの開発環境で `cargo test` が失敗しないように）。
+//!
+//! リリース一覧は、製品と同じく認証なしで GitHub の API に問い合わせる。認証なしの問い合わせの回数には、
+//! IP アドレスごとの上限（1 時間に 60 回）があり、CI の共有のランナーではほかの利用者と分け合う。
+//! 上限に達して断られたときは、確かめずに警告を出して終える（取得元が変わったこととは区別する）。
 
-use kiroscribe_core::help::{allowed_external_url, HelpClient, API_BASE_URL, RAW_BASE_URL};
+use kiroscribe_core::help::{allowed_external_url, HelpClient, ReleaseNote, API_BASE_URL, RAW_BASE_URL};
 
 const RELEASE_PAGE: &str = "https://github.com/s-tabana/kiroscribe/releases/tag/";
 
@@ -15,6 +19,67 @@ fn live() -> bool {
         eprintln!("KIROSCRIBE_LIVE_TESTS=1 のときだけ、本物の GitHub に問い合わせます");
     }
     enabled
+}
+
+/// 認証なしの GitHub の API の利用回数が、いま上限に達しているか（`/rate_limit` への問い合わせは回数に数えられない）。
+/// 確かめられなければ、達していないとみなす（断られた理由を取り違えて、本当の失敗を見逃さないように）
+async fn api_rate_limited() -> bool {
+    let response = kiroscribe_core::http::client()
+        .get(format!("{API_BASE_URL}/rate_limit"))
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await;
+    let Ok(response) = response else {
+        return false;
+    };
+    let Ok(text) = response.text().await else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|body| body["resources"]["core"]["remaining"].as_u64())
+        == Some(0)
+}
+
+/// リリース一覧を取得する。API の利用回数の上限で断られたときは、警告を出して `None` を返す
+async fn fetch_releases_unless_rate_limited(client: &HelpClient) -> Option<Vec<ReleaseNote>> {
+    match client.fetch_releases().await {
+        Ok(releases) => Some(releases),
+        Err(err) => {
+            let message = err.to_string();
+            let refused = message.contains("HTTP 403") || message.contains("HTTP 429");
+            if refused && api_rate_limited().await {
+                let warning = "GitHub の API の利用回数（認証なし）が上限に達しているため、リリースノートの取得元は確かめませんでした";
+                if std::env::var_os("GITHUB_ACTIONS").is_some() {
+                    println!("::warning title=GitHub の API の利用回数の上限::{warning}");
+                }
+                eprintln!("{warning}: {message}");
+                return None;
+            }
+            panic!("リリースノートを GitHub から取得できません: {message}");
+        }
+    }
+}
+
+/// 「1.2.3」の形のバージョンを、大きさを比べられる数の組にする
+fn version_numbers(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.split('.').map(|part| {
+        (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse::<u64>().ok())
+            .flatten()
+    });
+    let numbers = (parts.next()??, parts.next()??, parts.next()??);
+    parts.next().is_none().then_some(numbers)
+}
+
+// [HLP-015]
+#[test]
+fn version_numbers_reads_only_published_version_forms() {
+    assert_eq!(version_numbers("0.3.0"), Some((0, 3, 0)));
+    assert_eq!(version_numbers("1.10.2"), Some((1, 10, 2)));
+    for wrong in ["0.3", "0.3.0.1", "0.3.0-beta.1", "v0.3.0", "0..1", ""] {
+        assert_eq!(version_numbers(wrong), None, "{wrong}");
+    }
 }
 
 // [HLP-015][HLP-003]
@@ -38,19 +103,15 @@ async fn the_release_notes_on_github_are_readable() {
         return;
     }
     let client = HelpClient::new().with_base_urls(RAW_BASE_URL, API_BASE_URL);
-    let releases = client
-        .fetch_releases()
-        .await
-        .expect("リリースノートを GitHub から取得できません");
+    let Some(releases) = fetch_releases_unless_rate_limited(&client).await else {
+        return;
+    };
     assert!(!releases.is_empty());
-    // 公開済みのバージョン（0.3.0）が読める
-    assert!(
-        releases.iter().any(|r| r.version == "0.3.0"),
-        "0.3.0 のリリースがない: {:?}",
-        releases.iter().map(|r| &r.version).collect::<Vec<_>>()
-    );
     for release in &releases {
         assert!(!release.version.is_empty() && !release.name.is_empty(), "{release:?}");
+        // 公開済みのリリースは「v1.2.3」のタグで、プレリリース（ハイフンの付くもの）は入らない
+        assert!(version_numbers(&release.version).is_some(), "バージョンの形が違う: {release:?}");
+        assert_eq!(release.tag_name, format!("v{}", release.version), "{release:?}");
         assert!(release.published_at.is_some(), "公開日がない: {release:?}");
         // 「GitHub」のリンクは、このリポジトリのリリースのページで、アプリが外部ブラウザで開いてよい URL
         let url = release.html_url.as_deref().expect("リリースのページの URL がない");
@@ -62,4 +123,9 @@ async fn the_release_notes_on_github_are_readable() {
     let mut sorted = dates.clone();
     sorted.sort_by(|a, b| b.cmp(a));
     assert_eq!(dates, sorted, "新しい順に並んでいない");
+    // 最新のリリースが先頭で、バージョンも大きい順
+    let versions: Vec<(u64, u64, u64)> = releases.iter().filter_map(|r| version_numbers(&r.version)).collect();
+    let mut descending = versions.clone();
+    descending.sort_by(|a, b| b.cmp(a));
+    assert_eq!(versions, descending, "バージョンが大きい順に並んでいない");
 }

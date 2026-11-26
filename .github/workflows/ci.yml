@@ -70,7 +70,8 @@ jobs:
         run: npm run test:web
 
       # KIROSCRIBE_LIVE_TESTS: 本物の GitHub に問い合わせて、ヘルプの取得元がいまも読めることを確かめる
-      # （crates/core/tests/live_github.rs。キーは使わない）。Windows では、本物の資格情報マネージャーも使う
+      # （crates/core/tests/live_github.rs。キーは使わない）。認証なしの GitHub の API の利用回数の上限で断られたときは、
+      # 確かめずに警告を出して通る。Windows では、本物の資格情報マネージャーも使う
       - name: Rust のテスト
         env:
           KIROSCRIBE_LIVE_TESTS: "1"
