@@ -30,8 +30,6 @@ permissions:
 jobs:
   rust:
     name: Rust（crates/core）
-    # main・next から出したプルリクエストは、同じコミットを push の実行が確かめているので、ジョブを動かさない
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || (github.head_ref != 'main' && github.head_ref != 'next')
     runs-on: ubuntu-latest
     steps:
       # persist-credentials: false … トークンを .git/config に残さない
@@ -82,8 +80,6 @@ jobs:
 
   web:
     name: 画面（vitest）
-    # main・next から出したプルリクエストは、同じコミットを push の実行が確かめているので、ジョブを動かさない
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || (github.head_ref != 'main' && github.head_ref != 'next')
     runs-on: ubuntu-latest
     steps:
       # persist-credentials: false … トークンを .git/config に残さない

@@ -27,8 +27,6 @@ permissions:
 jobs:
   windows:
     name: Windows（テスト・インストーラ）
-    # main・next から出したプルリクエストは、同じコミットを push の実行が確かめているので、ジョブを動かさない
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || (github.head_ref != 'main' && github.head_ref != 'next')
     runs-on: windows-latest
     steps:
       # persist-credentials: false … トークンを .git/config に残さない（後のステップで動く依存関係のコードから読めないようにする）
