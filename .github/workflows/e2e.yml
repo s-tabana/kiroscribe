@@ -16,11 +16,12 @@ on:
   pull_request:
   workflow_dispatch:
 
-# ビルドに時間がかかるため、実行中のものは止めずに順番待ちにする
+# プルリクエストでは、新しいコミットが来たら古いコミットの実行を止める（グループはプルリクエストごと）。
+# main・next への push と手動の実行は、実行中のものは止めずに順番待ちにする
 # （待っている間に新しい push が来たら、待っている方だけが置き換わる）
 concurrency:
   group: e2e-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # このワークフローに渡すトークンは、リポジトリの読み取りだけ
 permissions:
@@ -29,6 +30,8 @@ permissions:
 jobs:
   e2e:
     name: E2E（${{ matrix.name }}）
+    # main・next から出したプルリクエストは、同じコミットを push の実行が確かめているので、ジョブを動かさない
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || (github.head_ref != 'main' && github.head_ref != 'next')
     runs-on: ${{ matrix.os }}
     # ふだんは 15 分ほど。WebDriver がつながらないときに待ち続けないようにする
     timeout-minutes: 60
@@ -134,6 +137,8 @@ jobs:
   # VB-CABLE は vb-audio.com から取得する（寄付で支えられているソフトウェアで、この使い捨ての環境にだけ入れる）
   real-audio:
     name: E2E（Windows・本物の音声デバイス）
+    # main・next から出したプルリクエストは、同じコミットを push の実行が確かめているので、ジョブを動かさない
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || (github.head_ref != 'main' && github.head_ref != 'next')
     runs-on: windows-latest
     timeout-minutes: 45
     steps:

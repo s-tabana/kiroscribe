@@ -19,11 +19,12 @@ on:
   workflow_dispatch:
   workflow_call:
 
-# ビルドに時間がかかるため、実行中のものは止めずに順番待ちにする。
+# プルリクエストでは、新しいコミットが来たら古いコミットの実行を止める（グループはプルリクエストごと）。
+# main・next への push・手動・リリースからの実行は、実行中のものは止めずに順番待ちにする。
 # リリースから呼ばれたときは、呼んだワークフローの名前（release）で分け、push での実行と待ち合わせない
 concurrency:
   group: installer-e2e-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # このワークフローに渡すトークンは、リポジトリの読み取りだけ
 permissions:
@@ -32,6 +33,8 @@ permissions:
 jobs:
   installer:
     name: インストールと更新（Windows）
+    # main・next から出したプルリクエストは、同じコミットを push の実行が確かめているので、ジョブを動かさない
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || (github.head_ref != 'main' && github.head_ref != 'next')
     runs-on: windows-latest
     # ふだんは 30 分ほど（ビルド 2 回とテスト）。止まったときに待ち続けないようにする
     timeout-minutes: 90

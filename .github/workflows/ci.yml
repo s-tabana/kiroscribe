@@ -13,11 +13,12 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Windows のビルドは時間がかかるため、実行中のものは止めずに順番待ちにする
+# プルリクエストでは、新しいコミットが来たら古いコミットの実行を止める（グループはプルリクエストごと）。
+# main・next への push と手動の実行は、実行中のものは止めずに順番待ちにする
 # （待っている間に新しい push が来たら、待っている方だけが置き換わる）
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # このワークフローに渡すトークンは、リポジトリの読み取りだけ
 permissions:
@@ -26,6 +27,8 @@ permissions:
 jobs:
   windows:
     name: Windows（テスト・インストーラ）
+    # main・next から出したプルリクエストは、同じコミットを push の実行が確かめているので、ジョブを動かさない
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || (github.head_ref != 'main' && github.head_ref != 'next')
     runs-on: windows-latest
     steps:
       # persist-credentials: false … トークンを .git/config に残さない（後のステップで動く依存関係のコードから読めないようにする）
