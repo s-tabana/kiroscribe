@@ -4,6 +4,7 @@ pub mod audio;
 pub mod autostart;
 pub mod chat;
 pub mod claude;
+pub mod companion;
 pub mod db;
 pub mod debug_bundle;
 pub mod debug_log;

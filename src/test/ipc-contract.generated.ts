@@ -126,8 +126,8 @@ export const called = {
     [],
   ] satisfies Called<"resumeRecording">[],
   saveSettings: [
-    [{"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":false,"companionModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"}],
-    [{"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":true,"companionModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"}],
+    [{"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":false,"companionModel":"…","companionNotes":true,"inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"}],
+    [{"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":true,"companionModel":"…","companionNotes":true,"inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"}],
   ] satisfies Called<"saveSettings">[],
   searchNotes: [
     ["…"],
@@ -236,7 +236,7 @@ export const returned = {
     {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false,"unconfirmed":false}],"revision":0,"state":"ready","total":0,"updatedAt":0},
   ] satisfies Returned<"getSearchIndexStatus">[],
   getSettings: [
-    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":true,"companionModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
+    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":true,"companionModel":"…","companionNotes":true,"inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
   ] satisfies Returned<"getSettings">[],
   getUpdateStatus: [
     {"available":null,"checkedAt":null,"downloadedBytes":0,"phase":"idle","ready":false,"totalBytes":null},
@@ -279,8 +279,8 @@ export const returned = {
     {"elapsedMs":0,"noteId":"…","runningSince":0,"sources":["me","them"],"state":"recording"},
   ] satisfies Returned<"resumeRecording">[],
   saveSettings: [
-    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":false,"companionModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
-    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":true,"companionModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
+    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":false,"companionModel":"…","companionNotes":true,"inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
+    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":true,"companionModel":"…","companionNotes":true,"inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
   ] satisfies Returned<"saveSettings">[],
   searchNotes: [
     ["…"],
@@ -376,8 +376,8 @@ export const emitted = {
     {"endedAt":0,"id":0,"noteId":"…","speaker":"them","startedAt":0,"text":"…"},
   ] satisfies Emitted<"onSegment">[],
   onSettingsChanged: [
-    {"autoRecordMeetings":false,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":true,"companionModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
-    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":true,"companionModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
+    {"autoRecordMeetings":false,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":true,"companionModel":"…","companionNotes":true,"inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
+    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","companion":true,"companionModel":"…","companionNotes":true,"inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
   ] satisfies Emitted<"onSettingsChanged">[],
   onTranscriptBreak: [
     {"id":0,"noteId":"…","round":0,"startedAt":0},

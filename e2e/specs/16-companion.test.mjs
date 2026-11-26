@@ -71,3 +71,21 @@ test(
     assert.equal(await (await session.$(sel.settingsDialog)).isDisplayed(), true);
   },
 );
+
+test("[IDX-016] 「Kiroscribe の過去のノート」は初期値でオン。送るものを表示し、「設定を保存」で保存する", async (ctx) => {
+  const notes = settingsCheck("Kiroscribe の過去のノート");
+  let session = await ctx.launch();
+  await openSettings(session);
+  assert.equal(await (await session.$(notes)).isSelected(), true, "初期値はオン");
+  const sends = await session.text(`xpath:${SECTION}//dl[@aria-label="会議の相棒が PC の外に送るもの"]`);
+  assert.match(sends, /過去のノートで見つかったノートの題名・作成日時と抜粋/);
+  await session.click(notes);
+  // 確認のダイアログは出さない
+  assert.equal(ctx.work.dialogs().length, 0);
+  await saveSettings(session);
+  await closeSettings(session);
+
+  session = await ctx.relaunch();
+  await openSettings(session);
+  assert.equal(await (await session.$(notes)).isSelected(), false, "起動し直しても残る");
+});

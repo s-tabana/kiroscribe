@@ -522,6 +522,57 @@ fn search_notes_command_covers_body_minutes_and_transcript() {
     assert!(refused.to_string().contains("query"), "{refused}");
 }
 
+/// 過去のノートの索引は、相棒と「Kiroscribe の過去のノート」の両方がオンで保存したときに作り、
+/// ノートを保存するたびに更新し、ノートを削除したら消す。
+// [IDX-017][NOTE-015]
+#[test]
+fn past_notes_are_indexed_while_both_settings_are_on() {
+    #[cfg(feature = "e2e")]
+    fixture::fixture();
+    let (app, window) = mock_app("http://127.0.0.1:9/latest.json");
+    app.manage(AppState::new(Database::open_in_memory().unwrap(), Box::new(MemorySecretStore::default())));
+    let search = |term: &str| {
+        let companion = app.state::<crate::companion::CompanionState>();
+        companion.indexer.search(&[term.to_string()], None, 8).1.into_iter().map(|hit| hit.note_id).collect::<Vec<_>>()
+    };
+    let wait_for = |term: &str, expected: Vec<String>| {
+        let start = std::time::Instant::now();
+        while search(term) != expected {
+            assert!(start.elapsed() < std::time::Duration::from_secs(20), "{term} の検索結果が {expected:?} になりません: {:?}", search(term));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    let id = invoke(&window, "create_note", json!({})).unwrap()["id"].as_str().unwrap().to_string();
+    let patch = json!({ "title": "経理の定例", "userNotes": "- 経費精算は新システムへ" });
+    invoke(&window, "update_note", json!({ "id": id, "patch": patch })).unwrap();
+
+    // 両方がオンで保存した時点で、すべてのノートを入れ直す
+    let mut settings = invoke(&window, "get_settings", json!({})).unwrap();
+    settings["companion"] = json!(false);
+    invoke(&window, "save_settings", json!({ "settings": settings })).unwrap();
+    settings["companion"] = json!(true);
+    invoke(&window, "save_settings", json!({ "settings": settings })).unwrap();
+    wait_for("経費精算", vec![id.clone()]);
+
+    // 保存するたびに更新する
+    let patch = json!({ "userNotes": "- 交通費の上限を決めた" });
+    invoke(&window, "update_note", json!({ "id": id, "patch": patch })).unwrap();
+    wait_for("交通費", vec![id.clone()]);
+    wait_for("経費精算", vec![]);
+
+    // 「Kiroscribe の過去のノート」をオフにして保存すると、ノートの索引を消す。オンに戻すと入れ直す
+    settings["companionNotes"] = json!(false);
+    invoke(&window, "save_settings", json!({ "settings": settings })).unwrap();
+    assert!(search("交通費").is_empty());
+    settings["companionNotes"] = json!(true);
+    invoke(&window, "save_settings", json!({ "settings": settings })).unwrap();
+    wait_for("交通費", vec![id.clone()]);
+
+    // ノートを削除したら消す
+    invoke(&window, "delete_note", json!({ "id": id })).unwrap();
+    wait_for("交通費", vec![]);
+}
+
 // ---- 見本の書き出し ----
 
 /// 見本の値を、実行のたびに変わらない形にする。型の確認に要る情報（キー・null かどうか・列挙の値）だけを残す:

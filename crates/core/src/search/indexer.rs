@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::extract::{extract_within, Extracted};
-use super::store::{erase_marker, is_search_suspended, remove_index_files, resume_search, stamp_of_file, suspend_search, Binding, SearchIndex};
+use super::store::{erase_marker, is_search_suspended, remove_index_files, resume_search, stamp_of_file, suspend_search, Binding, Hit, NoteDoc, NoteHit, SearchIndex};
 use super::walk::{is_online_only, is_outside, FileEntry, FileId, Limits, Place, Root};
 use crate::time::now_ms;
 
@@ -152,6 +152,12 @@ enum Message {
     Rescan,
     /// 見張りに失敗した（見張りが止まったことがある）。見張り直して、すべてのフォルダを調べ直す
     WatchFailed,
+    /// 過去のノートの索引を、渡したノートで作り直す（None なら、ノートの索引を消す）
+    SyncNotes(Option<Vec<NoteDoc>>),
+    /// ノートが保存された
+    UpsertNote(NoteDoc),
+    /// ノートが削除された
+    RemoveNote(String),
     /// 作業用のスレッドを止める
     Shutdown,
 }
@@ -159,6 +165,8 @@ enum Message {
 struct Shared {
     status: IndexStatus,
     enabled: bool,
+    /// 過去のノートの索引を作るか（相棒と「Kiroscribe の過去のノート」の両方がオン）
+    notes: bool,
     folders: Vec<SearchFolder>,
     /// 命令を出すたびに増やす。作っている途中の処理は、これが変わったら途中でやめ、古い状態を知らせない
     generation: u64,
@@ -177,6 +185,9 @@ struct Inner {
     /// 状態の知らせ（`on_status`）と命令の順を守る。知らせの途中に出た命令は、知らせのあとに出たことになる
     order: Arc<Mutex<()>>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    index_path: PathBuf,
+    /// 検索に使う、作業用のスレッドとは別の接続（索引を作っている途中でも、待たずに探せるように）
+    reader: Mutex<Option<SearchIndex>>,
 }
 
 impl Drop for Inner {
@@ -225,16 +236,19 @@ impl Indexer {
                 revision: 0,
             },
             enabled: false,
+            notes: false,
             folders: Vec::new(),
             generation: 0,
         }));
         let order = Arc::new(Mutex::new(()));
-        let worker = Worker::new(index_path, limits, intervals, shared.clone(), order.clone(), Arc::new(on_status), tx.clone());
+        let worker = Worker::new(index_path.clone(), limits, intervals, shared.clone(), order.clone(), Arc::new(on_status), tx.clone());
         let thread = std::thread::Builder::new()
             .name("search-index".into())
             .spawn(move || worker.run(rx))
             .expect("索引の作業用のスレッドを起こせません");
-        Self { inner: Arc::new(Inner { tx, shared, order, thread: Mutex::new(Some(thread)) }) }
+        Self {
+            inner: Arc::new(Inner { tx, shared, order, thread: Mutex::new(Some(thread)), index_path, reader: Mutex::new(None) }),
+        }
     }
 }
 
@@ -305,6 +319,9 @@ impl Indexer {
     /// 止めて、索引の中身を消す。消し終えるまでの状態は「消している」で、作業用のスレッドが消し終えてから「オフ」になる。
     /// 戻り値は、命令を出した直後の状態（「消している」）。
     pub fn disable(&self) -> IndexStatus {
+        // 検索用の接続を閉じてから消す（開いたままだと、Windows では索引のファイルを消せない）
+        let mut reader = self.inner.reader.lock().unwrap();
+        *reader = None;
         self.command(|shared| {
             shared.enabled = false;
             let status = IndexStatus { state: IndexState::Erasing, done: 0, total: 0, updated_at: None, ..shared.status.clone() };
@@ -348,6 +365,9 @@ impl Indexer {
 
     /// 索引を作り直す。戻り値は、命令を出した直後の状態（「作っている」）。相棒がオフなら何もしない（None）。
     pub fn rebuild(&self) -> Option<IndexStatus> {
+        // 空にできずにファイルを消して作り直すときに備えて、検索用の接続を閉じておく
+        let mut reader = self.inner.reader.lock().unwrap();
+        *reader = None;
         self.command(|shared| {
             if !shared.enabled {
                 return None;
@@ -364,6 +384,53 @@ impl Indexer {
 
     pub fn status(&self) -> IndexStatus {
         self.inner.shared.lock().unwrap().status.clone()
+    }
+
+    /// 過去のノートの索引を作るかを決める。作るなら `notes` のノートで作り直し、作らないなら消す。
+    pub fn set_notes(&self, notes: Option<Vec<NoteDoc>>) {
+        self.inner.shared.lock().unwrap().notes = notes.is_some();
+        let _ = self.inner.tx.send(Message::SyncNotes(notes));
+    }
+
+    /// 過去のノートの索引を作っているか。
+    pub fn notes_enabled(&self) -> bool {
+        let shared = self.inner.shared.lock().unwrap();
+        shared.enabled && shared.notes
+    }
+
+    /// 保存されたノートを索引に反映する（ノートの索引を作っていなければ何もしない）。
+    pub fn note_saved(&self, note: NoteDoc) {
+        if self.notes_enabled() {
+            let _ = self.inner.tx.send(Message::UpsertNote(note));
+        }
+    }
+
+    pub fn note_removed(&self, note_id: &str) {
+        let _ = self.inner.tx.send(Message::RemoveNote(note_id.to_string()));
+    }
+
+    /// 検索語で、指定したフォルダと過去のノートを探す（相棒がオフなら、何も見つからない）。
+    /// `exclude_note` は除くノート（録音中のノート）。
+    pub fn search(&self, terms: &[String], exclude_note: Option<&str>, limit: usize) -> (Vec<Hit>, Vec<NoteHit>) {
+        // 接続の鍵を持ってからオンかを読む（オフにする処理が接続を閉じたあとに、開き直さないように）
+        let mut reader = self.inner.reader.lock().unwrap();
+        let (enabled, notes) = {
+            let shared = self.inner.shared.lock().unwrap();
+            (shared.enabled, shared.notes)
+        };
+        if !enabled || !self.inner.index_path.exists() {
+            return (Vec::new(), Vec::new());
+        }
+        // 索引のファイルが消されて作り直されていたら、開き直す
+        if !reader.as_ref().is_some_and(SearchIndex::is_current) {
+            *reader = SearchIndex::open_existing(&self.inner.index_path).ok();
+        }
+        let Some(index) = reader.as_ref() else {
+            return (Vec::new(), Vec::new());
+        };
+        let hits = index.search(terms, limit).unwrap_or_default();
+        let note_hits = if notes { index.search_notes(terms, exclude_note, limit).unwrap_or_default() } else { Vec::new() };
+        (hits, note_hits)
     }
 
     /// 作業用のスレッドを止める（終わるのは待たない。最後の窓口がなくなったときは、終わるまで待つ）。
@@ -511,6 +578,26 @@ impl Worker {
                     pending.insert(path);
                     // 知らせが続いても、最初の知らせから MAX_CHANGE_DELAY たったら反映する
                     pending_since.get_or_insert_with(Instant::now).elapsed() >= MAX_CHANGE_DELAY
+                }
+                Ok(Message::SyncNotes(notes)) => {
+                    self.sync_notes(notes);
+                    false
+                }
+                Ok(Message::UpsertNote(note)) => {
+                    if self.enabled() && self.shared.lock().unwrap().notes {
+                        if let Some(index) = self.open_index() {
+                            let _ = index.upsert_note(&note);
+                        }
+                    }
+                    false
+                }
+                Ok(Message::RemoveNote(id)) => {
+                    if self.index.is_some() || self.index_path.exists() {
+                        if let Some(index) = self.open_index() {
+                            let _ = index.remove_note(&id);
+                        }
+                    }
+                    false
                 }
                 Ok(Message::Command(generation, command)) => {
                     // 命令は、どれもフォルダをすべて調べ直して見張り直すか、索引を消す
@@ -722,6 +809,21 @@ impl Worker {
                 // 消し直せたときに「オフ」を知らせる
                 let state = if self.erasure == Erasure::Erased { IndexState::Off } else { IndexState::Erasing };
                 self.emit(generation, state, (0, 0), true, None);
+            }
+        }
+    }
+
+    /// 過去のノートの索引を空にし、相棒がオンで `notes` があれば、そのノートを入れる。
+    fn sync_notes(&mut self, notes: Option<Vec<NoteDoc>>) {
+        let enabled = self.enabled();
+        if !enabled && !self.index_path.exists() {
+            return;
+        }
+        let Some(index) = self.open_index() else { return };
+        let _ = index.clear_notes();
+        if let (true, Some(notes)) = (enabled, notes) {
+            for note in &notes {
+                let _ = index.upsert_note(note);
             }
         }
     }
@@ -1366,7 +1468,7 @@ mod tests {
                 Message::Changed(path) => path.to_string_lossy().to_string(),
                 Message::Rescan => "調べ直す".into(),
                 Message::WatchFailed => "見張り直す".into(),
-                Message::Command(..) | Message::Shutdown => "ほか".into(),
+                _ => "ほか".into(),
             })
             .collect()
     }
@@ -1511,6 +1613,7 @@ mod tests {
         Arc::new(Mutex::new(Shared {
             status: IndexStatus { state: IndexState::Erasing, done: 0, total: 0, files: 0, updated_at: None, folders: Vec::new(), revision: 0 },
             enabled,
+            notes: false,
             folders: Vec::new(),
             generation,
         }))

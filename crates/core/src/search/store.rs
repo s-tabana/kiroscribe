@@ -17,7 +17,7 @@ pub const EXCERPT_CHARS: usize = 600;
 /// 抜粋の位置を決めるときに数える、1 つの検索語の一致の数の上限。
 const MAX_HITS_PER_TERM: usize = 5_000;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const SCHEMA: &str = r#"
 CREATE TABLE docs (
     id          INTEGER PRIMARY KEY,
@@ -41,6 +41,18 @@ CREATE TABLE bindings (
     place  TEXT NOT NULL,
     root   TEXT NOT NULL
 );
+CREATE TABLE notes (
+    note_id          TEXT PRIMARY KEY,
+    title            TEXT NOT NULL,
+    created_at       INTEGER NOT NULL,
+    memo             TEXT NOT NULL,
+    minutes          TEXT NOT NULL,
+    transcript       TEXT NOT NULL,
+    norm_title       TEXT NOT NULL,
+    norm_memo        TEXT NOT NULL,
+    norm_minutes     TEXT NOT NULL,
+    norm_transcript  TEXT NOT NULL
+);
 "#;
 
 /// 探し先の種類（索引の行の source）。
@@ -59,6 +71,8 @@ pub struct Hit {
     pub modified: i64,
     /// 一致した検索語の数
     pub matched_terms: usize,
+    /// 題名かファイル名に一致したか
+    pub named: bool,
 }
 
 pub struct SearchIndex {
@@ -192,6 +206,27 @@ impl SearchIndex {
         }
     }
 
+    /// 作業用のスレッドが作った索引を、検索のために開く（壊れていても作り直さない）。
+    /// 開いたときのファイルの世代を記録する（ファイルを消されたら、[`SearchIndex::is_current`] が false になる）。
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        // 開くあいだにファイルを消されないようにする
+        let epochs = EPOCHS.read().unwrap_or_else(|e| e.into_inner());
+        let epoch = epoch_in(&epochs, &epoch_key(path));
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        conn.busy_timeout(std::time::Duration::from_secs(2))?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version != SCHEMA_VERSION {
+            return Err(crate::CoreError::Other("索引の形が違います".into()));
+        }
+        Ok(Self { conn, path: Some(path.to_path_buf()), epoch })
+    }
+
+    /// この接続を開いたあとに、索引のファイルが消されていないか（消されていたら、開き直して検索する）。
+    pub fn is_current(&self) -> bool {
+        let epochs = EPOCHS.read().unwrap_or_else(|e| e.into_inner());
+        self.path.as_deref().is_none_or(|path| epoch_in(&epochs, &epoch_key(path)) == self.epoch)
+    }
+
     pub fn open_in_memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?, None, 0)
     }
@@ -215,7 +250,7 @@ impl SearchIndex {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version != SCHEMA_VERSION {
             // 索引は作り直せるので、形が違えば捨てて作る
-            conn.execute_batch("DROP TABLE IF EXISTS docs; DROP TABLE IF EXISTS bindings;")?;
+            conn.execute_batch("DROP TABLE IF EXISTS docs; DROP TABLE IF EXISTS bindings; DROP TABLE IF EXISTS notes;")?;
             conn.execute_batch(SCHEMA)?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -313,7 +348,7 @@ impl SearchIndex {
 
     /// 索引を空にする。消した内容が、本体と `-wal` のファイルに残らないところまで済ませる。
     pub fn clear(&self) -> Result<()> {
-        self.conn.execute_batch("DELETE FROM docs; DELETE FROM bindings;")?;
+        self.conn.execute_batch("DELETE FROM docs; DELETE FROM bindings; DELETE FROM notes;")?;
         // 空き領域を詰めてから、書き込みの途中の内容（-wal）を本体に反映して空にする
         self.conn.execute_batch("VACUUM;")?;
         let busy: i64 = self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
@@ -388,7 +423,7 @@ impl SearchIndex {
         let matched = (1..=terms.len()).map(any).collect::<Vec<_>>().join(" + ");
         let named = (1..=terms.len()).map(in_name).collect::<Vec<_>>().join(" OR ");
         let sql = format!(
-            "SELECT path, folder, title, file_name, body, name_only, modified, matched FROM (
+            "SELECT path, folder, title, file_name, body, name_only, modified, matched, named FROM (
                SELECT path, folder, title, file_name, body, name_only, modified, ({matched}) AS matched, ({named}) AS named FROM docs
                WHERE folder IN (SELECT folder FROM bindings)
              ) WHERE matched > 0 ORDER BY matched DESC, named DESC, modified DESC LIMIT {limit}"
@@ -405,10 +440,166 @@ impl SearchIndex {
                 excerpt: if name_only { None } else { excerpt(&body, &terms, EXCERPT_CHARS) },
                 modified: row.get(6)?,
                 matched_terms: row.get::<_, i64>(7)? as usize,
+                named: row.get(8)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
+}
+
+/// 索引に入れる、Kiroscribe の過去のノート 1 件（題名・自分のメモ・議事録・文字起こし）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteDoc {
+    pub note_id: String,
+    pub title: String,
+    pub created_at: i64,
+    pub memo: String,
+    pub minutes: String,
+    pub transcript: String,
+}
+
+/// 過去のノートの、一致した部分の種類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotePart {
+    Memo,
+    Minutes,
+    Transcript,
+}
+
+impl NotePart {
+    pub fn label(self) -> &'static str {
+        match self {
+            NotePart::Memo => "メモ",
+            NotePart::Minutes => "議事録",
+            NotePart::Transcript => "文字起こし",
+        }
+    }
+}
+
+/// 検索で見つかった過去のノート。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteHit {
+    pub note_id: String,
+    pub title: String,
+    pub created_at: i64,
+    /// 一致した部分の前後と、その部分の種類（題名だけに一致したときは None）
+    pub excerpt: Option<(NotePart, String)>,
+    pub matched_terms: usize,
+    /// 題名に一致したか
+    pub in_title: bool,
+}
+
+impl SearchIndex {
+    /// ノートを索引に入れる（あれば置き換える）。
+    pub fn upsert_note(&self, note: &NoteDoc) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO notes (note_id, title, created_at, memo, minutes, transcript, norm_title, norm_memo, norm_minutes, norm_transcript)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(note_id) DO UPDATE SET title = excluded.title, created_at = excluded.created_at, memo = excluded.memo,
+               minutes = excluded.minutes, transcript = excluded.transcript, norm_title = excluded.norm_title,
+               norm_memo = excluded.norm_memo, norm_minutes = excluded.norm_minutes, norm_transcript = excluded.norm_transcript",
+            params![
+                note.note_id,
+                note.title,
+                note.created_at,
+                note.memo,
+                note.minutes,
+                note.transcript,
+                normalize(&note.title),
+                normalize(&note.memo),
+                normalize(&note.minutes),
+                normalize(&note.transcript),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_note(&self, note_id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM notes WHERE note_id = ?1", [note_id])?;
+        Ok(())
+    }
+
+    /// ノートの索引を空にする。
+    pub fn clear_notes(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM notes", [])?;
+        Ok(())
+    }
+
+    pub fn count_notes(&self) -> Result<usize> {
+        Ok(self.conn.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get::<_, i64>(0))? as usize)
+    }
+
+    /// 索引に入っているノートの ID。
+    pub fn note_ids(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT note_id FROM notes")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// 検索語のどれかを、題名・自分のメモ・議事録・文字起こしに含むノート（`exclude` のノートは除く）。
+    /// 並びは、一致した検索語の数、題名に一致したか、作成日時の新しさの順。
+    /// 資料の検索（[`SearchIndex::search`]）と同じく、消去待ちの索引と、古い世代の接続からは何も返さない。
+    pub fn search_notes(&self, terms: &[String], exclude: Option<&str>, limit: usize) -> Result<Vec<NoteHit>> {
+        // 検索を終えるまで、索引のファイルを消させない
+        let epochs = EPOCHS.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(path) = self.path.as_deref() {
+            if epoch_in(&epochs, &epoch_key(path)) != self.epoch || is_search_suspended(path) {
+                return Ok(Vec::new());
+            }
+        }
+        let mut terms: Vec<String> = terms.iter().map(|t| normalize(t.trim())).filter(|t| !t.is_empty()).collect();
+        terms.sort();
+        terms.dedup();
+        if terms.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let n = terms.len();
+        let any = |i: usize| {
+            format!("(instr(norm_title, ?{i}) > 0 OR instr(norm_memo, ?{i}) > 0 OR instr(norm_minutes, ?{i}) > 0 OR instr(norm_transcript, ?{i}) > 0)")
+        };
+        let matched = (1..=n).map(any).collect::<Vec<_>>().join(" + ");
+        let titled = (1..=n).map(|i| format!("instr(norm_title, ?{i}) > 0")).collect::<Vec<_>>().join(" OR ");
+        let exclude_param = n + 1;
+        let sql = format!(
+            "SELECT note_id, title, created_at, memo, minutes, transcript, matched, titled FROM (
+               SELECT *, ({matched}) AS matched, ({titled}) AS titled FROM notes WHERE note_id != ?{exclude_param}
+             ) WHERE matched > 0 ORDER BY matched DESC, titled DESC, created_at DESC LIMIT {limit}"
+        );
+        let mut values: Vec<String> = terms.clone();
+        values.push(exclude.unwrap_or_default().to_string());
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+            let parts = [
+                (NotePart::Memo, row.get::<_, String>(3)?),
+                (NotePart::Minutes, row.get::<_, String>(4)?),
+                (NotePart::Transcript, row.get::<_, String>(5)?),
+            ];
+            Ok(NoteHit {
+                note_id: row.get(0)?,
+                title: row.get(1)?,
+                created_at: row.get(2)?,
+                excerpt: note_excerpt(&parts, &terms),
+                matched_terms: row.get::<_, i64>(6)? as usize,
+                in_title: row.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+}
+
+/// 一致した検索語が最も多い部分（メモ・議事録・文字起こしの順に優先）の抜粋。
+fn note_excerpt(parts: &[(NotePart, String)], terms: &[String]) -> Option<(NotePart, String)> {
+    let count = |text: &str| {
+        let normalized = normalize(text);
+        terms.iter().filter(|t| normalized.contains(t.as_str())).count()
+    };
+    let (part, text) = parts
+        .iter()
+        .map(|(part, text)| (count(text), part, text))
+        .filter(|(n, _, _)| *n > 0)
+        .max_by_key(|(n, part, _)| (*n, std::cmp::Reverse(**part as u8)))
+        .map(|(_, part, text)| (*part, text))?;
+    excerpt(text, terms, EXCERPT_CHARS).map(|e| (part, e))
 }
 
 /// 中身のうち、検索語（正規化したもの）が最も集まっている部分の前後を、`max_chars` 文字までで返す。
@@ -475,6 +666,42 @@ pub fn excerpt(body: &str, terms: &[String], max_chars: usize) -> Option<String>
 mod tests {
     use super::*;
     use crate::search::extract::Kind;
+
+    fn note(id: &str, title: &str, created_at: i64, memo: &str, minutes: &str, transcript: &str) -> NoteDoc {
+        NoteDoc {
+            note_id: id.into(),
+            title: title.into(),
+            created_at,
+            memo: memo.into(),
+            minutes: minutes.into(),
+            transcript: transcript.into(),
+        }
+    }
+
+    // [IDX-016][IDX-019]
+    #[test]
+    fn notes_are_searched_in_title_memo_minutes_and_transcript() {
+        let index = SearchIndex::open_in_memory().unwrap();
+        index.upsert_note(&note("a", "予算の定例", 100, "- 予算の確認", "", "")).unwrap();
+        index.upsert_note(&note("b", "週次", 200, "", "## 決定事項\n- 予算はＡ案", "")).unwrap();
+        index.upsert_note(&note("c", "採用", 300, "", "", "予算の話をしました")).unwrap();
+        index.upsert_note(&note("rec", "録音中", 400, "予算", "", "")).unwrap();
+        let hits = index.search_notes(&terms(&["予算"]), Some("rec"), 8).unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.note_id.as_str()).collect();
+        assert_eq!(ids, ["a", "c", "b"], "題名に一致したもの、作成日時の新しいものの順。録音中のノートは除く");
+        let kind = |id: &str| hits.iter().find(|h| h.note_id == id).unwrap().excerpt.as_ref().map(|(p, _)| p.label());
+        assert_eq!(kind("a"), Some("メモ"));
+        assert_eq!(kind("b"), Some("議事録"));
+        assert_eq!(kind("c"), Some("文字起こし"));
+        assert!(hits[2].excerpt.as_ref().unwrap().1.contains("予算はＡ案"));
+        // 題名だけに一致したら、抜粋はない
+        assert_eq!(index.search_notes(&terms(&["定例"]), None, 8).unwrap()[0].excerpt, None);
+
+        index.remove_note("a").unwrap();
+        assert_eq!(index.count_notes().unwrap(), 3);
+        index.clear_notes().unwrap();
+        assert_eq!(index.count_notes().unwrap(), 0);
+    }
 
     fn entry(path: &str, modified: i64) -> FileEntry {
         FileEntry { path: PathBuf::from(path), kind: Kind::Text, modified, size: 1, online_only: false }
@@ -643,6 +870,29 @@ mod tests {
         reopened.upsert(Path::new("/r"), &entry("/r/a.txt", 1), &content(None, "経費")).unwrap();
         assert_eq!(reopened.search(&terms(&["経費"]), 8).unwrap().len(), 1, "消去待ちを解いたら検索する");
         assert_eq!(SearchIndex::open_in_memory().unwrap().path, None, "メモリの中の索引は、消去待ちにしない");
+    }
+
+    /// 過去のノートも、資料と同じく、消去待ちの索引と、ファイルを消す前に開いた検索用の接続からは探さない。
+    // [IDX-017][IDX-028]
+    #[test]
+    fn notes_are_not_searched_from_a_suspended_or_removed_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data").join(INDEX_FILE);
+        let index = SearchIndex::open(&path).unwrap();
+        index.upsert_note(&note("a", "予算の定例", 1, "予算", "", "")).unwrap();
+        let reader = SearchIndex::open_existing(&path).unwrap();
+        assert!(reader.is_current());
+        assert_eq!(reader.search_notes(&terms(&["予算"]), None, 8).unwrap().len(), 1);
+
+        suspend_search(&path).unwrap();
+        assert!(reader.search_notes(&terms(&["予算"]), None, 8).unwrap().is_empty(), "消去待ちのあいだは探さない");
+        resume_search(&path).unwrap();
+        assert_eq!(reader.search_notes(&terms(&["予算"]), None, 8).unwrap().len(), 1);
+
+        index.close().unwrap();
+        remove_index_files(&path).unwrap();
+        assert!(!reader.is_current(), "ファイルを消したら、開き直す");
+        assert!(reader.search_notes(&terms(&["予算"]), None, 8).unwrap().is_empty());
     }
 
     /// 索引のファイルを消す前に開いた接続は、消したファイルの中身を読み続けられても、検索に使わない

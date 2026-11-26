@@ -385,6 +385,7 @@ impl RecorderSink for TauriSink {
 
 fn emit_status(app: &AppHandle, status: &RecordingStatus) {
     recording_changed(app, status.state);
+    crate::companion::recording_changed(app, status.note_id.as_deref(), status.state == RecordingState::Idle);
     let _ = app.emit(EVENT_STATUS, status.clone());
 }
 

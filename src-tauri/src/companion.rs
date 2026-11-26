@@ -4,9 +4,12 @@
 //! オフにして保存すると、索引の作成と見張りを止めて、索引の中身を消す。探すフォルダの一覧は残す。
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
+use kiroscribe_core::search::store::NoteDoc;
 use kiroscribe_core::search::{overlap, IndexStatus, Indexer, Overlap, SearchFolder, INDEX_FILE};
 use kiroscribe_core::settings::Settings;
+use kiroscribe_core::Database;
 use tauri::{Emitter, Manager, State};
 
 use crate::error::{CmdResult, CommandError};
@@ -18,6 +21,90 @@ pub const EVENT_SEARCH_INDEX_STATUS: &str = "search-index-status";
 
 pub struct CompanionState {
     pub indexer: Indexer,
+    /// 録音中（または仕上げ中）のノート。過去のノートの索引には、録音が終わってから入れる
+    recording: Mutex<Option<String>>,
+}
+
+/// 過去のノートの索引を作るか（保存した設定で、相棒と「Kiroscribe の過去のノート」の両方がオン）。
+fn notes_on(settings: &Settings) -> bool {
+    settings.companion && settings.companion_notes
+}
+
+/// 索引に入れるノートの中身（題名・自分のメモ・議事録・文字起こし）。
+fn note_doc(db: &Database, note_id: &str) -> Option<NoteDoc> {
+    let note = db.get_note(note_id).ok()?;
+    let transcript = db
+        .list_segments(note_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|segment| format!("{}: {}", segment.speaker.label(), segment.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(NoteDoc {
+        note_id: note.id,
+        title: note.title,
+        created_at: note.created_at,
+        memo: note.user_notes,
+        minutes: note.enhanced_notes.unwrap_or_default(),
+        transcript,
+    })
+}
+
+/// 録音中のノートを除く、すべてのノート。
+fn all_note_docs(db: &Database, recording: Option<&str>) -> Vec<NoteDoc> {
+    db.list_notes()
+        .unwrap_or_default()
+        .iter()
+        .filter(|note| Some(note.id.as_str()) != recording)
+        .filter_map(|note| note_doc(db, &note.id))
+        .collect()
+}
+
+impl CompanionState {
+    fn recording_note(&self) -> Option<String> {
+        self.recording.lock().unwrap().clone()
+    }
+
+    /// 過去のノートの索引を、保存した設定に合わせる（作るなら入れ直し、作らないなら消す）。
+    fn sync_notes(&self, db: &Database, settings: &Settings) {
+        let notes = notes_on(settings).then(|| all_note_docs(db, self.recording_note().as_deref()));
+        self.indexer.set_notes(notes);
+    }
+}
+
+/// ノート・議事録・文字起こしが保存されたら呼ぶ。録音中のノートは、録音が終わってから入れる。
+pub fn note_saved(app: &AppHandle, note_id: &str) {
+    let Some(companion) = app.try_state::<CompanionState>() else { return };
+    if !companion.indexer.notes_enabled() || companion.recording_note().as_deref() == Some(note_id) {
+        return;
+    }
+    if let Some(doc) = note_doc(&app.state::<AppState>().db(), note_id) {
+        companion.indexer.note_saved(doc);
+    }
+}
+
+/// ノートを削除したら呼ぶ（そのノートを索引から消す）。
+pub fn note_deleted(app: &AppHandle, note_id: &str) {
+    if let Some(companion) = app.try_state::<CompanionState>() {
+        companion.indexer.note_removed(note_id);
+    }
+}
+
+/// 録音の状態が変わるたびに呼ぶ。録音が終わったら、そのノートを索引に入れる。
+pub fn recording_changed(app: &AppHandle, note_id: Option<&str>, idle: bool) {
+    let Some(companion) = app.try_state::<CompanionState>() else { return };
+    let finished = {
+        let mut recording = companion.recording.lock().unwrap();
+        if idle {
+            recording.take()
+        } else {
+            *recording = note_id.map(str::to_string);
+            None
+        }
+    };
+    if let Some(id) = finished {
+        note_saved(app, &id);
+    }
 }
 
 /// 索引の作業用のスレッドを起こし、保存した設定に合わせて索引を作り始める（オフなら中身を消す）。
@@ -32,7 +119,11 @@ pub fn setup(app: &AppHandle, data_dir: &Path, settings: &Settings, folders: Vec
         indexer.set_folders(folders);
         indexer.disable();
     }
-    app.manage(CompanionState { indexer });
+    let companion = CompanionState { indexer, recording: Mutex::new(None) };
+    if let Some(state) = app.try_state::<AppState>() {
+        companion.sync_notes(&state.db(), settings);
+    }
+    app.manage(companion);
 }
 
 /// アプリを終えるときに呼ぶ。索引の作業用のスレッドを止めて、少しのあいだ終わるのを待つ
@@ -51,17 +142,21 @@ pub fn settings_changed(app: &AppHandle, before: Option<&Settings>, saved: &Sett
     let Some(companion) = app.try_state::<CompanionState>() else {
         return;
     };
-    if before.map(|b| b.companion) == Some(saved.companion) {
-        return;
+    let state = app.state::<AppState>();
+    let companion_changed = before.map(|b| b.companion) != Some(saved.companion);
+    if companion_changed {
+        if saved.companion {
+            let folders = state.db().load_search_folders().unwrap_or_default();
+            companion.indexer.enable(folders);
+        } else {
+            // 設定の画面は開いたままなので、消し始めたこと（「消している」）をすぐ知らせる。
+            // 消し終えた知らせが先に届いていても、画面は番号の小さい古い状態で上書きしない
+            let status = companion.indexer.disable();
+            let _ = app.emit(EVENT_SEARCH_INDEX_STATUS, &status);
+        }
     }
-    if saved.companion {
-        let folders = app.state::<AppState>().db().load_search_folders().unwrap_or_default();
-        companion.indexer.enable(folders);
-    } else {
-        // 設定の画面は開いたままなので、消し始めたこと（「消している」）をすぐ知らせる。
-        // 消し終えた知らせが先に届いていても、画面は番号の小さい古い状態で上書きしない
-        let status = companion.indexer.disable();
-        let _ = app.emit(EVENT_SEARCH_INDEX_STATUS, &status);
+    if companion_changed || before.map(notes_on) != Some(notes_on(saved)) {
+        companion.sync_notes(&state.db(), saved);
     }
 }
 
@@ -177,6 +272,10 @@ pub fn rebuild_search_index(
     state: State<'_, AppState>,
     companion: State<'_, CompanionState>,
 ) -> CmdResult<IndexStatus> {
-    let rebuilt = if state.db().load_settings()?.companion { companion.indexer.rebuild() } else { None };
-    rebuilt.ok_or_else(|| CommandError("会議の相棒がオフのときは、索引を作り直せません".into()))
+    let settings = state.db().load_settings()?;
+    let rebuilt = if settings.companion { companion.indexer.rebuild() } else { None };
+    let status = rebuilt.ok_or_else(|| CommandError("会議の相棒がオフのときは、索引を作り直せません".into()))?;
+    // 過去のノートも、両方がオンなら入れ直す
+    companion.sync_notes(&state.db(), &settings);
+    Ok(status)
 }

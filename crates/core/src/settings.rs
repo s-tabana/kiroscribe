@@ -40,6 +40,8 @@ pub struct Settings {
     pub companion: bool,
     /// 会議の相棒の判定と選択に使う Claude のモデル。
     pub companion_model: String,
+    /// 会議の相棒が、Kiroscribe の過去のノートからも探す。
+    pub companion_notes: bool,
 }
 
 impl Default for Settings {
@@ -56,6 +58,7 @@ impl Default for Settings {
             auto_update: false,
             companion: true,
             companion_model: DEFAULT_COMPANION_MODEL.to_string(),
+            companion_notes: true,
         }
     }
 }
@@ -220,6 +223,7 @@ mod tests {
         // 会議の相棒はオン、相棒のモデルは claude-haiku-5-5
         assert!(loaded.companion);
         assert_eq!(loaded.companion_model, DEFAULT_COMPANION_MODEL);
+        assert!(loaded.companion_notes, "過去のノートもオン");
     }
 
     // [SET-001][CMP-036][CMP-037]

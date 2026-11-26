@@ -36,12 +36,15 @@ pub fn get_note(state: State<'_, AppState>, id: String) -> CmdResult<Note> {
 }
 
 #[tauri::command]
-pub fn update_note(state: State<'_, AppState>, id: String, patch: NotePatch) -> CmdResult<Note> {
-    Ok(state.db().update_note(&id, &patch)?)
+pub fn update_note(app: AppHandle, state: State<'_, AppState>, id: String, patch: NotePatch) -> CmdResult<Note> {
+    let note = state.db().update_note(&id, &patch)?;
+    crate::companion::note_saved(&app, &id);
+    Ok(note)
 }
 
 #[tauri::command]
 pub async fn delete_note(
+    app: AppHandle,
     state: State<'_, AppState>,
     recorder: State<'_, RecorderState>,
     id: String,
@@ -51,7 +54,9 @@ pub async fn delete_note(
             "録音中のノートは削除できません。先に録音を停止してください".into(),
         ));
     }
-    Ok(state.db().delete_note(&id)?)
+    state.db().delete_note(&id)?;
+    crate::companion::note_deleted(&app, &id);
+    Ok(())
 }
 
 // ---- 設定 ----
