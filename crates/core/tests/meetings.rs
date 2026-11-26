@@ -45,6 +45,7 @@ fn every_listed_desktop_app_is_a_meeting_while_it_uses_the_mic() {
         ("91750D7E.Slack_8she8kybcnzg4", MeetingApp::SlackHuddle),
         ("91750d7e.slack_8she8kybcnzg4", MeetingApp::SlackHuddle),
         ("com.tinyspeck.slackdesktop_8yrtsj140pw4g", MeetingApp::SlackHuddle),
+        ("Com.TinySpeck.SlackDesktop_8yrtsj140pw4g", MeetingApp::SlackHuddle),
         (r"C:\Program Files\WindowsApps\com.tinyspeck.slackdesktop_4.41.105.0_x64__8yrtsj140pw4g\app\slack.exe", MeetingApp::SlackHuddle),
         (r"C:\Program Files\Slack\slack.exe", MeetingApp::SlackHuddle),
         (r"C:\Users\me\AppData\Roaming\Zoom\bin\Zoom.exe", MeetingApp::Zoom),
@@ -52,7 +53,12 @@ fn every_listed_desktop_app_is_a_meeting_while_it_uses_the_mic() {
         (r"C:\Program Files\WindowsApps\MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe\ms-teams.exe", MeetingApp::Teams),
         // 新しい Teams の通話を受け持つプロセス
         (r"C:\Program Files\WindowsApps\MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe\ms-teams_modulehost.exe", MeetingApp::Teams),
+        (r"C:\Program Files\WindowsApps\MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe\MS-Teams_ModuleHost.EXE", MeetingApp::Teams),
         (r"C:\Users\me\AppData\Local\Microsoft\Teams\current\Teams.exe", MeetingApp::Teams),
+        // 記録で実行ファイル名だけに縮めたもの
+        ("slack.exe", MeetingApp::SlackHuddle),
+        ("ms-teams.exe", MeetingApp::Teams),
+        ("ms-teams_modulehost.exe", MeetingApp::Teams),
         ("MSTeams_8wekyb3d8bbwe", MeetingApp::Teams),
         ("MicrosoftTeams_8wekyb3d8bbwe", MeetingApp::Teams),
         ("msteams_8wekyb3d8bbwe", MeetingApp::Teams),
@@ -80,6 +86,10 @@ fn every_listed_desktop_app_is_a_meeting_while_it_uses_the_mic() {
         "91750D7E.SlackTools_abcdefghijklm",
         "Contoso.Slack_abcdefghijklm",
         "com.tinyspeck.slackdesktopbeta",
+        "com.tinyspeck.slackdesktopbeta_8yrtsj140pw4g",
+        // 接頭辞だけで、続きのないもの
+        "91750D7E.Slack_",
+        "MSTeams_",
         "com.tinyspeck.other_8yrtsj140pw4g",
         r"C:\Tools\ms-teams_helper.exe",
         // 会議アプリと一緒に入る更新・起動のためのプロセスと、ほかのアプリも使う部品
@@ -88,6 +98,14 @@ fn every_listed_desktop_app_is_a_meeting_while_it_uses_the_mic() {
         r"C:\Program Files\WindowsApps\MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe\msteams_autostarter.exe",
         r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\131.0.2903.112\msedgewebview2.exe",
         r"C:\Program Files\Contoso\zcscpthost.exe",
+        // 記録ではフルパスを実行ファイル名だけに縮める。パッケージ名で始まる実行ファイル名・相対パスは、パッケージ名とみなさない
+        "msteams_autostarter.exe",
+        "MSTeams_autostarter.exe",
+        "ms-teamsupdate.exe",
+        "update.exe",
+        r"MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe\msteams_autostarter.exe",
+        "MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe/msteams_autostarter.exe",
+        r"91750D7E.Slack_8she8kybcnzg4\Update.exe",
     ] {
         assert_eq!(detect(&observation(vec![mic(id)], vec![]), None), None, "{id}");
     }

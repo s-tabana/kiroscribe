@@ -76,17 +76,29 @@ const PACKAGE_PREFIXES: &[(&str, MeetingApp)] = &[
     ("microsoftteams_", MeetingApp::Teams),
 ];
 
+/// パッケージ名（小文字）から会議アプリを判定する。パス（区切りを含むもの）と実行ファイル名（.exe で終わるもの）は、
+/// パッケージ名ではないので対象にしない（記録では、フルパスを実行ファイル名だけに縮めるため）。
+fn packaged_app(lower_id: &str) -> Option<MeetingApp> {
+    if lower_id.contains(['\\', '/']) || lower_id.ends_with(".exe") {
+        return None;
+    }
+    PACKAGE_PREFIXES.iter().find_map(|(prefix, app)| {
+        let rest = lower_id.strip_prefix(prefix)?;
+        (!rest.is_empty()).then_some(*app)
+    })
+}
+
 fn desktop_app(id: &str) -> Option<MeetingApp> {
     let lower = id.to_lowercase();
-    if let Some((_, app)) = PACKAGE_PREFIXES.iter().find(|(prefix, _)| lower.starts_with(prefix)) {
-        return Some(*app);
+    if let Some(app) = packaged_app(&lower) {
+        return Some(app);
     }
     match exe_name(&lower).as_str() {
         "slack.exe" => Some(MeetingApp::SlackHuddle),
         "zoom.exe" | "cpthost.exe" => Some(MeetingApp::Zoom),
         // ms-teams_modulehost.exe は、新しい Teams の通話を受け持つプロセス（Microsoft 365 メッセージセンター MC1189656）
         "ms-teams.exe" | "ms-teams_modulehost.exe" | "teams.exe" => Some(MeetingApp::Teams),
-        // Discord はボイスチャンネル・通話に入っている間だけマイクを使う（PTB・Canary 版も対象）
+        // Discord はボイスチャンネル・通話に入っている間だけマイクを使う（PTB・Canary・Development 版も対象）
         "discord.exe" | "discordptb.exe" | "discordcanary.exe" | "discorddevelopment.exe" => Some(MeetingApp::Discord),
         _ => None,
     }
