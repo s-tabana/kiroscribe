@@ -41,9 +41,17 @@ fn browser_in(app: MeetingApp, exe: &str) -> Option<Detection> {
 fn every_listed_desktop_app_is_a_meeting_while_it_uses_the_mic() {
     let cases = [
         (r"C:\Users\me\AppData\Local\slack\app-4.41.105\slack.exe", MeetingApp::SlackHuddle),
+        // Slack の Microsoft Store 版・MSIX 版は、パッケージ名で記録される
+        ("91750D7E.Slack_8she8kybcnzg4", MeetingApp::SlackHuddle),
+        ("91750d7e.slack_8she8kybcnzg4", MeetingApp::SlackHuddle),
+        ("com.tinyspeck.slackdesktop_8yrtsj140pw4g", MeetingApp::SlackHuddle),
+        (r"C:\Program Files\WindowsApps\com.tinyspeck.slackdesktop_4.41.105.0_x64__8yrtsj140pw4g\app\slack.exe", MeetingApp::SlackHuddle),
+        (r"C:\Program Files\Slack\slack.exe", MeetingApp::SlackHuddle),
         (r"C:\Users\me\AppData\Roaming\Zoom\bin\Zoom.exe", MeetingApp::Zoom),
         (r"C:\Users\me\AppData\Roaming\Zoom\bin\CptHost.exe", MeetingApp::Zoom),
         (r"C:\Program Files\WindowsApps\MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe\ms-teams.exe", MeetingApp::Teams),
+        // 新しい Teams の通話を受け持つプロセス
+        (r"C:\Program Files\WindowsApps\MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe\ms-teams_modulehost.exe", MeetingApp::Teams),
         (r"C:\Users\me\AppData\Local\Microsoft\Teams\current\Teams.exe", MeetingApp::Teams),
         ("MSTeams_8wekyb3d8bbwe", MeetingApp::Teams),
         ("MicrosoftTeams_8wekyb3d8bbwe", MeetingApp::Teams),
@@ -62,7 +70,18 @@ fn every_listed_desktop_app_is_a_meeting_while_it_uses_the_mic() {
         assert_eq!(detect(&observation(vec![idle], vec![]), None), None, "{id}");
     }
     // 名前が似ているだけのアプリは対象にしない
-    for id in [r"C:\Tools\zoomit.exe", r"C:\Tools\slack-helper.exe", "MSTeamsX", r"C:\Apps\Audacity\audacity.exe"] {
+    for id in [
+        r"C:\Tools\zoomit.exe",
+        r"C:\Tools\slack-helper.exe",
+        "MSTeamsX",
+        r"C:\Apps\Audacity\audacity.exe",
+        // Slack のパッケージ名に似ているだけのもの
+        "91750D7E.SlackTools_abcdefghijklm",
+        "Contoso.Slack_abcdefghijklm",
+        "com.tinyspeck.slackdesktopbeta",
+        "com.tinyspeck.other_8yrtsj140pw4g",
+        r"C:\Tools\ms-teams_helper.exe",
+    ] {
         assert_eq!(detect(&observation(vec![mic(id)], vec![]), None), None, "{id}");
     }
 }
@@ -80,6 +99,10 @@ fn browser_titles_that_count_as_meetings() {
         ("meet.google.com/abc-defg-hij", Some(MeetingApp::GoogleMeet)),
         ("Huddle with 田中 - Slack", Some(MeetingApp::SlackHuddle)),
         ("Slack | ハドルミーティング", Some(MeetingApp::SlackHuddle)),
+        // ハドルを別のウィンドウにしたときの題
+        ("Huddle: 田中 - Acme - Slack 🎤", Some(MeetingApp::SlackHuddle)),
+        ("Huddle: 田中 - Acme - Slack - Google Chrome", Some(MeetingApp::SlackHuddle)),
+        ("ハドル: #dev - Acme - Slack - Microsoft Edge", Some(MeetingApp::SlackHuddle)),
         ("Meeting with 田中 | Microsoft Teams", Some(MeetingApp::Teams)),
         ("会議 | Microsoft Teams", Some(MeetingApp::Teams)),
         ("Call with 田中 | Microsoft Teams", Some(MeetingApp::Teams)),
@@ -105,6 +128,11 @@ fn browser_titles_that_count_as_meetings() {
         ("Discord の使い方 | 技術ブログ", None),
         ("(メモ) Discord | の設定", None),
         ("Slack | general | 開発チーム", None),
+        // ハドルを示す語のない Slack の画面（ハドル中のメインのタブも、ただのチャットも同じ題になる）
+        ("田中 - Acme - Slack", None),
+        ("田中 - Acme - Slack - Google Chrome", None),
+        // Slack 以外の「Huddle」
+        ("Huddle - ファイル共有", None),
         ("チャット | Microsoft Teams", None),
         ("Zoom - 料金プラン", None),
         ("Meetup - 東京の勉強会", None),

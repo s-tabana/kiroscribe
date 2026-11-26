@@ -66,16 +66,26 @@ pub fn exe_name(id: &str) -> String {
     id.rsplit(['\\', '/']).next().unwrap_or(id).to_lowercase()
 }
 
+/// パッケージ名（小文字）の先頭と、その会議アプリ。ストアアプリ・MSIX のアプリは、パッケージ名で記録される。
+const PACKAGE_PREFIXES: &[(&str, MeetingApp)] = &[
+    // Microsoft Store 版の Slack（https://slack.com/help/articles/360048367814 ）
+    ("91750d7e.slack_", MeetingApp::SlackHuddle),
+    // MSIX 版の Slack（https://slack.com/help/articles/212475728 ）
+    ("com.tinyspeck.slackdesktop_", MeetingApp::SlackHuddle),
+    ("msteams_", MeetingApp::Teams),
+    ("microsoftteams_", MeetingApp::Teams),
+];
+
 fn desktop_app(id: &str) -> Option<MeetingApp> {
     let lower = id.to_lowercase();
-    // ストアアプリ（新しい Teams など）はパッケージ名で記録される
-    if lower.starts_with("msteams_") || lower.starts_with("microsoftteams_") {
-        return Some(MeetingApp::Teams);
+    if let Some((_, app)) = PACKAGE_PREFIXES.iter().find(|(prefix, _)| lower.starts_with(prefix)) {
+        return Some(*app);
     }
     match exe_name(&lower).as_str() {
         "slack.exe" => Some(MeetingApp::SlackHuddle),
         "zoom.exe" | "cpthost.exe" => Some(MeetingApp::Zoom),
-        "ms-teams.exe" | "teams.exe" => Some(MeetingApp::Teams),
+        // ms-teams_modulehost.exe は、新しい Teams の通話を受け持つプロセス（Microsoft 365 メッセージセンター MC1189656）
+        "ms-teams.exe" | "ms-teams_modulehost.exe" | "teams.exe" => Some(MeetingApp::Teams),
         // Discord はボイスチャンネル・通話に入っている間だけマイクを使う（PTB・Canary 版も対象）
         "discord.exe" | "discordptb.exe" | "discordcanary.exe" => Some(MeetingApp::Discord),
         _ => None,
