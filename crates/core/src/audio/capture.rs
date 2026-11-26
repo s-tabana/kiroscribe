@@ -29,7 +29,7 @@ fn audio_error(context: &str, err: impl std::fmt::Display) -> CoreError {
 }
 
 /// Windows のプライバシー設定で、マイクを使うことが許可されていないときの知らせ。
-pub const MSG_MIC_ACCESS_DENIED: &str = "マイクを使う許可がありません。Windows の「設定」→「プライバシーとセキュリティ」→「マイク」で、\
+pub const MSG_MIC_ACCESS_DENIED: &str = "マイクを使う許可がありません。Windows の「設定」→「プライバシーとセキュリティ」（Windows 10 では「プライバシー」）→「マイク」で、\
 「マイクへのアクセス」と「デスクトップ アプリがマイクにアクセスできるようにする」をオンにしてください";
 
 /// 音声デバイスのエラーが「アクセスが拒否された」（E_ACCESSDENIED。プライバシー設定でマイクが許可されていない）か。
@@ -274,6 +274,8 @@ mod tests {
         let english = "Failed to initialize audio client: Access is denied. (os error -2147024891)";
         let japanese = "オーディオ クライアントを初期化できません: アクセスが拒否されました。 (os error -2147024891)";
         let hex = "IAudioClient::Initialize failed: 0x80070005";
+        // Windows 11 と Windows 10 のどちらの設定の名前でも、直す場所が分かる
+        assert!(MSG_MIC_ACCESS_DENIED.contains("「プライバシーとセキュリティ」（Windows 10 では「プライバシー」）→「マイク」"));
         for err in [english, japanese, hex] {
             assert!(is_access_denied(err), "{err}");
             match device_error(Speaker::Me, "自分の音声を開けません", err) {

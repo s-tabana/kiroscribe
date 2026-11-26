@@ -32,14 +32,18 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             background::show_main(app);
         }))
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec![AUTOSTART_ARG]),
-        ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         // 更新の確認とインストールは Rust 側（update.rs）から呼ぶ。画面には権限を渡さない
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build());
+    // 起動時に起動する登録は、Windows では自前で行う（background.rs の set_launch_at_login）。
+    // 自動起動のライブラリは、ほかの OS でだけ使う
+    #[cfg(not(windows))]
+    let builder = builder.plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        Some(vec![AUTOSTART_ARG]),
+    ));
+    let builder = builder
         .setup(|app| {
             // ウィンドウを閉じる操作の扱い（下の on_window_event）が使うので、最初に用意する
             app.manage(BackgroundState::default());

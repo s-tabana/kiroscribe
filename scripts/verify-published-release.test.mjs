@@ -164,6 +164,34 @@ test("[REL-012] 公開した SHA256SUMS.txt や .sig がビルドのときと違
   await assert.rejects(verify(), /\.sig と、latest\.json の signature が違います/);
 });
 
+test("[REL-012] 公開したファイルどうしが一時的に食い違っても（配信のキャッシュに新旧が混ざる）、確かめ直し、そろえば通す", async () => {
+  // .sig だけが古い
+  const { signature } = publish();
+  let sigCalls = 0;
+  routes.pages.set(`/${REPO}/releases/download/v${VERSION}/${NAME}.sig`, () => (++sigCalls <= 1 ? "古い署名" : signature));
+  await verify({ timeoutMs: 60_000 });
+  assert.equal(sigCalls, 2);
+
+  // latest.json と .sig が、同じタグで実行し直す前のもの（別の鍵の署名）のまま
+  const { own, signature: newSignature } = publish();
+  const oldSignature = signForTest(otherKey, INSTALLER, { file: NAME, version: VERSION });
+  const old = latestJson(VERSION, oldSignature);
+  const download = `/${REPO}/releases/download/v${VERSION}`;
+  let ownCalls = 0;
+  const current = () => ownCalls <= 1;
+  routes.pages.set(`${download}/latest.json`, () => (++ownCalls <= 1 ? old : own));
+  routes.pages.set(`${download}/${NAME}.sig`, () => (current() ? oldSignature : newSignature));
+  routes.pages.set(`/${REPO}/releases/latest/download/latest.json`, () => (current() ? old : own));
+  const report = await verify({ timeoutMs: 60_000 });
+  assert.equal(ownCalls, 2);
+  assert.equal(report.filter((line) => line.startsWith("署名を")).length, 2);
+});
+
+test("[REL-012] 公開したファイルどうしの食い違いが時間内に解けなければ、理由を書いて失敗にする", async () => {
+  publish({ signedBy: otherKey });
+  await assert.rejects(verify(), /確かめられませんでした.*アプリに埋め込む公開鍵で検証できません/);
+});
+
 test("[REL-012] 手元の SHA256SUMS.txt がビルドしたインストーラと合わなければ、配布を見る前に止める", async () => {
   publish();
   const sums = join(dir, "wrong-sums.txt");

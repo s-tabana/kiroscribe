@@ -51,7 +51,8 @@ pub struct Observation {
     pub windows: Vec<WindowInfo>,
 }
 
-const BROWSERS: &[&str] = &[
+/// マイクを使っていると、見えているウィンドウの題から会議を探すブラウザ（実行ファイル名、小文字）
+pub(crate) const BROWSERS: &[&str] = &[
     "chrome.exe",
     "msedge.exe",
     "firefox.exe",
