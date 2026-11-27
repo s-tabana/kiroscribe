@@ -3,7 +3,7 @@
 use chrono::{Local, TimeZone};
 
 use crate::error::{CoreError, Result};
-use crate::transcript::{Segment, Speaker};
+use crate::transcript::{round_label, split_rounds, Round, Segment, Speaker, TranscriptBreak};
 
 /// プロンプトに渡す会議の情報。
 pub struct MeetingContext<'a> {
@@ -12,6 +12,8 @@ pub struct MeetingContext<'a> {
     pub user_notes: &'a str,
     pub enhanced_notes: Option<&'a str>,
     pub segments: &'a [Segment],
+    /// 文字起こしの区切り（同じノートで録音を再開した位置）。なければ空
+    pub breaks: &'a [TranscriptBreak],
     /// 議事録での自分の呼び名（空なら「自分」）
     pub my_name: &'a str,
 }
@@ -47,13 +49,34 @@ impl MeetingContext<'_> {
         }
     }
 
-    /// `[15:04] 相手: 〜` の形の文字起こし。
-    pub fn transcript_text(&self) -> String {
-        self.segments
+    /// 発話のある回（区切りで分けたもの）。区切りがなければ 1 回分。
+    fn rounds(&self) -> Vec<Round<'_>> {
+        split_rounds(self.segments, self.breaks)
+            .into_iter()
+            .filter(|round| !round.segments.is_empty())
+            .collect()
+    }
+
+    fn lines(&self, segments: &[Segment]) -> Vec<String> {
+        segments
             .iter()
             .map(|s| format!("[{}] {}: {}", local_time(s.started_at), self.speaker_name(s.speaker), s.text))
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect()
+    }
+
+    /// `[15:04] 相手: 〜` の形の文字起こし。発話のある回が 2 つ以上あれば、各回の前に
+    /// `--- 2回目の録音（14:30〜） ---` の行を入れる。
+    pub fn transcript_text(&self) -> String {
+        let rounds = self.rounds();
+        if rounds.len() < 2 {
+            return self.lines(self.segments).join("\n");
+        }
+        let mut out = Vec::new();
+        for round in rounds {
+            out.push(format!("--- {} ---", round_label(round.number, &local_time(round.started_at))));
+            out.extend(self.lines(round.segments));
+        }
+        out.join("\n")
     }
 
     fn meeting_block(&self, include_enhanced: bool) -> String {
@@ -113,10 +136,23 @@ pub fn enhance_user_message(ctx: &MeetingContext<'_>) -> Result<String> {
             "メモも文字起こしもないため、議事録を作れません。メモを書くか録音してから試してください".into(),
         ));
     }
-    Ok(format!(
-        "{}\n\n上の会議の議事録を作成してください。",
-        ctx.meeting_block(false)
-    ))
+    let mut message = format!("{}\n\n上の会議の議事録を作成してください。", ctx.meeting_block(false));
+    let rounds = ctx.rounds();
+    if rounds.len() >= 2 {
+        let headings = rounds
+            .iter()
+            .map(|round| format!("## {}", round_label(round.number, &local_time(round.started_at))))
+            .collect::<Vec<_>>()
+            .join("\n");
+        message.push_str(&format!(
+            "\n\nこのノートは、{count} 回に分けて録音しています（文字起こしの「--- 〜回目の録音 ---」の行が、回の区切りです）。\
+回ごとに別の会議のこともあるので、内容を混ぜないでください。\
+1 行目のタイトルのあと、次の見出しで回ごとの節に分け、それぞれの回の内容は、その節の中に「### 」の見出しと箇条書きでまとめてください。\
+自分のメモは、内容から当てはまる回の節に入れてください。\n\n{headings}",
+            count = rounds.len()
+        ));
+    }
+    Ok(message)
 }
 
 /// AI チャットのシステムプロンプト（会議の情報を含む）。会話中は変わらないのでキャッシュが効く。
@@ -178,6 +214,7 @@ mod tests {
             user_notes: "- リリース日\n",
             enhanced_notes: None,
             segments: &segments,
+            breaks: &[],
             my_name: "田花",
         };
         let msg = enhance_user_message(&ctx).unwrap();
@@ -197,6 +234,7 @@ mod tests {
             user_notes: "  ",
             enhanced_notes: None,
             segments: &[],
+            breaks: &[],
             my_name: "",
         };
         assert!(enhance_user_message(&ctx).is_err());
@@ -212,12 +250,81 @@ mod tests {
             user_notes: "",
             enhanced_notes: Some("## 決定事項\n- 来週見積もり"),
             segments: &segments,
+            breaks: &[],
             my_name: "",
         };
         let prompt = chat_system_prompt(&ctx);
         assert!(prompt.contains("<minutes>\n## 決定事項\n- 来週見積もり\n</minutes>"));
         assert!(prompt.contains("] 自分: 見積もりは来週出します"));
         assert!(prompt.contains("<my_notes>\n（なし）\n</my_notes>"));
+    }
+
+    fn break_at(round: i64, started_at: i64) -> TranscriptBreak {
+        TranscriptBreak {
+            id: round,
+            note_id: "n".into(),
+            round,
+            started_at,
+        }
+    }
+
+    // [MIN-021][MIN-013]
+    #[test]
+    fn enhance_message_splits_rounds_when_the_note_has_breaks() {
+        let segments = [
+            segment(1, Speaker::Them, "予算の話です"),
+            segment(2, Speaker::Me, "承知しました"),
+            segment(10, Speaker::Them, "別件の採用の話です"),
+        ];
+        // 2 回目の録音は、3 件目の発話の 1 分前に始めた
+        let breaks = [break_at(2, segments[2].started_at - 60_000)];
+        let ctx = MeetingContext {
+            title: "",
+            created_at: 1_700_000_000_000,
+            user_notes: "",
+            enhanced_notes: None,
+            segments: &segments,
+            breaks: &breaks,
+            my_name: "",
+        };
+        let first = round_label(1, &local_time(segments[0].started_at));
+        let second = round_label(2, &local_time(breaks[0].started_at));
+        let transcript = ctx.transcript_text();
+        let lines: Vec<&str> = transcript.lines().collect();
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0], format!("--- {first} ---"));
+        assert!(lines[1].ends_with("相手: 予算の話です"));
+        assert_eq!(lines[3], format!("--- {second} ---"));
+        assert!(lines[4].ends_with("相手: 別件の採用の話です"));
+
+        let msg = enhance_user_message(&ctx).unwrap();
+        assert!(msg.contains("2 回に分けて録音しています"));
+        assert!(msg.contains("内容を混ぜないでください"));
+        assert!(msg.contains(&format!("## {first}\n## {second}")));
+
+        // 区切りのないノートは、今までどおり（回の見出しも、節の指示もない）
+        let plain = MeetingContext { breaks: &[], ..ctx };
+        assert!(!plain.transcript_text().contains("---"));
+        assert!(!enhance_user_message(&plain).unwrap().contains("回に分けて録音"));
+    }
+
+    // [MIN-021]
+    #[test]
+    fn a_break_without_utterances_does_not_split_the_minutes() {
+        let segments = [segment(1, Speaker::Me, "一回目だけ")];
+        // 再開したが、まだ何も話していない
+        let breaks = [break_at(2, segments[0].started_at + 600_000)];
+        let ctx = MeetingContext {
+            title: "",
+            created_at: 0,
+            user_notes: "",
+            enhanced_notes: None,
+            segments: &segments,
+            breaks: &breaks,
+            my_name: "",
+        };
+        assert!(!ctx.transcript_text().contains("---"));
+        assert!(!enhance_user_message(&ctx).unwrap().contains("回に分けて録音"));
     }
 
     // [MIN-006]

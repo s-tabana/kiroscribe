@@ -23,7 +23,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const timer = `${sel.recordingBar} [role="timer"]`;
 const transcriptList = ".transcript-list";
 
-test("[REC-001][REC-009][REC-015][TRN-016][NOTE-019][SEC-011] 録音を開始すると文字起こしが「自分」「相手」で表示され、停止・再開でき、再起動後も残る。録音中のノートは削除できない", async (ctx) => {
+test("[REC-001][REC-009][REC-015][TRN-016][TRN-024][NOTE-019][SEC-011] 録音を開始すると文字起こしが「自分」「相手」で表示され、停止・再開でき、再起動後も残る。録音中のノートは削除できない", async (ctx) => {
   let session = await ctx.launch();
   await createNote(session, { title: "録音のテスト" });
 
@@ -130,6 +130,9 @@ test("[REC-001][REC-009][REC-015][TRN-016][NOTE-019][SEC-011] 録音を開始す
     message: "新しい発話が加わる",
   });
   assert.equal((await utterances(session))[0].text.split("\n")[0], firstText, "前の録音の発話が、先頭に残っている");
+  // 議事録のないノートでは聞かずに続きとして録音し、再開した位置に区切りの見出しが入る
+  assert.equal(await session.exists('div[role="dialog"]'), false, "議事録のないノートで、続きかを聞いている");
+  assert.match(await session.text(".transcript-list .transcript-break"), /^2回目の録音（\d{1,2}:\d{2}〜）$/);
   assert.deepEqual(await noteTitles(session), ["別のノート", "録音のテスト"], "録音を再開しても、ノートは増えない");
   await pressBarButton(session, "停止");
   await session.$(barButton("録音を再開"), { timeout: 30_000 });
@@ -267,4 +270,68 @@ test("[TRN-013] 文字起こしの API の一時的なエラー（429・500）�
   await pressBarButton(session, "停止");
   await session.$(barButton("録音を再開"), { timeout: 30_000 });
   assert.equal(await session.exists(sel.toast), false, "再試行で直ったエラーは知らせない");
+});
+
+test("[REC-027][TRN-024][MIN-021] 議事録のあるノートで録音を再開すると、同じ会議の続きか新しいノートかを聞き、続きなら区切りを付けて録音する", async (ctx) => {
+  ctx.server.anthropic.reply = () => ({ chunks: ["# 再開のテスト\n\n", "## 決定事項\n", "- 一回目の内容\n"] });
+  const session = await ctx.launch();
+  await createNote(session, { title: "再開のテスト" });
+  const dialog = 'div[role="dialog"][aria-labelledby="resume-title"]';
+  const dialogButton = (text) => `xpath://div[@role="dialog"][@aria-labelledby="resume-title"]//button[normalize-space(.)="${text}"]`;
+  const recordOnce = async (button) => {
+    const before = await utteranceCount(session);
+    await session.waitForText(timer, "録音中");
+    await session.waitUntil(async () => (await utteranceCount(session)) > before, { timeout: 30_000, message: "発話が加わる" });
+    await pressBarButton(session, "停止");
+    await session.$(barButton(button), { timeout: 30_000 });
+  };
+
+  // 1 回目を録音して、議事録を作る
+  await pressBarButton(session, "録音を開始");
+  await recordOnce("録音を再開");
+  await pressBarButton(session, "議事録を作成");
+  await session.waitForText(`${sel.minutes}[aria-busy="false"]`, "一回目の内容");
+  const firstCount = await utteranceCount(session);
+
+  // 取り消すと、録音を始めない
+  await pressBarButton(session, "録音を再開");
+  await session.waitForText(dialog, "このノートには議事録があります。同じ会議の続きとして録音しますか？");
+  await session.click(dialogButton("取り消す"));
+  await session.waitUntil(async () => !(await session.exists(dialog)), { message: "確認が閉じる" });
+  await sleep(500);
+  assert.equal(await session.exists(timer), false, "取り消したのに録音が始まった");
+
+  // 新しいノートで録音: 新しいノートを作って開き、そこで録音する。元のノートには何も足さない
+  await pressBarButton(session, "録音を再開");
+  await session.click(dialogButton("新しいノートで録音"));
+  await session.waitUntil(async () => (await noteTitles(session)).length === 2, { message: "新しいノートができる" });
+  assert.equal(await (await session.$(sel.title)).value(), "", "新しいノートが開いている");
+  await recordOnce("録音を再開");
+  await openNote(session, "再開のテスト");
+  await openTranscript(session);
+  await session.waitUntil(async () => (await utteranceCount(session)) === firstCount, { message: "元のノートの文字起こし" });
+  assert.equal(await session.exists(".transcript-list .transcript-break"), false, "元のノートに区切りが入った");
+
+  // 続きとして録音: 同じノートで、区切りの後に発話が加わる
+  await pressBarButton(session, "録音を再開");
+  await session.click(dialogButton("続きとして録音"));
+  const heading = await session.waitForText(".transcript-list .transcript-break", "2回目の録音（");
+  assert.match(heading, /^2回目の録音（\d{1,2}:\d{2}〜）$/);
+  await recordOnce("録音を再開");
+  const order = await session.execute(`
+    return Array.from(document.querySelectorAll(".transcript-list .utterance-bubble p, .transcript-list .transcript-break"))
+      .map((e) => (e.classList.contains("transcript-break") ? "区切り" : "発話"));
+  `);
+  assert.equal(order.indexOf("区切り"), firstCount, `区切りの位置: ${order.join(",")}`);
+  assert.ok(order.length > firstCount + 1, "区切りの後に発話がない");
+  assert.deepEqual(await noteTitles(session), ["無題のノート", "再開のテスト"]);
+
+  // 作り直すと、回ごとの節に分けるよう AI に頼む
+  ctx.work.answerDialogs({ confirm: true });
+  const sent = ctx.server.messages.length;
+  await session.click(`xpath://section[@aria-label="議事録"]//button[normalize-space(.)="作り直す"]`);
+  await session.waitUntil(() => ctx.server.messages.length > sent, { message: "作り直しの依頼" });
+  const content = ctx.server.messages.at(-1).json.messages[0].content;
+  assert.ok(content.includes("2 回に分けて録音しています"), content);
+  assert.match(content, /--- 2回目の録音（\d{2}:\d{2}〜） ---/);
 });

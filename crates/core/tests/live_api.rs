@@ -281,6 +281,7 @@ async fn every_selectable_claude_model_answers_a_chat_question() {
         user_notes: "",
         enhanced_notes: None,
         segments: &segments,
+        breaks: &[],
         my_name: "",
     };
     for model in models("CLAUDE_MODELS") {
@@ -318,6 +319,7 @@ async fn the_default_model_writes_minutes_from_the_app_prompt() {
         user_notes: "リリース日を決める",
         enhanced_notes: None,
         segments: &segments,
+        breaks: &[],
         my_name: "",
     };
     let request = MessageRequest {

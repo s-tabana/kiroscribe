@@ -237,6 +237,19 @@ fn ipc_contract_matches_the_frontend() {
         assert!(states.contains(&json!(state)), "recording-status に {state} がありません: {states:?}");
     }
 
+    // ---- 同じノートで録音を再開すると、区切りが付く ----
+    assert_eq!(s.ok("list_transcript_breaks", json!({ "noteId": id })), json!([]));
+    let known = segments.as_array().unwrap().len();
+    assert_eq!(s.ok("start_recording", json!({ "noteId": id }))["state"], "recording");
+    let added = wait_until("区切りの知らせ", || events_named(&events, "transcript-break").into_iter().next());
+    assert_eq!(added["round"], 2);
+    wait_until("再開後の発話", || {
+        let segments = s.peek("list_segments", json!({ "noteId": id }));
+        (segments.as_array().unwrap().len() > known).then_some(())
+    });
+    assert_eq!(s.ok("stop_recording", json!({}))["state"], "idle");
+    assert_eq!(s.ok("list_transcript_breaks", json!({ "noteId": id })), json!([added]));
+
     // ---- 議事録・チャット ----
     assert_eq!(s.ok("cancel_ai", json!({ "noteId": id, "kind": "enhance" })), Value::Null);
     let enhanced = s.ok("enhance_note", json!({ "noteId": id }));

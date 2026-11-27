@@ -11,7 +11,7 @@ use kiroscribe_core::secrets::{require_api_key, Provider};
 use kiroscribe_core::session::{RecordingSession, SessionOptions};
 use kiroscribe_core::time::now_ms;
 use kiroscribe_core::transcribe::{BoxFuture, OpenAiTranscriber, Transcribe};
-use kiroscribe_core::transcript::{Segment, Speaker};
+use kiroscribe_core::transcript::{Segment, Speaker, TranscriptBreak};
 use serde::Serialize;
 use serde_json::json;
 use tauri::{Emitter, Manager, State};
@@ -25,6 +25,7 @@ pub const EVENT_STATUS: &str = "recording-status";
 pub const EVENT_SEGMENT: &str = "transcript-segment";
 pub const EVENT_LEVEL: &str = "audio-level";
 pub const EVENT_ERROR: &str = "recording-error";
+pub const EVENT_BREAK: &str = "transcript-break";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -87,6 +88,8 @@ struct ActiveRecording {
     check: RecordingCheck,
     /// 文字起こしの回数と時間（デバッグ用のログに書く）
     stats: Arc<TranscriptionStats>,
+    /// 文字起こしのあるノートで始めた録音なら、そのときに足した区切りの ID
+    resumed_break: Option<i64>,
 }
 
 impl ActiveRecording {
@@ -396,6 +399,11 @@ pub fn list_segments(state: State<'_, AppState>, note_id: String) -> CmdResult<V
 }
 
 #[tauri::command]
+pub fn list_transcript_breaks(state: State<'_, AppState>, note_id: String) -> CmdResult<Vec<TranscriptBreak>> {
+    Ok(state.db().list_breaks(&note_id)?)
+}
+
+#[tauri::command]
 pub async fn get_recording_status(recorder: State<'_, RecorderState>) -> CmdResult<RecordingStatus> {
     Ok(recorder.status().await)
 }
@@ -456,7 +464,9 @@ async fn start_inner(app: &AppHandle, note_id: String, auto: Option<MeetingApp>)
         note_id: note_id.clone(),
         last_speech: last_speech.clone(),
     });
-    let session = RecordingSession::start(
+    // 文字起こしのあるノートで始めるときは、始める位置に区切りを付ける（新しい発話は、この時刻より後に始まる）
+    let resumed_break = state.db().add_break_if_resumed(&note_id, now_ms())?;
+    let session = match RecordingSession::start(
         SessionOptions {
             mic_device_id: settings.input_device_id.clone(),
             capture_system_audio: settings.capture_system_audio,
@@ -464,7 +474,19 @@ async fn start_inner(app: &AppHandle, note_id: String, auto: Option<MeetingApp>)
         transcriber,
         sink,
         &tokio::runtime::Handle::current(),
-    )?;
+    ) {
+        Ok(session) => session,
+        Err(err) => {
+            // 録音を始められなかったときは、区切りを残さない
+            if let Some(added) = &resumed_break {
+                let _ = state.db().remove_break_if_empty(added.id);
+            }
+            return Err(err.into());
+        }
+    };
+    if let Some(added) = &resumed_break {
+        let _ = app.emit(EVENT_BREAK, added);
+    }
 
     crate::debug::info(
         app,
@@ -488,6 +510,7 @@ async fn start_inner(app: &AppHandle, note_id: String, auto: Option<MeetingApp>)
         last_speech,
         check: RecordingCheck::default(),
         stats,
+        resumed_break: resumed_break.map(|added| added.id),
     };
     let status = recording.status();
     *active = Some(recording);
@@ -600,6 +623,12 @@ pub(crate) async fn finish_stop(app: &AppHandle, taken: TakenRecording) -> Stopp
             "transcriptionMaxMs": stats.max_ms.load(Ordering::SeqCst),
         }),
     );
+    // 何も話さないまま止めた回の区切りは残さない
+    if let Some(break_id) = recording.resumed_break {
+        if let Err(err) = app.state::<AppState>().db().remove_break_if_empty(break_id) {
+            eprintln!("空の区切りを消せませんでした: {err}");
+        }
+    }
 
     *recorder.finishing.lock().unwrap() = None;
     emit_status(app, &recorder.status().await);

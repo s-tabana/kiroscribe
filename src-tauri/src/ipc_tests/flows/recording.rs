@@ -279,3 +279,40 @@ fn a_rejected_api_key_stops_the_recording_with_a_single_notice() {
         assert_eq!(h.events("recording-error").len(), 1);
     }
 }
+
+/// 文字起こしのあるノートで録音を始めると、始めた位置に区切りを付ける。何も話さずに止めた回の区切りは残さない。
+// [TRN-023][REC-015]
+#[test]
+fn resuming_a_note_adds_a_break_and_drops_it_when_nothing_was_said() {
+    let h = Harness::new();
+    let note = h.note("定例", "");
+    let breaks = |h: &Harness| h.ok("list_transcript_breaks", json!({ "noteId": note }));
+
+    // 1 回目（文字起こしのないノート）には、区切りを付けない
+    h.record_until_transcribed(&note);
+    assert_eq!(h.ok("stop_recording", json!({}))["state"], "idle");
+    assert_eq!(breaks(&h), json!([]));
+    assert!(h.events("transcript-break").is_empty());
+
+    // 2 回目: 始めた時刻に「2 回目」の区切りが付き、新しい発話はその後に入る
+    let known = h.segments(&note).len();
+    let before = now_ms();
+    h.ok("start_recording", json!({ "noteId": note }));
+    let added = h.events("transcript-break").pop().expect("区切りを画面に知らせる");
+    assert_eq!(added["noteId"], note.as_str());
+    assert_eq!(added["round"], 2);
+    let started_at = added["startedAt"].as_i64().unwrap();
+    assert!(started_at >= before && started_at <= now_ms());
+    let fresh = wait_until("再開後の発話", || h.segments(&note).into_iter().nth(known));
+    assert!(fresh["startedAt"].as_i64().unwrap() >= started_at, "{fresh}");
+    assert_eq!(h.ok("stop_recording", json!({}))["state"], "idle");
+    assert_eq!(breaks(&h), json!([added]));
+
+    // 3 回目: 何も話さないまま止めたら、区切りは消える
+    h.ok("start_recording", json!({ "noteId": note }));
+    h.ok("pause_recording", json!({}));
+    assert_eq!(h.events("transcript-break").last().unwrap()["round"], 3);
+    assert_eq!(breaks(&h).as_array().unwrap().len(), 2, "録音中は区切りがある");
+    assert_eq!(h.ok("stop_recording", json!({}))["state"], "idle");
+    assert_eq!(breaks(&h), json!([added]));
+}

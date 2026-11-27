@@ -47,6 +47,16 @@ const MIGRATIONS: &[&str] = &[
         value  TEXT NOT NULL
     );
     "#,
+    // v2: 文字起こしの区切り（同じノートで録音を再開した位置）。区切りのないノートは 1 回分の録音として扱う
+    r#"
+    CREATE TABLE transcript_breaks (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        note_id     TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+        round       INTEGER NOT NULL,
+        started_at  INTEGER NOT NULL
+    );
+    CREATE INDEX idx_breaks_note ON transcript_breaks(note_id, started_at);
+    "#,
 ];
 
 /// アプリのデータベース。`rusqlite::Connection` は `Sync` ではないため、呼び出し側で `Mutex` に包む。
@@ -118,6 +128,36 @@ mod tests {
         // 2 回目に開いても再適用されずに成功する
         let db = Database::open(&path).unwrap();
         assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+    }
+
+    // [DAT-010][DAT-002]
+    #[test]
+    fn notes_from_before_breaks_open_as_a_single_round() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kiroscribe.db");
+        {
+            // 区切りの表がない版（v1）のデータベース
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute_batch(
+                "INSERT INTO notes (id, title, user_notes, enhanced_notes, created_at, updated_at)
+                     VALUES ('old', '定例', '- メモ', '## 決定事項', 1, 2);
+                 INSERT INTO transcript_segments (note_id, speaker, started_at, ended_at, text)
+                     VALUES ('old', 'me', 100, 200, '以前の発話');",
+            )
+            .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        let note = db.get_note("old").unwrap();
+        assert_eq!(note.enhanced_notes.as_deref(), Some("## 決定事項"));
+        let segments = db.list_segments("old").unwrap();
+        assert!(db.list_breaks("old").unwrap().is_empty());
+        let rounds = crate::transcript::split_rounds(&segments, &[]);
+        assert_eq!(rounds.len(), 1, "区切りのない古いノートは 1 回分の録音");
+        // 古いノートで録音を再開すると、2 回目の区切りが付く
+        assert_eq!(db.add_break_if_resumed("old", 1_000).unwrap().unwrap().round, 2);
     }
 
     // [DAT-003]
