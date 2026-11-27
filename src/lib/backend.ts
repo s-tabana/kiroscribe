@@ -98,6 +98,11 @@ export interface Backend {
   openNoteFromPopup(noteId: string, enhance: boolean): Promise<void>;
   openSettingsFromPopup(): Promise<void>;
   /**
+   * 会議が終わったかの確認に答える。keep なら録音を続け、そうでなければ止めて保存する。
+   * deadline は、答える確認の止める時刻（どの確認への答えかを表す。もう出していない確認への答えは、録音に触れない）
+   */
+  answerRecordingCheck(noteId: string, deadline: number, keep: boolean): Promise<void>;
+  /**
    * 保存ダイアログを出して、会議の検出の記録（JSON）を保存する。
    * 保存したパスと記録の件数、取り消したら null
    */
@@ -199,6 +204,7 @@ export function createTauriBackend(): Backend {
     closePopup: () => invoke("close_popup"),
     openNoteFromPopup: (noteId, enhance) => invoke("open_note_from_popup", { noteId, enhance }),
     openSettingsFromPopup: () => invoke("open_settings_from_popup"),
+    answerRecordingCheck: (noteId, deadline, keep) => invoke("answer_recording_check", { noteId, deadline, keep }),
     async saveMeetingRecord(fileName) {
       // 本体（save_meeting_record）が受け付ける拡張子は .json だけ
       const path = await save({ defaultPath: fileName, filters: [{ name: "JSON", extensions: ["json"] }] });

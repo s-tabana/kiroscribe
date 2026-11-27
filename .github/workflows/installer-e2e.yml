@@ -19,11 +19,14 @@ on:
   workflow_dispatch:
   workflow_call:
 
-# ビルドに時間がかかるため、実行中のものは止めずに順番待ちにする。
-# リリースから呼ばれたときは、呼んだワークフローの名前（release）で分け、push での実行と待ち合わせない
+# プルリクエストでは、新しいコミットが来たら古いコミットの実行を止める（グループはプルリクエストごと）。
+# main・next への push・手動・リリースからの実行は、実行中のものは止めずに順番待ちにする。
+# リリースから呼ばれたときは、呼んだワークフローの名前（release）で分け、push での実行と待ち合わせない。
+# 呼ばれたときの github.event_name と github.workflow は呼んだ側の値なので、
+# 止めるのは、このワークフロー自身がプルリクエストで動いたときだけにする
 concurrency:
   group: installer-e2e-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.workflow == 'installer-e2e' }}
 
 # このワークフローに渡すトークンは、リポジトリの読み取りだけ
 permissions:

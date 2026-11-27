@@ -29,6 +29,7 @@ tauri-plugin-single-instance = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tauri-plugin-updater = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-notification = "2"
 
 # 起動時に起動する登録は、Windows では自前で行う（background.rs）。ほかの OS でだけ、このライブラリを使う
 [target.'cfg(not(windows))'.dependencies]
