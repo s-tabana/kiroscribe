@@ -17,6 +17,7 @@ pub mod legacy;
 pub mod log_submit;
 pub mod meeting_record;
 pub mod meetings;
+pub mod mic_sessions;
 pub mod mic_store;
 pub mod notes;
 pub mod prompts;
