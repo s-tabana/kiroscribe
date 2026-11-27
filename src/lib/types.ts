@@ -77,6 +77,16 @@ export interface Segment {
   text: string;
 }
 
+/** 文字起こしの区切り。文字起こしのあるノートで録音を始め直した位置 */
+export interface TranscriptBreak {
+  id: number;
+  noteId: string;
+  /** 何回目の録音か（最初の区切りが 2） */
+  round: number;
+  /** 録音を始めた時刻。これ以降に始まった発話が、この回に入る */
+  startedAt: number;
+}
+
 export interface AudioDevice {
   id: string;
   name: string;

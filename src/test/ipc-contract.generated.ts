@@ -92,6 +92,9 @@ export const called = {
   listSegments: [
     ["…"],
   ] satisfies Called<"listSegments">[],
+  listTranscriptBreaks: [
+    ["…"],
+  ] satisfies Called<"listTranscriptBreaks">[],
   openExternal: [
     ["…"],
   ] satisfies Called<"openExternal">[],
@@ -209,6 +212,9 @@ export const returned = {
   listSegments: [
     [{"endedAt":0,"id":0,"noteId":"…","speaker":"me","startedAt":0,"text":"…"},{"endedAt":0,"id":0,"noteId":"…","speaker":"them","startedAt":0,"text":"…"}],
   ] satisfies Returned<"listSegments">[],
+  listTranscriptBreaks: [
+    [{"id":0,"noteId":"…","round":0,"startedAt":0}],
+  ] satisfies Returned<"listTranscriptBreaks">[],
   openExternal: [
     null,
   ] satisfies Returned<"openExternal">[],
@@ -293,6 +299,9 @@ export const emitted = {
     {"autoRecordMeetings":false,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
     {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
   ] satisfies Emitted<"onSettingsChanged">[],
+  onTranscriptBreak: [
+    {"id":0,"noteId":"…","round":0,"startedAt":0},
+  ] satisfies Emitted<"onTranscriptBreak">[],
   onUpdateStatus: [
     {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"idle","ready":false,"totalBytes":null},
     {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"downloading","ready":false,"totalBytes":null},

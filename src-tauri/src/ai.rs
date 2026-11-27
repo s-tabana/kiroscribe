@@ -13,7 +13,7 @@ use kiroscribe_core::prompts::{
 use kiroscribe_core::retry::RetryPolicy;
 use kiroscribe_core::secrets::{require_api_key, Provider};
 use kiroscribe_core::settings::Settings;
-use kiroscribe_core::transcript::Segment;
+use kiroscribe_core::transcript::{Segment, TranscriptBreak};
 use serde::Serialize;
 use tauri::{Emitter, State};
 
@@ -82,19 +82,26 @@ impl AiState {
 struct Loaded {
     note: Note,
     segments: Vec<Segment>,
+    breaks: Vec<TranscriptBreak>,
     settings: Settings,
     api_key: String,
 }
 
 fn load(state: &AppState, note_id: &str) -> CmdResult<Loaded> {
-    let (note, segments, settings) = {
+    let (note, segments, breaks, settings) = {
         let db = state.db();
-        (db.get_note(note_id)?, db.list_segments(note_id)?, db.load_settings()?)
+        (
+            db.get_note(note_id)?,
+            db.list_segments(note_id)?,
+            db.list_breaks(note_id)?,
+            db.load_settings()?,
+        )
     };
     let api_key = require_api_key(state.secrets.as_ref(), Provider::Anthropic)?;
     Ok(Loaded {
         note,
         segments,
+        breaks,
         settings,
         api_key,
     })
@@ -107,6 +114,7 @@ fn context(loaded: &Loaded) -> MeetingContext<'_> {
         user_notes: &loaded.note.user_notes,
         enhanced_notes: loaded.note.enhanced_notes.as_deref(),
         segments: &loaded.segments,
+        breaks: &loaded.breaks,
         my_name: &loaded.settings.my_name,
     }
 }

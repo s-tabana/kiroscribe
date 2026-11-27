@@ -131,6 +131,7 @@ fn register_commands(builder: tauri::Builder<Runtime>) -> tauri::Builder<Runtime
             commands::save_markdown,
             recording::list_audio_devices,
             recording::list_segments,
+            recording::list_transcript_breaks,
             recording::get_recording_status,
             recording::start_recording,
             recording::pause_recording,
