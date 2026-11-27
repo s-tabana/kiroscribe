@@ -144,11 +144,24 @@ pub fn report(sessions: &MicSessions) -> MicSessionsReport {
     }
 }
 
-/// いまのオーディオのセッションの一覧を読む。Windows 以外では、取れない（`available` が false）。
+/// いまの録音のオーディオのセッションの一覧を読む。Windows 以外では、取れない（`available` が false）。
 pub fn read() -> MicSessions {
     #[cfg(windows)]
     {
-        windows_sessions::read()
+        windows_sessions::read(windows_sessions::Flow::Capture)
+    }
+    #[cfg(not(windows))]
+    {
+        MicSessions::default()
+    }
+}
+
+/// いまの再生のオーディオのセッションの一覧を読む（確認用の道具で、会議アプリが音を鳴らしているかを見るため）。
+/// `endpoints` は有効な再生のデバイスの数。Windows 以外では、取れない。
+pub fn read_playback() -> MicSessions {
+    #[cfg(windows)]
+    {
+        windows_sessions::read(windows_sessions::Flow::Render)
     }
     #[cfg(not(windows))]
     {
@@ -160,7 +173,7 @@ pub fn read() -> MicSessions {
 mod windows_sessions {
     use windows::core::Interface;
     use windows::Win32::Media::Audio::{
-        eCapture, AudioSessionStateActive, AudioSessionStateExpired, IAudioSessionControl2,
+        eCapture, eRender, AudioSessionStateActive, AudioSessionStateExpired, IAudioSessionControl2,
         IAudioSessionManager2, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
     };
     use windows::Win32::System::Com::{
@@ -187,9 +200,18 @@ mod windows_sessions {
         }
     }
 
-    pub fn read() -> MicSessions {
+    /// 読むデバイスの向き。
+    #[derive(Clone, Copy)]
+    pub enum Flow {
+        /// 録音（マイク）
+        Capture,
+        /// 再生（スピーカー）
+        Render,
+    }
+
+    pub fn read(flow: Flow) -> MicSessions {
         let _com = Com::init();
-        match unsafe { list_sessions() } {
+        match unsafe { list_sessions(flow) } {
             Ok((endpoints, sessions)) => MicSessions {
                 available: true,
                 endpoints,
@@ -205,10 +227,14 @@ mod windows_sessions {
         }
     }
 
-    /// すべての有効な録音のデバイスの、セッションを読む。デバイス 1 つ・セッション 1 つが読めなくても、ほかは読む。
-    unsafe fn list_sessions() -> windows::core::Result<(usize, Vec<MicSession>)> {
+    /// すべての有効なデバイスの、セッションを読む。デバイス 1 つ・セッション 1 つが読めなくても、ほかは読む。
+    unsafe fn list_sessions(flow: Flow) -> windows::core::Result<(usize, Vec<MicSession>)> {
         let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-        let devices = enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)?;
+        let flow = match flow {
+            Flow::Capture => eCapture,
+            Flow::Render => eRender,
+        };
+        let devices = enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE)?;
         let count = devices.GetCount()?;
         let mut sessions = Vec::new();
         for index in 0..count {
@@ -284,8 +310,10 @@ mod windows_sessions {
         #[test]
         fn reading_sessions_does_not_fail() {
             // 実際のオーディオのセッションを読んでもパニックしない。録音のデバイスがない PC でも、一覧は取れる
-            let sessions = super::read();
+            let sessions = super::read(super::Flow::Capture);
             assert!(sessions.available, "{:?}", sessions.error);
+            let playback = super::read(super::Flow::Render);
+            assert!(playback.available, "{:?}", playback.error);
         }
     }
 }

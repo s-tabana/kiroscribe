@@ -42,3 +42,68 @@ jobs:
           archive: false
           if-no-files-found: error
           retention-days: 14
+
+  # 録音のストリームを止めたとき・閉じたとき・プロセスが終わったときに、オーディオのセッションの状態
+  # （Active・Inactive・Expired）がどう変わるかを、仮想のオーディオケーブル（VB-CABLE。e2e.yml と同じ）で確かめて表示する。
+  # hold_mic を Zoom.exe（ストリームを止めて待つ）と Discord.exe（ストリームを閉じて待つ）の名前で動かす
+  session-states:
+    name: オーディオのセッションの状態の変わり方（Windows）
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: 仮想のオーディオケーブルのインストール
+        uses: LABSN/sound-ci-helpers@e9d6ba52163a3283714a68412036ddf33f78d49c # v1
+
+      # Windows のプライバシー設定で、デスクトップ アプリがマイクを使えるようにする（ランナーの既定では拒否されている）
+      - name: マイクへのアクセスを許可
+        shell: pwsh
+        run: |
+          $base = 'CapabilityAccessManager\ConsentStore\microphone'
+          $paths = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\$base",
+                   "HKCU:\Software\Microsoft\Windows\CurrentVersion\$base",
+                   "HKCU:\Software\Microsoft\Windows\CurrentVersion\$base\NonPackaged"
+          foreach ($p in $paths) {
+            if (-not (Test-Path $p)) { New-Item -Path $p -Force | Out-Null }
+            Set-ItemProperty -Path $p -Name Value -Value Allow
+          }
+
+      - name: ビルド
+        run: cargo build -p kiroscribe-core --example hold_mic --example meeting_probe --locked
+
+      - name: セッションの状態の変わり方
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $probe = 'target/debug/examples/meeting_probe.exe'
+          $apps = @{}
+          foreach ($name in 'Zoom', 'Discord') {
+            $dir = Join-Path $env:RUNNER_TEMP "states-$name"
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            Copy-Item target/debug/examples/hold_mic.exe (Join-Path $dir "$name.exe")
+            $apps[$name] = Join-Path $dir "$name.exe"
+          }
+          # Zoom.exe: 6 秒使ったあと、ストリームを止めて（閉じずに）40 秒待つ。Discord.exe: 6 秒使ったあと、閉じて 40 秒待つ
+          $zoom = Start-Process -FilePath $apps['Zoom'] -ArgumentList '6', '--pause', '40' -PassThru -WindowStyle Hidden
+          $discord = Start-Process -FilePath $apps['Discord'] -ArgumentList '6', '--drop', '40' -PassThru -WindowStyle Hidden
+          try {
+            Start-Sleep -Seconds 3
+            "=== 3 秒後（どちらもマイクを使っている）"; & $probe --once
+            Start-Sleep -Seconds 7
+            "=== 10 秒後（Zoom.exe はストリームを止めた・Discord.exe は閉じた。どちらもプロセスは残っている）"; & $probe --once
+            Start-Sleep -Seconds 25
+            "=== 35 秒後（同じ）"; & $probe --once
+          } finally {
+            Stop-Process -Id $zoom.Id, $discord.Id -Force -ErrorAction SilentlyContinue
+          }
+          Start-Sleep -Seconds 3
+          "=== プロセスが終わったあと"; & $probe --once

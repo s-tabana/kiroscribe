@@ -95,7 +95,7 @@ fn packaged_app(lower_id: &str) -> Option<MeetingApp> {
 }
 
 /// マイクを使ったプログラム（フルパスかパッケージ名）が、デスクトップの会議アプリなら、そのアプリ。
-pub(crate) fn desktop_app(id: &str) -> Option<MeetingApp> {
+pub fn desktop_app(id: &str) -> Option<MeetingApp> {
     let lower = id.to_lowercase();
     if let Some(app) = packaged_app(&lower) {
         return Some(app);
