@@ -558,7 +558,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       if (!path) return null;
       // 一覧にあるフォルダなら、何も変えない
       if (searchFolders.some((folder) => folder.path === path)) return this.getSearchIndexStatus();
-      searchFolders.push({ path, noContent: false, files: 0, missing: false, truncated: false });
+      searchFolders.push({ path, noContent: false, files: 0, missing: false, truncated: false, unconfirmed: false });
       return publishSearchIndex();
     },
     async removeSearchFolder(path) {

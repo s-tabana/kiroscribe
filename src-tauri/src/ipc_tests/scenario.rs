@@ -263,6 +263,26 @@ fn ipc_contract_matches_the_frontend() {
     wait_until("索引の作り直し", || {
         index_events(since).iter().any(|status| status["state"] == "ready" && status["files"] == 1).then_some(())
     });
+    // 足したときの実体を記録する前の設定のフォルダは、中身を読まずに「確認が必要」にする。
+    // 選び直すと、実体を記録して索引に入れる（「中身を送らない」は引き継ぐ）
+    let legacy = vec![kiroscribe_core::search::SearchFolder { path: folder_path.clone(), no_content: true, place: None }];
+    app.state::<AppState>().db().save_search_folders(&legacy).unwrap();
+    let since = index_seen();
+    app.state::<crate::companion::CompanionState>().indexer.set_folders(legacy);
+    wait_until("確認が必要な表示", || {
+        let unconfirmed = |status: &Value| status["state"] == "ready" && status["folders"][0]["unconfirmed"] == true && status["files"] == 0;
+        index_events(since).iter().any(unconfirmed).then_some(())
+    });
+    std::fs::write(&answers, json!({ "folderPath": folder_path }).to_string()).unwrap();
+    let since = index_seen();
+    let status = s.ok("add_search_folder", json!({}));
+    std::fs::remove_file(&answers).unwrap();
+    assert_eq!(status["folders"].as_array().unwrap().len(), 1);
+    assert_eq!((&status["folders"][0]["unconfirmed"], &status["folders"][0]["noContent"]), (&json!(false), &json!(true)));
+    wait_until("選び直したフォルダの索引", || {
+        index_events(since).iter().any(|status| status["state"] == "ready" && status["files"] == 1).then_some(())
+    });
+    assert!(app.state::<AppState>().db().load_search_folders().unwrap()[0].place.is_some(), "選び直したフォルダの実体を保存する");
     let since = index_seen();
     let status = s.ok("remove_search_folder", json!({ "path": folder_path }));
     assert_eq!(status["folders"], json!([]));

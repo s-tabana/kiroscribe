@@ -84,8 +84,8 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         assert!(db.load_search_folders().unwrap().is_empty(), "初期値は空");
         let folders = vec![
-            SearchFolder { path: "C:\\共有資料".into(), no_content: false },
-            SearchFolder { path: "D:\\人事".into(), no_content: true },
+            SearchFolder { path: "C:\\共有資料".into(), no_content: false, place: None },
+            SearchFolder { path: "D:\\人事".into(), no_content: true, place: None },
         ];
         db.save_search_folders(&folders).unwrap();
         assert_eq!(db.load_search_folders().unwrap(), folders);
@@ -96,10 +96,48 @@ mod tests {
         assert_eq!(db.load_settings().unwrap(), crate::settings::Settings::default());
     }
 
+    /// 足したときのフォルダの実体を保存し、読み直しても同じ。実体を記録する前の設定や、読めない値は、
+    /// 記録していないもの（選び直すまで中身を読まない）として読む。
+    // [IDX-027][IDX-001]
+    #[test]
+    fn the_registered_place_is_saved_with_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("資料");
+        std::fs::create_dir_all(&root).unwrap();
+        let registered = SearchFolder::register(&root).unwrap();
+        let place = registered.place.clone().expect("足したときの実体");
+        assert!(place.admits(&crate::search::walk::Root::open(&root).unwrap()));
+
+        let db = Database::open_in_memory().unwrap();
+        db.save_search_folders(std::slice::from_ref(&registered)).unwrap();
+        assert_eq!(db.load_search_folders().unwrap(), [registered]);
+
+        db.set_value(FOLDERS_KEY, r#"[{"path":"/x","noContent":true}]"#).unwrap();
+        assert_eq!(db.load_search_folders().unwrap()[0].place, None, "実体を記録する前の設定");
+        db.set_value(FOLDERS_KEY, r#"[{"path":"/x","place":{"real":null,"volume":"x","file":"1"}}]"#).unwrap();
+        let loaded = db.load_search_folders().unwrap();
+        assert_eq!((loaded[0].place.clone(), loaded[0].path.as_str()), (None, "/x"), "読めない値は、記録していないものとして読む");
+    }
+
+    /// リンクのフォルダ・フォルダでないものは、足せない。
+    // [IDX-027]
+    #[cfg(unix)]
+    #[test]
+    fn links_and_files_cannot_be_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("資料");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("リンク")).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+        assert!(SearchFolder::register(&dir.path().join("リンク")).is_err());
+        assert!(SearchFolder::register(&dir.path().join("a.txt")).is_err());
+        assert!(SearchFolder::register(&dir.path().join("ない")).is_err());
+    }
+
     // [IDX-001]
     #[test]
     fn overlapping_folders_are_detected() {
-        let folders = vec![SearchFolder { path: "/home/a/資料".into(), no_content: false }];
+        let folders = vec![SearchFolder { path: "/home/a/資料".into(), no_content: false, place: None }];
         assert_eq!(overlap(&folders, "/home/a/資料"), Some(Overlap::Same(&folders[0])));
         assert_eq!(overlap(&folders, "/home/a/資料/"), Some(Overlap::Same(&folders[0])), "末尾の区切り");
         assert_eq!(overlap(&folders, "/home/a/資料/人事"), Some(Overlap::Nested(&folders[0])), "中のフォルダ");

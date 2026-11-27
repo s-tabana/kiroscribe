@@ -55,8 +55,9 @@ fn events(f: &Fixture) -> Vec<IndexStatus> {
     f.events.lock().unwrap().iter().map(|(status, _)| status.clone()).collect()
 }
 
+/// 選んだフォルダとして足す（足したときの実体を記録する。フォルダはあらかじめ作っておく）。
 fn folder(path: &Path) -> SearchFolder {
-    SearchFolder { path: path.to_string_lossy().to_string(), no_content: false }
+    SearchFolder::register(path).unwrap()
 }
 
 fn write(path: &Path, text: &str) {
@@ -169,17 +170,18 @@ fn removing_a_folder_drops_its_files_but_a_missing_folder_keeps_them() {
     let other = f.root.parent().unwrap().join("人事");
     write(&f.root.join("a.txt"), "経費");
     write(&other.join("b.txt"), "経費");
-    f.indexer.enable(vec![folder(&f.root), folder(&other)]);
+    let registered = folder(&f.root);
+    f.indexer.enable(vec![registered.clone(), folder(&other)]);
     wait_ready(&f, 2);
 
-    f.indexer.set_folders(vec![folder(&f.root)]);
+    f.indexer.set_folders(vec![registered.clone()]);
     wait_ready(&f, 1);
     assert_eq!(search(&f, "経費"), ["a.txt"], "外したフォルダのファイルは消す");
 
     // 見つからない（ドライブが外れたなど）
     let moved = f.root.parent().unwrap().join("退避");
     std::fs::rename(&f.root, &moved).unwrap();
-    f.indexer.set_folders(vec![folder(&f.root)]);
+    f.indexer.set_folders(vec![registered]);
     wait_until("見つからない表示", Duration::from_secs(20), || {
         let status = f.indexer.status();
         status.state == IndexState::Ready && status.folders[0].missing
@@ -546,7 +548,8 @@ fn a_parent_folder_replaced_by_a_link_does_not_bring_in_files_elsewhere() {
     let index_path = dir.path().join("data").join(INDEX_FILE);
     let intervals = Intervals { poll: Duration::from_secs(3600), root_check: Duration::from_millis(200), ..Intervals::default() };
     let indexer = Indexer::spawn_with_intervals(index_path.clone(), Limits::default(), intervals, |_| {});
-    indexer.enable(vec![folder(&root)]);
+    let registered = folder(&root);
+    indexer.enable(vec![registered.clone()]);
     wait_until("索引", Duration::from_secs(20), || {
         let status = indexer.status();
         status.state == IndexState::Ready && status.files == 1
@@ -572,7 +575,7 @@ fn a_parent_folder_replaced_by_a_link_does_not_bring_in_files_elsewhere() {
     assert_eq!(search("経費"), ["a.txt"], "それまでの索引は残す");
 
     // 一覧を変えて調べ直しても、作り直しても、別の場所の中身を入れない
-    let returned = indexer.set_folders(vec![folder(&root)]);
+    let returned = indexer.set_folders(vec![registered]);
     wait_until("調べ直し", Duration::from_secs(20), || {
         let status = indexer.status();
         status.state == IndexState::Ready && status.revision > returned.revision && status.folders[0].missing
@@ -703,4 +706,148 @@ fn files_in_a_folder_that_cannot_be_read_are_kept() {
     found.sort();
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(found, ["a.txt", "b.txt"], "読めないフォルダのファイルを消さない");
+}
+
+/// 上のフォルダを、範囲の外の同じ名前のフォルダを含む場所へのリンクに替える（無害な一時フォルダ）。戻すときに使うパスを返す。
+#[cfg(unix)]
+fn redirect_parent(parent: &Path, outside: &Path) -> PathBuf {
+    let moved = parent.with_file_name("退避");
+    std::fs::rename(parent, &moved).unwrap();
+    std::os::unix::fs::symlink(outside, parent).unwrap();
+    moved
+}
+
+#[cfg(unix)]
+fn search_at(index_path: &Path, term: &str) -> Vec<String> {
+    let index = SearchIndex::open(index_path).unwrap();
+    index.search(&[term.to_string()], 10).unwrap().into_iter().map(|hit| hit.file_name).collect()
+}
+
+/// オフのあいだに足したフォルダは、足したときの実体を基準にする。オンにする前に上のフォルダが替わり、
+/// 別の場所の同じ名前のフォルダを指すようになっても、その中身を索引に入れない。戻ったら、足したフォルダを読む。
+// [IDX-027][IDX-008]
+#[cfg(unix)]
+#[test]
+fn a_folder_added_while_off_is_bound_to_the_folder_that_was_chosen() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("上");
+    let root = parent.join("共有資料");
+    write(&root.join("a.txt"), "経費");
+    let outside = tempfile::tempdir().unwrap();
+    write(&outside.path().join("共有資料").join("leak.txt"), "社外秘");
+    let index_path = dir.path().join("data").join(INDEX_FILE);
+    let intervals = Intervals { poll: Duration::from_secs(3600), root_check: Duration::from_millis(200), ..Intervals::default() };
+    let indexer = Indexer::spawn_with_intervals(index_path.clone(), Limits::default(), intervals, |_| {});
+
+    // オフのあいだに足す（起動したときと同じ命令の順）
+    let registered = folder(&root);
+    indexer.set_folders(vec![registered.clone()]);
+    indexer.disable();
+    let moved = redirect_parent(&parent, outside.path());
+
+    indexer.enable(vec![registered]);
+    wait_until("見つからない表示", Duration::from_secs(20), || {
+        let status = indexer.status();
+        status.state == IndexState::Ready && status.folders[0].missing
+    });
+    assert!(search_at(&index_path, "社外秘").is_empty(), "別の場所の中身を入れない");
+    assert!(search_at(&index_path, "経費").is_empty());
+
+    std::fs::remove_file(&parent).unwrap();
+    std::fs::rename(&moved, &parent).unwrap();
+    wait_until("戻ったフォルダの索引", Duration::from_secs(30), || {
+        let status = indexer.status();
+        status.state == IndexState::Ready && !status.folders[0].missing && status.files == 1
+    });
+    assert_eq!(search_at(&index_path, "経費"), ["a.txt"]);
+    assert!(indexer.shutdown_and_wait(Duration::from_secs(5)));
+}
+
+/// アプリを起動し直したあとも、設定に保存した、足したときの実体を基準にする。起動していないあいだに上のフォルダが替わり、
+/// 別の場所の同じ名前のフォルダを指すようになっても、その中身を索引に入れず、それまでの索引は残す。
+// [IDX-027][IDX-010]
+#[cfg(unix)]
+#[test]
+fn the_folder_chosen_when_added_is_checked_again_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("上");
+    let root = parent.join("共有資料");
+    write(&root.join("a.txt"), "経費");
+    let outside = tempfile::tempdir().unwrap();
+    write(&outside.path().join("共有資料").join("leak.txt"), "社外秘");
+    let index_path = dir.path().join("data").join(INDEX_FILE);
+    let db = kiroscribe_core::db::Database::open_in_memory().unwrap();
+    db.save_search_folders(&[folder(&root)]).unwrap();
+    let ready = |indexer: &Indexer, missing: bool| {
+        wait_until("索引", Duration::from_secs(20), || {
+            let status = indexer.status();
+            status.state == IndexState::Ready && status.folders[0].missing == missing && status.files == 1
+        });
+    };
+
+    let first = Indexer::spawn(index_path.clone(), |_| {});
+    first.enable(db.load_search_folders().unwrap());
+    ready(&first, false);
+    assert!(first.shutdown_and_wait(Duration::from_secs(5)));
+    drop(first);
+
+    // 起動していないあいだに、上のフォルダが替わった
+    let moved = redirect_parent(&parent, outside.path());
+    let second = Indexer::spawn(index_path.clone(), |_| {});
+    second.enable(db.load_search_folders().unwrap());
+    ready(&second, true);
+    assert!(search_at(&index_path, "社外秘").is_empty(), "別の場所の中身を入れない");
+    assert_eq!(search_at(&index_path, "経費"), ["a.txt"], "それまでの索引は残す");
+    let returned = second.rebuild().unwrap();
+    wait_until("作り直し", Duration::from_secs(20), || {
+        let status = second.status();
+        status.state == IndexState::Ready && status.revision > returned.revision && status.folders[0].missing
+    });
+    assert!(search_at(&index_path, "社外秘").is_empty(), "作り直しても入れない");
+    assert!(second.shutdown_and_wait(Duration::from_secs(5)));
+    drop(second);
+
+    // 足したフォルダが戻れば、また読む。同じ場所で作り直したフォルダも読む（IDX-010）
+    std::fs::remove_file(&parent).unwrap();
+    std::fs::rename(&moved, &parent).unwrap();
+    std::fs::rename(&root, parent.join("古い")).unwrap();
+    write(&root.join("b.txt"), "予算");
+    let third = Indexer::spawn(index_path.clone(), |_| {});
+    third.enable(db.load_search_folders().unwrap());
+    ready(&third, false);
+    assert_eq!(search_at(&index_path, "予算"), ["b.txt"]);
+    assert!(search_at(&index_path, "経費").is_empty(), "作り直す前のフォルダのファイルは消す");
+    assert!(third.shutdown_and_wait(Duration::from_secs(5)));
+}
+
+/// 足したときの実体を記録する前の設定のフォルダは、どこを読んだか確かめられないので、それまでの索引を消し、
+/// 中身を読まずに「確認が必要」にする。選び直したら（足したときの実体を記録したら）、索引に入れる。
+// [IDX-027][IDX-001]
+#[test]
+fn a_folder_saved_without_its_place_is_not_read_until_chosen_again() {
+    let f = fixture();
+    write(&f.root.join("a.txt"), "経費");
+    let registered = folder(&f.root);
+    f.indexer.enable(vec![registered.clone()]);
+    wait_ready(&f, 1);
+
+    let legacy = SearchFolder { place: None, ..registered.clone() };
+    let returned = f.indexer.set_folders(vec![legacy]);
+    assert!(returned.folders[0].unconfirmed, "戻り値にすぐ表れる");
+    wait_until("確認が必要な表示", Duration::from_secs(20), || {
+        let status = f.indexer.status();
+        status.state == IndexState::Ready && status.revision > returned.revision && status.files == 0
+    });
+    let status = f.indexer.status();
+    assert!(status.folders[0].unconfirmed && !status.folders[0].missing);
+    assert!(search(&f, "経費").is_empty(), "それまでの索引も消す");
+
+    // 確認が必要なフォルダの中の変更も読まない
+    write(&f.root.join("b.txt"), "経費");
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(search(&f, "経費").is_empty());
+
+    f.indexer.set_folders(vec![registered]);
+    wait_ready(&f, 2);
+    assert!(!f.indexer.status().folders[0].unconfirmed);
 }

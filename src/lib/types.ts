@@ -88,6 +88,8 @@ export interface SearchFolderStatus {
   missing: boolean;
   /** ファイルが多く、一部だけを索引に入れている */
   truncated: boolean;
+  /** 足したときのフォルダの実体を記録していないため、選び直すまで索引に入れない */
+  unconfirmed: boolean;
 }
 
 export interface SearchIndexStatus {

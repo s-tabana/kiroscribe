@@ -112,11 +112,20 @@ pub async fn add_search_folder(
             "ショートカットやリンク（ジャンクション・シンボリックリンク）のフォルダは追加できません。リンク先のフォルダを選んでください".into(),
         ));
     }
-    let path = path.to_string_lossy().to_string();
+    // 選んだフォルダをその場で開き、その実体を記録する（あとで別の場所のフォルダに替わっても、中身を読まない）
+    let folder = SearchFolder::register(&path).map_err(|err| CommandError(format!("フォルダを追加できません: {err}")))?;
     let mut folders = state.db().load_search_folders()?;
-    match overlap(&folders, &path) {
-        // 一覧にあるフォルダなら、何も変えない（調べ直さない）
-        Some(Overlap::Same(_)) => return Ok(Some(companion.indexer.status())),
+    match overlap(&folders, &folder.path) {
+        Some(Overlap::Same(existing)) => {
+            // 一覧にあるフォルダで、足したときと同じ実体なら、何も変えない（調べ直さない）
+            if existing.path == folder.path && existing.place == folder.place {
+                return Ok(Some(companion.indexer.status()));
+            }
+            // 足したときの実体を記録していない・作り直したフォルダは、選び直したフォルダの実体を記録し直す
+            let no_content = existing.no_content;
+            let position = folders.iter().position(|row| std::ptr::eq(row, existing)).expect("一覧の中の行");
+            folders[position] = SearchFolder { no_content, ..folder };
+        }
         // 同じファイルを 2 つのフォルダで数えないよう、重なるフォルダは足さない
         Some(Overlap::Nested(existing)) => {
             return Err(CommandError(format!(
@@ -124,9 +133,8 @@ pub async fn add_search_folder(
                 existing.path
             )))
         }
-        None => {}
+        None => folders.push(folder),
     }
-    folders.push(SearchFolder { path, no_content: false });
     save_folders(&state, &companion, folders).map(Some)
 }
 

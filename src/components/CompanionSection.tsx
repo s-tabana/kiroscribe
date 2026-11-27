@@ -107,10 +107,15 @@ export function CompanionSection({ settings, modelSelect, onCompanionChange, onE
                     {folder.path}
                   </span>
                   <small className="folder-meta">
-                    {folder.missing
-                      ? "見つかりません"
-                      : `${folder.files.toLocaleString("ja-JP")} 件`}
-                    {folder.truncated && !folder.missing && "・一部だけ索引に入れています（20,000 件まで）"}
+                    {folder.unconfirmed
+                      ? "確認が必要です。「フォルダを追加…」で、このフォルダをもう一度選んでください"
+                      : folder.missing
+                        ? "見つかりません"
+                        : `${folder.files.toLocaleString("ja-JP")} 件`}
+                    {folder.truncated &&
+                      !folder.missing &&
+                      !folder.unconfirmed &&
+                      "・一部だけ索引に入れています（20,000 件まで）"}
                   </small>
                 </div>
                 <label className="check folder-no-content">

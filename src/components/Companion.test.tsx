@@ -126,10 +126,10 @@ describe("会議の相棒の設定", () => {
     expect(within(area).queryByRole("list")).not.toBeInTheDocument();
   });
 
-  it("[IDX-008][IDX-003][IDX-010] 索引の状態と、一部だけ入れたフォルダ・見つからないフォルダを表示する", async () => {
+  it("[IDX-008][IDX-003][IDX-010][IDX-027] 索引の状態と、一部だけ入れたフォルダ・見つからないフォルダ・確認が必要なフォルダを表示する", async () => {
     const { backend } = setup();
     const area = await section();
-    const folder = { noContent: false, missing: false, truncated: false };
+    const folder = { noContent: false, missing: false, truncated: false, unconfirmed: false };
     backend.setSearchIndexStatus({
       state: "building",
       done: 1234,
@@ -137,6 +137,7 @@ describe("会議の相棒の設定", () => {
       folders: [
         { ...folder, path: "D:\\多い", files: 20000, truncated: true },
         { ...folder, path: "E:\\外した", files: 3, missing: true },
+        { ...folder, path: "F:\\前の設定", files: 0, unconfirmed: true },
       ],
     });
     expect(await within(area).findByText("索引を作っています（1,234 / 5,000 件）")).toBeInTheDocument();
@@ -144,6 +145,9 @@ describe("会議の相棒の設定", () => {
     expect(many).toHaveTextContent("20,000 件・一部だけ索引に入れています（20,000 件まで）");
     const missing = within(area).getByText("E:\\外した").closest("li") as HTMLElement;
     expect(missing).toHaveTextContent("見つかりません");
+    const unconfirmed = within(area).getByText("F:\\前の設定").closest("li") as HTMLElement;
+    expect(unconfirmed).toHaveTextContent("確認が必要です。「フォルダを追加…」で、このフォルダをもう一度選んでください");
+    expect(unconfirmed).not.toHaveTextContent("0 件");
     expect(within(area).getByRole("button", { name: "索引を作り直す" })).toBeDisabled();
 
     const updatedAt = new Date(2026, 10, 27, 11, 20).getTime();

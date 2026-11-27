@@ -3,11 +3,16 @@
 //! 隠しフォルダ・システムのフォルダ・「.」で始まるフォルダ・`node_modules`・ごみ箱は下りない。
 //! シンボリックリンク・ジャンクション・ショートカット（.lnk）はたどらない。
 //! OneDrive の同期したファイルのような、別の場所を指さない再解析ポイントは、ふつうのファイルとして扱う。
+//!
+//! 中のフォルダとファイルは、パスの文字列ではなく、開いた探すフォルダのハンドルを基準にたどる。
+//! 探すフォルダの中にあると OS が保証できないものは、開かない（中身を読まない）。
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 use super::extract::{kind_of, Kind};
 
@@ -111,18 +116,42 @@ fn modified_ms(meta: &Metadata) -> i64 {
         .unwrap_or(0)
 }
 
+/// ファイル・フォルダの属性（リンクはたどらない。開いたハンドルか、フォルダの列挙から得る）。
+#[derive(Debug, Clone, Copy)]
+pub struct Info {
+    dir: bool,
+    file: bool,
+    len: u64,
+    /// 更新日時（ミリ秒）
+    modified: i64,
+    traits: Traits,
+}
+
+impl Info {
+    fn of(meta: &Metadata) -> Info {
+        Info { dir: meta.is_dir(), file: meta.is_file(), len: meta.len(), modified: modified_ms(meta), traits: traits_of(meta) }
+    }
+
+    pub fn is_dir(&self) -> bool {
+        self.dir
+    }
+
+    pub fn is_file(&self) -> bool {
+        self.file
+    }
+}
+
 /// 索引に入れるファイルか（名前・種類・属性・大きさで決める）。入れないなら None。
-fn entry_of(path: &Path, meta: &Metadata, limits: Limits) -> Option<FileEntry> {
+fn entry_of(path: &Path, info: &Info, limits: Limits) -> Option<FileEntry> {
     let name = path.file_name()?.to_str()?;
     if is_skipped_file_name(name) {
         return None;
     }
     let kind = kind_of(path)?;
-    let traits = traits_of(meta);
-    if !meta.is_file() || traits.link || traits.hidden_or_system || meta.len() > limits.max_bytes {
+    if !info.file || info.traits.link || info.traits.hidden_or_system || info.len > limits.max_bytes {
         return None;
     }
-    Some(FileEntry { path: path.to_path_buf(), kind, modified: modified_ms(meta), size: meta.len(), online_only: traits.online_only })
+    Some(FileEntry { path: path.to_path_buf(), kind, modified: info.modified, size: info.len, online_only: info.traits.online_only })
 }
 
 /// クラウドにだけあるファイルか（読む直前に確かめる。読むとダウンロードが始まるため）。
@@ -135,20 +164,79 @@ pub fn is_link(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| traits_of(&meta).link)
 }
 
-/// ファイル・フォルダの識別子（Unix はデバイスと i ノードの番号、Windows はボリュームのシリアル番号とファイル ID）。
+/// ファイル・フォルダの識別子（Unix はデバイスと i ノードの番号、Windows はボリュームのシリアル番号と 128 ビットのファイル ID）。
 /// 移したフォルダの代わりに、同じ名前のフォルダが作られたら変わる。
-pub type FileId = (u64, u64);
+pub type FileId = (u64, u128);
 
-/// 2 つの実際の場所が同じか（Windows では大文字と小文字を区別しない）。
-pub fn same_place(a: &Path, b: &Path) -> bool {
+/// 探すフォルダとして足したときに開いた実体: 実際の場所（OS の表し方のまま、文字に直さずに持つ）と識別子。
+/// 設定に保存し、次に開いたフォルダが、足したときと同じものかを確かめる（アプリを起動し直したあとも）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "StoredPlace", into = "StoredPlace")]
+pub struct Place {
+    /// 実際の場所を、損なわずに文字にしたもの（[`encode_os`]）。取れなかったときは None（識別子だけで確かめる）
+    real: Option<String>,
+    id: FileId,
+}
+
+impl Place {
+    /// 開いたフォルダが、足したときと同じものか、同じ場所で作り直されたもの（実際の場所が、大文字と小文字を含めて完全に一致する）か。
+    /// 上のフォルダがリンクに替わって、別の場所の同じ名前のフォルダを指すようになったら、どちらでもない。
+    pub fn admits(&self, opened: &Root) -> bool {
+        opened.id == self.id || (self.real.is_some() && self.real == opened.real.as_deref().map(|real| encode_os(real.as_os_str())))
+    }
+
+    pub fn id(&self) -> FileId {
+        self.id
+    }
+}
+
+/// 設定に保存する形（JSON の数は大きな値を損なうため、識別子は 10 進の文字にする）。
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredPlace {
+    real: Option<String>,
+    volume: String,
+    file: String,
+}
+
+impl TryFrom<StoredPlace> for Place {
+    type Error = String;
+
+    fn try_from(stored: StoredPlace) -> Result<Self, Self::Error> {
+        let volume = stored.volume.parse().map_err(|_| "識別子を読めません".to_string())?;
+        let file = stored.file.parse().map_err(|_| "識別子を読めません".to_string())?;
+        Ok(Place { real: stored.real, id: (volume, file) })
+    }
+}
+
+impl From<Place> for StoredPlace {
+    fn from(place: Place) -> Self {
+        StoredPlace { real: place.real, volume: place.id.0.to_string(), file: place.id.1.to_string() }
+    }
+}
+
+/// OS のパスを、文字に直さずに（損なわずに）比べられる文字にする。
+/// Unix はバイト列、Windows は UTF-16 の並びを 16 進にする（OS が違えば、一致しない）。
+fn encode_os(text: &OsStr) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        out.push_str("b:");
+        for byte in text.as_bytes() {
+            let _ = write!(out, "{byte:02x}");
+        }
+    }
     #[cfg(windows)]
     {
-        a.as_os_str().to_string_lossy().to_lowercase() == b.as_os_str().to_string_lossy().to_lowercase()
+        use std::os::windows::ffi::OsStrExt;
+        out.push_str("w:");
+        for unit in text.encode_wide() {
+            let _ = write!(out, "{unit:04x}");
+        }
     }
-    #[cfg(not(windows))]
-    {
-        a == b
-    }
+    out
 }
 
 /// 探すフォルダの範囲の外（リンクをたどらないと届かない・除くフォルダを通る・開いたものが別の場所にある）。
@@ -180,17 +268,17 @@ pub enum Content {
     OnlineOnly,
     /// 範囲の外にある・ふつうのファイルでない（中身も名前も索引に入れない）
     Outside,
-    /// 読めなかった（権限がない・大きくなりすぎたなど）
+    /// 読めなかった（権限がない・大きくなりすぎた・探すフォルダの中にあると確かめられないなど）
     Failed(io::Error),
 }
 
 /// 開いた探すフォルダ。中のフォルダとファイルは、このフォルダのハンドルを基準にたどる。
-/// 実際に開いたものがこのフォルダの中にあると確かめてから、列挙したり読んだりする（確かめられなければ読まない）。
+/// 実際に開いたものがこのフォルダの中にあると OS が保証できるときだけ、列挙したり読んだりする。
 pub struct Root {
     path: PathBuf,
     dir: File,
     id: FileId,
-    real: PathBuf,
+    real: Option<PathBuf>,
 }
 
 impl Root {
@@ -209,9 +297,14 @@ impl Root {
         self.id
     }
 
-    /// 開いたときの実際の場所（上のフォルダのリンクをたどった先も含めた、本当の場所）。
-    pub fn real(&self) -> &Path {
-        &self.real
+    /// 開いたときの実際の場所（上のフォルダのリンクをたどった先も含めた、本当の場所）。取れなかったときは None。
+    pub fn real(&self) -> Option<&Path> {
+        self.real.as_deref()
+    }
+
+    /// 開いたフォルダの実体（足したときに設定へ保存する）。
+    pub fn place(&self) -> Place {
+        Place { real: self.real.as_deref().map(|real| encode_os(real.as_os_str())), id: self.id }
     }
 
     /// `path` の、このフォルダからの名前の並び。中を指さない・除くフォルダを通るときは None。
@@ -227,18 +320,17 @@ impl Root {
     }
 
     /// `path` が、途中に除くフォルダ（隠し・システム・「.」で始まるなど）を通らずに届く、このフォルダの中のパスか。
-    /// 名前と属性で決める（リンクかどうかと、実際にどこにあるかは、開くときに確かめる）。
+    /// 途中のフォルダの属性は、このフォルダのハンドルを基準に、リンクをたどらずに調べる。
     pub fn allows(&self, path: &Path) -> bool {
         let Some(parts) = self.parts(path) else { return false };
-        let mut current = self.path.clone();
-        parts[..parts.len() - 1].iter().all(|part| {
-            current.push(part);
-            std::fs::symlink_metadata(&current).is_ok_and(|meta| !traits_of(&meta).hidden_or_system)
+        let dirs = &parts[..parts.len() - 1];
+        (0..dirs.len()).all(|i| {
+            sys::stat_child(self, &dirs[..i], &dirs[i]).is_ok_and(|info| info.dir && !info.traits.link && !info.traits.hidden_or_system)
         })
     }
 
     /// このフォルダの中のファイル・フォルダの属性を、リンクをたどらずに調べる。範囲の外なら [`is_outside`] のエラー。
-    pub fn stat(&self, path: &Path) -> io::Result<Metadata> {
+    pub fn stat(&self, path: &Path) -> io::Result<Info> {
         let parts = self.parts(path).ok_or_else(outside)?;
         let (name, dirs) = parts.split_last().ok_or_else(outside)?;
         sys::stat_child(self, dirs, name)
@@ -254,7 +346,7 @@ impl Root {
 
     /// このフォルダの中にある、ふつうのファイルか（中身は読まない。名前だけで索引に入れるときに使う）。
     pub fn contains_file(&self, path: &Path) -> bool {
-        self.stat(path).is_ok_and(|meta| meta.is_file() && !traits_of(&meta).link)
+        self.stat(path).is_ok_and(|info| info.file && !info.traits.link)
     }
 
     /// このフォルダの中のファイルの中身を、`max_bytes` まで読む。
@@ -267,14 +359,14 @@ impl Root {
             Err(err) if is_outside(&err) => return Content::Outside,
             Err(err) => return Content::Failed(err),
         };
-        let meta = match file.metadata() {
-            Ok(meta) => meta,
+        let info = match file.metadata() {
+            Ok(meta) => Info::of(&meta),
             Err(err) => return Content::Failed(err),
         };
-        if !meta.is_file() {
+        if !info.file || info.traits.link {
             return Content::Outside;
         }
-        if traits_of(&meta).online_only {
+        if info.traits.online_only {
             return Content::OnlineOnly;
         }
         let mut bytes = Vec::new();
@@ -299,15 +391,14 @@ impl Root {
             };
             entries.sort_by(|a, b| a.0.cmp(&b.0));
             let mut subdirs = Vec::new();
-            for (name, meta) in entries {
-                let traits = traits_of(&meta);
-                if traits.link || traits.hidden_or_system {
+            for (name, info) in entries {
+                if info.traits.link || info.traits.hidden_or_system {
                     continue;
                 }
                 let Some(text) = name.to_str() else {
                     continue;
                 };
-                if meta.is_dir() {
+                if info.dir {
                     if !is_skipped_dir_name(text) {
                         let mut sub = parts.clone();
                         sub.push(name.clone());
@@ -315,7 +406,7 @@ impl Root {
                     }
                     continue;
                 }
-                if let Some(file) = entry_of(&dir_path.join(&name), &meta, limits) {
+                if let Some(file) = entry_of(&dir_path.join(&name), &info, limits) {
                     if walked.files.len() >= limits.max_files {
                         walked.truncated = true;
                         return walked;
@@ -332,123 +423,212 @@ impl Root {
 
 /// 列挙した 1 つの項目の属性。消えたものは除き、調べられないものがあればフォルダごと読めなかったことにする
 /// （中のファイルを、消えたとみなさない）。
-fn listed(name: OsString, meta: io::Result<Metadata>) -> io::Result<Option<(OsString, Metadata)>> {
-    match meta {
-        Ok(meta) => Ok(Some((name, meta))),
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn listed(name: OsString, info: io::Result<Info>) -> io::Result<Option<(OsString, Info)>> {
+    match info {
+        Ok(info) => Ok(Some((name, info))),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err),
     }
 }
 
-/// Linux: 開いたフォルダのハンドル（`/proc/self/fd/<番号>`）を基準に、名前を 1 つずつ、リンクをたどらずに開く。
+/// 探すフォルダの中にあると確かめられないため、開かなかった（中身を読まない）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn unverifiable() -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, "この環境では、探すフォルダの中にあると確かめられないため、読みません")
+}
+
+/// Linux: 探すフォルダのハンドルを基準に、中のパス全体を `openat2` で 1 回で開く。
+/// カーネルが、リンクをたどらず（RESOLVE_NO_SYMLINKS）、探すフォルダの下から出ずに（RESOLVE_BENEATH）解決したと保証する。
+/// `openat2` を使えない環境（Linux 5.6 より前など）では、確かめられないので開かない。
 #[cfg(target_os = "linux")]
 mod sys {
     use super::*;
-    use std::os::fd::AsRawFd;
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    /// カーネルが、解決のあいだにフォルダが移されたため保証できない（EAGAIN）と返したときに、解決し直す回数。
+    const RETRIES: usize = 8;
 
     fn handle_path(file: &File) -> PathBuf {
         PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
     }
 
-    /// リンクを開こうとした（ELOOP）・フォルダでなかった（ENOTDIR）ときは、範囲の外にする。
-    fn link_as_outside(err: io::Error) -> io::Error {
-        match err.raw_os_error() {
-            Some(libc::ELOOP) | Some(libc::ENOTDIR) => outside(),
-            _ => err,
-        }
+    fn id_of(file: &File) -> io::Result<FileId> {
+        let meta = file.metadata()?;
+        Ok((meta.dev(), u128::from(meta.ino())))
     }
 
-    fn open_dir(path: &Path) -> io::Result<File> {
-        std::fs::OpenOptions::new()
+    pub(super) fn open_root(path: &Path) -> io::Result<(File, FileId, Option<PathBuf>)> {
+        let dir = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(path)
-            .map_err(link_as_outside)
+            .map_err(|err| match err.raw_os_error() {
+                Some(libc::ELOOP) => io::Error::new(io::ErrorKind::InvalidInput, "リンクのフォルダはたどりません"),
+                Some(libc::ENOTDIR) => io::Error::new(io::ErrorKind::NotADirectory, "フォルダではありません"),
+                _ => err,
+            })?;
+        let id = id_of(&dir)?;
+        let real = std::fs::read_link(handle_path(&dir))?;
+        Ok((dir, id, Some(real)))
     }
 
-    pub(super) fn open_root(path: &Path) -> io::Result<(File, FileId, PathBuf)> {
-        let dir = open_dir(path).map_err(|err| {
-            if is_outside(&err) {
-                io::Error::new(io::ErrorKind::InvalidInput, "リンクのフォルダはたどりません")
-            } else {
-                err
+    #[cfg(test)]
+    thread_local! {
+        /// テスト用: `openat2` がない環境のふりをする
+        pub(super) static NO_OPENAT2: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    fn openat2(dir: &File, path: &CString, how: &libc::open_how) -> libc::c_long {
+        #[cfg(test)]
+        if NO_OPENAT2.with(|flag| flag.get()) {
+            unsafe { *libc::__errno_location() = libc::ENOSYS };
+            return -1;
+        }
+        unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                dir.as_raw_fd(),
+                path.as_ptr(),
+                how as *const libc::open_how,
+                std::mem::size_of::<libc::open_how>(),
+            )
+        }
+    }
+
+    /// 探すフォルダのハンドルを基準に、名前の並び `parts` を 1 回で開く（`parts` が空なら、探すフォルダそのもの）。
+    fn open_beneath(root: &Root, parts: &[OsString], flags: libc::c_int) -> io::Result<File> {
+        if parts.is_empty() {
+            return root.dir.try_clone();
+        }
+        let mut relative = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            let bytes = part.as_bytes();
+            if bytes.is_empty() || bytes == b"." || bytes == b".." || bytes.contains(&b'/') {
+                return Err(outside());
             }
-        })?;
-        let meta = dir.metadata()?;
-        let real = std::fs::read_link(handle_path(&dir))?;
-        Ok((dir, (meta.dev(), meta.ino()), real))
+            if i > 0 {
+                relative.push(b'/');
+            }
+            relative.extend_from_slice(bytes);
+        }
+        let relative = CString::new(relative).map_err(|_| outside())?;
+        let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+        how.flags = (flags | libc::O_NOFOLLOW | libc::O_CLOEXEC) as u64;
+        how.resolve = libc::RESOLVE_BENEATH | libc::RESOLVE_NO_SYMLINKS | libc::RESOLVE_NO_MAGICLINKS;
+        for _ in 0..RETRIES {
+            let fd = openat2(&root.dir, &relative, &how);
+            if fd >= 0 {
+                return Ok(unsafe { File::from_raw_fd(fd as libc::c_int) });
+            }
+            let err = io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(libc::EINTR) | Some(libc::EAGAIN) => continue,
+                // リンクを通る（ELOOP）・探すフォルダの下から出る（EXDEV）・途中がフォルダでない（ENOTDIR）
+                Some(libc::ELOOP) | Some(libc::EXDEV) | Some(libc::ENOTDIR) => return Err(outside()),
+                // openat2 がない・解決の指定に対応していない
+                Some(libc::ENOSYS) | Some(libc::E2BIG) | Some(libc::EINVAL) => return Err(unverifiable()),
+                _ => return Err(err),
+            }
+        }
+        Err(unverifiable())
     }
 
     fn open_dirs(root: &Root, dirs: &[OsString]) -> io::Result<File> {
-        let mut dir = root.dir.try_clone()?;
-        for name in dirs {
-            dir = open_dir(&handle_path(&dir).join(name))?;
-        }
-        Ok(dir)
+        open_beneath(root, dirs, libc::O_RDONLY | libc::O_DIRECTORY)
     }
 
-    pub(super) fn stat_child(root: &Root, dirs: &[OsString], name: &OsString) -> io::Result<Metadata> {
-        let dir = open_dirs(root, dirs)?;
-        std::fs::symlink_metadata(handle_path(&dir).join(name))
+    pub(super) fn stat_child(root: &Root, dirs: &[OsString], name: &OsString) -> io::Result<Info> {
+        let mut parts = dirs.to_vec();
+        parts.push(name.clone());
+        // 中身は開かない（O_PATH）。最後の名前がリンクなら、リンクそのものの属性になる
+        let file = open_beneath(root, &parts, libc::O_PATH)?;
+        Ok(Info::of(&file.metadata()?))
     }
 
     pub(super) fn open_file(root: &Root, parts: &[OsString]) -> io::Result<File> {
-        let (name, dirs) = parts.split_last().ok_or_else(outside)?;
-        let dir = open_dirs(root, dirs)?;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
-            .open(handle_path(&dir).join(name))
-            .map_err(link_as_outside)
+        if parts.is_empty() {
+            return Err(outside());
+        }
+        open_beneath(root, parts, libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY)
     }
 
-    pub(super) fn list(root: &Root, dirs: &[OsString]) -> io::Result<Vec<(OsString, Metadata)>> {
+    pub(super) fn list(root: &Root, dirs: &[OsString]) -> io::Result<Vec<(OsString, Info)>> {
         let dir = open_dirs(root, dirs)?;
         let mut entries = Vec::new();
         for entry in std::fs::read_dir(handle_path(&dir))? {
             let entry = entry?;
             // 列挙したハンドルを基準に、リンクをたどらずに調べる
-            entries.extend(listed(entry.file_name(), entry.metadata())?);
+            entries.extend(listed(entry.file_name(), entry.metadata().map(|meta| Info::of(&meta)))?);
+        }
+        // 列挙したあとも、同じフォルダが探すフォルダの下の同じ名前の並びにある（列挙のあいだに外へ移されていない）
+        if id_of(&open_dirs(root, dirs)?)? != id_of(&dir)? {
+            return Err(outside());
         }
         Ok(entries)
     }
 }
 
-/// Windows: 開いたファイル・フォルダの実際の場所（`GetFinalPathNameByHandleW`）が、
-/// 探すフォルダのいまの実際の場所の下の、同じ名前の並びと一致するかを確かめる（途中にリンクがあると一致しない）。
+/// Windows: 探すフォルダのハンドルを基準に、名前を 1 つずつ `NtCreateFile` で開く（親のハンドルからの相対の名前で開くので、
+/// 開いたものは、その親のフォルダの中にある。パスの文字列や大文字と小文字の比べ方には頼らない）。
+/// リンクは開かずに、リンクそのものを開いて見分ける。途中のフォルダは、名前を変える・移すことを許さずに開いておき、
+/// 開き終えるまで、探すフォルダの外へ移されないようにする。
 #[cfg(windows)]
 mod sys {
     use super::*;
-    use std::os::windows::ffi::OsStringExt;
-    use std::os::windows::fs::OpenOptionsExt;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, GetFinalPathNameByHandleW, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, VOLUME_NAME_DOS,
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        NtCreateFile, FILE_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
     };
+    use windows_sys::Win32::Foundation::{
+        RtlNtStatusToDosError, ERROR_DIRECTORY, ERROR_NO_MORE_FILES, HANDLE, OBJ_CASE_INSENSITIVE, UNICODE_STRING,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, FileIdInfo, GetFileInformationByHandle,
+        GetFileInformationByHandleEx, GetFinalPathNameByHandleW, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO,
+        FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, SYNCHRONIZE, VOLUME_NAME_DOS,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
-    /// フォルダそのものを開く（リンクなら、リンクの先ではなくリンクそのものを開く）。
-    fn open_dir(path: &Path) -> io::Result<File> {
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
-    }
+    /// 再解析ポイントの種類のうち、別の場所を指すもの（シンボリックリンク・ジャンクション）の印。
+    const NAME_SURROGATE: u32 = 0x2000_0000;
+    /// FILETIME（1601 年からの 100 ナノ秒）と、1970 年からのミリ秒の差。
+    const EPOCH_DIFFERENCE_MS: i64 = 11_644_473_600_000;
 
     fn file_id(file: &File) -> io::Result<FileId> {
+        let mut info: FILE_ID_INFO = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle() as HANDLE,
+                FileIdInfo,
+                (&mut info as *mut FILE_ID_INFO).cast(),
+                std::mem::size_of::<FILE_ID_INFO>() as u32,
+            )
+        };
+        if ok != 0 {
+            return Ok((info.VolumeSerialNumber, u128::from_le_bytes(info.FileId.Identifier)));
+        }
+        // 128 ビットのファイル ID を返さないファイルシステム
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) } == 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok((u64::from(info.dwVolumeSerialNumber), (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)))
+        Ok((u64::from(info.dwVolumeSerialNumber), (u128::from(info.nFileIndexHigh) << 32) | u128::from(info.nFileIndexLow)))
     }
 
     fn final_path(file: &File) -> io::Result<PathBuf> {
         let mut buf = vec![0u16; 512];
         loop {
             let len = unsafe {
-                GetFinalPathNameByHandleW(file.as_raw_handle(), buf.as_mut_ptr(), buf.len() as u32, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS)
+                GetFinalPathNameByHandleW(file.as_raw_handle() as HANDLE, buf.as_mut_ptr(), buf.len() as u32, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS)
             } as usize;
             if len == 0 {
                 return Err(io::Error::last_os_error());
@@ -461,22 +641,14 @@ mod sys {
         }
     }
 
-    /// 開いたものが、探すフォルダのいまの実際の場所から、名前の並び `parts` で届く場所にあるか。
-    fn located(root: &Root, opened: &File, parts: &[OsString]) -> io::Result<()> {
-        let expected = parts.iter().fold(final_path(&root.dir)?, |path, part| path.join(part));
-        if same_place(&final_path(opened)?, &expected) {
-            Ok(())
-        } else {
-            Err(outside())
-        }
+    fn is_reparse_point(meta: &Metadata) -> bool {
+        meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
 
-    fn join(root: &Root, parts: &[OsString]) -> PathBuf {
-        parts.iter().fold(root.path.clone(), |path, part| path.join(part))
-    }
-
-    pub(super) fn open_root(path: &Path) -> io::Result<(File, FileId, PathBuf)> {
-        let dir = open_dir(path)?;
+    pub(super) fn open_root(path: &Path) -> io::Result<(File, FileId, Option<PathBuf>)> {
+        let open = |flags: u32| std::fs::OpenOptions::new().read(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS | flags).open(path);
+        // フォルダそのものを開く（リンクなら、リンクの先ではなくリンクそのものを開く）
+        let dir = open(FILE_FLAG_OPEN_REPARSE_POINT)?;
         let meta = dir.metadata()?;
         if traits_of(&meta).link {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "リンクのフォルダはたどりません"));
@@ -484,45 +656,176 @@ mod sys {
         if !meta.is_dir() {
             return Err(io::Error::new(io::ErrorKind::NotADirectory, "フォルダではありません"));
         }
+        // 別の場所を指さない再解析ポイント（OneDrive のフォルダなど）は、中身を列挙できるよう、ふつうに開き直す。
+        // 開き直すあいだにリンクに替わっていないことを、識別子で確かめる
+        let dir = if is_reparse_point(&meta) {
+            let again = open(0)?;
+            if file_id(&again)? != file_id(&dir)? {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "開いているあいだに、フォルダが替わりました"));
+            }
+            again
+        } else {
+            dir
+        };
         let id = file_id(&dir)?;
-        let real = final_path(&dir)?;
+        // ネットワークのフォルダなどで実際の場所を取れないときは、識別子だけで確かめる
+        let real = final_path(&dir).ok();
         Ok((dir, id, real))
     }
 
-    /// 中のフォルダを開き、リンクでないフォルダで、探すフォルダの中にあると確かめる。
-    fn open_dirs(root: &Root, dirs: &[OsString]) -> io::Result<File> {
-        let dir = open_dir(&join(root, dirs))?;
-        let meta = dir.metadata()?;
-        if traits_of(&meta).link || !meta.is_dir() {
+    /// 親のフォルダのハンドルを基準に、名前 `name`（区切りを含まない 1 つの名前）を開く。
+    fn nt_open(parent: &File, name: &OsStr, access: u32, share: u32, options: u32) -> io::Result<File> {
+        let wide: Vec<u16> = name.encode_wide().collect();
+        if wide.is_empty() || wide.contains(&u16::from(b'\\')) || wide.contains(&u16::from(b'/')) || wide.len() * 2 > usize::from(u16::MAX) {
             return Err(outside());
         }
-        located(root, &dir, dirs)?;
-        Ok(dir)
+        let bytes = (wide.len() * 2) as u16;
+        let object_name = UNICODE_STRING { Length: bytes, MaximumLength: bytes, Buffer: wide.as_ptr() as *mut u16 };
+        let attributes = OBJECT_ATTRIBUTES {
+            Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+            RootDirectory: parent.as_raw_handle() as HANDLE,
+            ObjectName: &object_name,
+            // 名前の探し方は、エクスプローラーなどのふつうの開き方（CreateFile）と同じにする
+            // （大文字と小文字を区別するフォルダでは、OS が区別する）
+            Attributes: OBJ_CASE_INSENSITIVE,
+            SecurityDescriptor: std::ptr::null(),
+            SecurityQualityOfService: std::ptr::null(),
+        };
+        let mut handle: HANDLE = std::ptr::null_mut();
+        let mut status_block: IO_STATUS_BLOCK = unsafe { std::mem::zeroed() };
+        let status = unsafe {
+            NtCreateFile(
+                &mut handle,
+                access | SYNCHRONIZE,
+                &attributes,
+                &mut status_block,
+                std::ptr::null(),
+                0,
+                share,
+                FILE_OPEN,
+                options | FILE_SYNCHRONOUS_IO_NONALERT,
+                std::ptr::null(),
+                0,
+            )
+        };
+        if status < 0 {
+            let code = unsafe { RtlNtStatusToDosError(status) };
+            return Err(if code == ERROR_DIRECTORY { outside() } else { io::Error::from_raw_os_error(code as i32) });
+        }
+        Ok(unsafe { File::from_raw_handle(handle as _) })
     }
 
-    pub(super) fn stat_child(root: &Root, dirs: &[OsString], name: &OsString) -> io::Result<Metadata> {
-        let path = join(root, dirs).join(name);
-        open_dirs(root, dirs)?;
-        std::fs::symlink_metadata(path)
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Want {
+        /// 中をたどる・列挙するフォルダ（名前を変える・移すことを許さない）
+        Dir,
+        /// 中身を読むファイル
+        Data,
+        /// 属性だけ（リンクなら、リンクそのものの属性）
+        Attributes,
+    }
+
+    fn open_child(parent: &File, name: &OsStr, want: Want) -> io::Result<File> {
+        let (access, share, options) = match want {
+            Want::Dir => (FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_DIRECTORY_FILE),
+            Want::Data => (FILE_READ_DATA | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0),
+            Want::Attributes => (FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0),
+        };
+        // リンクをたどらずに開く（リンクなら、リンクそのものが開く）
+        let first = nt_open(parent, name, access, share, options | FILE_OPEN_REPARSE_POINT)?;
+        if want == Want::Attributes {
+            return Ok(first);
+        }
+        let meta = first.metadata()?;
+        let traits = traits_of(&meta);
+        if traits.link || (want == Want::Dir && !meta.is_dir()) {
+            return Err(outside());
+        }
+        // クラウドにだけあるファイルは、取り寄せないよう、開き直さない（中身は読まない）
+        if !is_reparse_point(&meta) || traits.online_only {
+            return Ok(first);
+        }
+        // 別の場所を指さない再解析ポイント（OneDrive の同期済みのファイルなど）は、ふつうに開き直して、中身を読む。
+        // 開き直すあいだにリンクに替わっていないことを、識別子で確かめる
+        let again = nt_open(parent, name, access, share, options)?;
+        if file_id(&again)? != file_id(&first)? {
+            return Err(outside());
+        }
+        Ok(again)
+    }
+
+    /// 名前の並び `dirs` のフォルダを、探すフォルダのハンドルから 1 つずつ開く。開いたフォルダは、使い終えるまで持っておく。
+    fn open_chain(root: &Root, dirs: &[OsString]) -> io::Result<Vec<File>> {
+        let mut chain: Vec<File> = Vec::new();
+        for name in dirs {
+            let dir = open_child(chain.last().unwrap_or(&root.dir), name, Want::Dir)?;
+            chain.push(dir);
+        }
+        Ok(chain)
+    }
+
+    pub(super) fn stat_child(root: &Root, dirs: &[OsString], name: &OsString) -> io::Result<Info> {
+        let chain = open_chain(root, dirs)?;
+        let file = open_child(chain.last().unwrap_or(&root.dir), name, Want::Attributes)?;
+        Ok(Info::of(&file.metadata()?))
     }
 
     pub(super) fn open_file(root: &Root, parts: &[OsString]) -> io::Result<File> {
-        let file = File::open(join(root, parts))?;
-        located(root, &file, parts)?;
-        Ok(file)
+        let (name, dirs) = parts.split_last().ok_or_else(outside)?;
+        let chain = open_chain(root, dirs)?;
+        open_child(chain.last().unwrap_or(&root.dir), name, Want::Data)
     }
 
-    pub(super) fn list(root: &Root, dirs: &[OsString]) -> io::Result<Vec<(OsString, Metadata)>> {
-        let dir = open_dirs(root, dirs)?;
+    /// 列挙で得た属性（`std` の `Metadata` と同じ決め方にする）。
+    fn info_of_entry(entry: &FILE_ID_BOTH_DIR_INFO) -> Info {
+        let attributes = entry.FileAttributes;
+        // 再解析ポイントの種類は、列挙では EaSize の場所に入る
+        let link = attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 && entry.EaSize & NAME_SURROGATE != 0;
+        let dir = !link && attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+        let modified = (entry.LastWriteTime / 10_000 - EPOCH_DIFFERENCE_MS).max(0);
+        Info { dir, file: !link && !dir, len: entry.EndOfFile.max(0) as u64, modified, traits: traits(link, attributes) }
+    }
+
+    pub(super) fn list(root: &Root, dirs: &[OsString]) -> io::Result<Vec<(OsString, Info)>> {
+        let chain = open_chain(root, dirs)?;
+        let dir = chain.last().unwrap_or(&root.dir);
+        let mut buf = vec![0u64; 8 * 1024];
+        let mut class = FileIdBothDirectoryRestartInfo;
         let mut entries = Vec::new();
-        for entry in std::fs::read_dir(join(root, dirs))? {
-            let entry = entry?;
-            entries.extend(listed(entry.file_name(), entry.metadata())?);
-        }
-        // 列挙したあとも、同じフォルダが同じ場所にある（列挙のあいだに、別のフォルダに替わっていない）
-        located(root, &dir, dirs)?;
-        if file_id(&open_dir(&join(root, dirs))?)? != file_id(&dir)? {
-            return Err(outside());
+        loop {
+            let ok = unsafe {
+                GetFileInformationByHandleEx(dir.as_raw_handle() as HANDLE, class, buf.as_mut_ptr().cast(), (buf.len() * 8) as u32)
+            };
+            if ok == 0 {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+                    break;
+                }
+                return Err(err);
+            }
+            class = FileIdBothDirectoryInfo;
+            let base = buf.as_ptr().cast::<u8>();
+            let mut offset = 0usize;
+            loop {
+                let entry = unsafe { std::ptr::read_unaligned(base.add(offset).cast::<FILE_ID_BOTH_DIR_INFO>()) };
+                let len = entry.FileNameLength as usize / 2;
+                let mut name = vec![0u16; len];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        base.add(offset + std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileName)),
+                        name.as_mut_ptr().cast::<u8>(),
+                        len * 2,
+                    );
+                }
+                let dot = u16::from(b'.');
+                if name != [dot] && name != [dot, dot] {
+                    entries.push((OsString::from_wide(&name), info_of_entry(&entry)));
+                }
+                if entry.NextEntryOffset == 0 {
+                    break;
+                }
+                offset += entry.NextEntryOffset as usize;
+            }
         }
         Ok(entries)
     }
@@ -537,11 +840,11 @@ mod sys {
         io::Error::new(io::ErrorKind::Unsupported, "この OS では資料の索引を作れません")
     }
 
-    pub(super) fn open_root(_: &Path) -> io::Result<(File, FileId, PathBuf)> {
+    pub(super) fn open_root(_: &Path) -> io::Result<(File, FileId, Option<PathBuf>)> {
         Err(unsupported())
     }
 
-    pub(super) fn stat_child(_: &Root, _: &[OsString], _: &OsString) -> io::Result<Metadata> {
+    pub(super) fn stat_child(_: &Root, _: &[OsString], _: &OsString) -> io::Result<Info> {
         Err(unsupported())
     }
 
@@ -549,7 +852,7 @@ mod sys {
         Err(unsupported())
     }
 
-    pub(super) fn list(_: &Root, _: &[OsString]) -> io::Result<Vec<(OsString, Metadata)>> {
+    pub(super) fn list(_: &Root, _: &[OsString]) -> io::Result<Vec<(OsString, Info)>> {
         Err(unsupported())
     }
 }
@@ -559,6 +862,7 @@ mod sys {
 pub fn walk(root: &Path, limits: Limits) -> io::Result<Walked> {
     Ok(Root::open(root)?.walk(limits))
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -706,7 +1010,7 @@ mod tests {
         let root = dir.path().join("上").join("共有資料");
         touch(&root.join("a.txt"));
         let opened = Root::open(&root).unwrap();
-        let real = opened.real().to_path_buf();
+        let place = opened.place();
 
         std::fs::rename(dir.path().join("上"), dir.path().join("退避")).unwrap();
         std::os::unix::fs::symlink(outside.path(), dir.path().join("上")).unwrap();
@@ -717,7 +1021,8 @@ mod tests {
         assert_eq!(names, ["a.txt"]);
 
         let reopened = Root::open(&root).unwrap();
-        assert!(!same_place(reopened.real(), &real), "開き直すと、別の場所にあると分かる");
+        assert!(!place.admits(&reopened), "開き直すと、足したときと別のフォルダだと分かる");
+        assert!(place.admits(&opened));
         assert_ne!(reopened.id(), opened.id());
     }
 
@@ -797,7 +1102,7 @@ mod tests {
         let root = dir.path().join("上").join("共有資料");
         touch(&root.join("a.txt"));
         let opened = Root::open(&root).unwrap();
-        let real = opened.real().to_path_buf();
+        let place = opened.place();
         assert_eq!(bytes(opened.read(&root.join("a.txt"), MAX_FILE_BYTES)).unwrap(), "経費".as_bytes());
 
         let renamed = std::fs::rename(dir.path().join("上"), dir.path().join("退避")).is_ok();
@@ -822,7 +1127,7 @@ mod tests {
             assert!(opened.walk(Limits::default()).files.is_empty());
         }
         let reopened = Root::open(&root).unwrap();
-        assert!(!same_place(reopened.real(), &real), "開き直すと、別の場所にあると分かる");
+        assert!(!place.admits(&reopened), "開き直すと、足したときと別のフォルダだと分かる");
     }
 
     // [IDX-027]
@@ -881,6 +1186,130 @@ mod tests {
         let limited = walk(root, Limits { max_files: 3, ..Limits::default() }).unwrap();
         assert_eq!(limited.files.len(), 3);
         assert!(limited.truncated);
+    }
+
+    /// 足したときの実体は、同じフォルダと、同じ場所で作り直したフォルダを認め、別の場所のフォルダは認めない。
+    /// 設定に保存しても損なわない（大きな識別子も、実際の場所も）。
+    // [IDX-027][IDX-010]
+    #[test]
+    fn the_registered_place_admits_only_the_same_folder_or_one_recreated_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("資料");
+        touch(&root.join("a.txt"));
+        let place = Root::open(&root).unwrap().place();
+        assert!(place.admits(&Root::open(&root).unwrap()), "同じフォルダ");
+
+        let stored = serde_json::to_string(&place).unwrap();
+        let loaded: Place = serde_json::from_str(&stored).unwrap();
+        assert_eq!(loaded, place, "保存して読み直しても同じ");
+        let big = Place { real: None, id: (u64::MAX, u128::MAX) };
+        assert_eq!(serde_json::from_str::<Place>(&serde_json::to_string(&big).unwrap()).unwrap(), big);
+
+        // 別の場所の、同じ名前のフォルダは認めない
+        let other = dir.path().join("別").join("資料");
+        touch(&other.join("a.txt"));
+        assert!(!place.admits(&Root::open(&other).unwrap()));
+
+        // 同じ場所で作り直したフォルダは認める（IDX-010）
+        std::fs::rename(&root, dir.path().join("退避")).unwrap();
+        touch(&root.join("a.txt"));
+        let recreated = Root::open(&root).unwrap();
+        assert_ne!(recreated.id(), place.id());
+        assert!(place.admits(&recreated));
+    }
+
+    /// 開いたあとで、中のフォルダが探すフォルダの外へ移されたら、そのフォルダの中身は読まない
+    /// （読むたびに、探すフォルダから名前の並び全体を解決し直す）。
+    // [IDX-027]
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_subfolder_moved_outside_after_listing_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("資料");
+        touch(&root.join("下").join("b.txt"));
+        let outside = dir.path().join("外");
+        std::fs::create_dir_all(&outside).unwrap();
+        let opened = Root::open(&root).unwrap();
+        let walked = opened.walk(Limits::default());
+        assert_eq!(names(&walked, &root), ["下/b.txt"]);
+
+        std::fs::rename(root.join("下"), outside.join("下")).unwrap();
+        for file in &walked.files {
+            assert!(bytes(opened.read(&file.path, MAX_FILE_BYTES)).is_none(), "外へ移したフォルダの中身は読まない");
+            assert!(!opened.contains_file(&file.path));
+        }
+        // 途中の名前が探すフォルダの中を指すリンクでも、たどらない
+        std::os::unix::fs::symlink("../外/下", root.join("下")).unwrap();
+        assert!(matches!(opened.read(&root.join("下").join("b.txt"), MAX_FILE_BYTES), Content::Outside));
+        std::fs::remove_file(root.join("下")).unwrap();
+        std::fs::create_dir(root.join("内")).unwrap();
+        std::fs::write(root.join("内").join("c.txt"), "経費").unwrap();
+        std::os::unix::fs::symlink("内", root.join("別名")).unwrap();
+        assert!(matches!(opened.read(&root.join("別名").join("c.txt"), MAX_FILE_BYTES), Content::Outside));
+        assert_eq!(bytes(opened.read(&root.join("内").join("c.txt"), MAX_FILE_BYTES)).unwrap(), "経費".as_bytes());
+    }
+
+    /// 探すフォルダの中にあると OS で確かめられない環境（openat2 がない）では、中身を読まず、列挙もしない。
+    // [IDX-027]
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nothing_is_read_when_the_folder_boundary_cannot_be_verified() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        touch(&root.join("a.txt"));
+        touch(&root.join("下").join("b.txt"));
+        let opened = Root::open(root).unwrap();
+        sys::NO_OPENAT2.with(|flag| flag.set(true));
+        let read = opened.read(&root.join("a.txt"), MAX_FILE_BYTES);
+        let nested = opened.read(&root.join("下").join("b.txt"), MAX_FILE_BYTES);
+        let contains = opened.contains_file(&root.join("a.txt"));
+        let walked = opened.walk(Limits::default());
+        sys::NO_OPENAT2.with(|flag| flag.set(false));
+        assert!(bytes(read).is_none(), "中身を読まない");
+        assert!(bytes(nested).is_none());
+        assert!(!contains);
+        assert_eq!(names(&walked, root), ["a.txt"], "探すフォルダそのものの列挙だけ（開いたハンドルなので確かめられる）");
+        assert_eq!(walked.unreadable, [root.join("下")], "中のフォルダは読めなかったことにする（索引の行は消さない）");
+        assert_eq!(bytes(opened.read(&root.join("a.txt"), MAX_FILE_BYTES)).unwrap(), "経費".as_bytes());
+    }
+
+    /// 大文字と小文字を区別するフォルダでは、名前が大文字と小文字だけ違うフォルダとファイルを、別のものとして扱う
+    /// （開いたものの場所を、パスの文字列で比べない）。
+    // [IDX-027]
+    #[cfg(windows)]
+    #[test]
+    fn names_that_differ_only_in_case_are_different_places() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("区別");
+        std::fs::create_dir(&parent).unwrap();
+        let enabled = std::process::Command::new("fsutil.exe")
+            .args(["file", "setCaseSensitiveInfo"])
+            .arg(&parent)
+            .arg("enable")
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !enabled {
+            eprintln!("大文字と小文字を区別するフォルダを作れない環境のため、確かめません");
+            return;
+        }
+        let upper = parent.join("Docs");
+        let lower = parent.join("docs");
+        std::fs::create_dir(&upper).unwrap();
+        std::fs::create_dir(&lower).unwrap();
+        std::fs::write(upper.join("a.txt"), "経費").unwrap();
+        std::fs::write(lower.join("a.txt"), "社外秘").unwrap();
+        std::fs::create_dir(upper.join("Sub")).unwrap();
+        std::fs::create_dir(upper.join("sub")).unwrap();
+        std::fs::write(upper.join("Sub").join("b.txt"), "経費").unwrap();
+        std::fs::write(upper.join("sub").join("b.txt"), "予算").unwrap();
+
+        let opened = Root::open(&upper).unwrap();
+        assert!(!opened.place().admits(&Root::open(&lower).unwrap()), "大文字と小文字だけ違うフォルダは、別の場所");
+        assert_eq!(bytes(opened.read(&upper.join("a.txt"), MAX_FILE_BYTES)).unwrap(), "経費".as_bytes());
+        assert_eq!(bytes(opened.read(&upper.join("Sub").join("b.txt"), MAX_FILE_BYTES)).unwrap(), "経費".as_bytes());
+        assert_eq!(bytes(opened.read(&upper.join("sub").join("b.txt"), MAX_FILE_BYTES)).unwrap(), "予算".as_bytes());
+        let walked = opened.walk(Limits::default());
+        assert_eq!(names(&walked, &upper), ["a.txt", "Sub/b.txt", "sub/b.txt"]);
     }
 
     // [IDX-010]

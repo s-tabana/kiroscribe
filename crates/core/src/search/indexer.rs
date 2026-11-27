@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::extract::{extract_within, Extracted};
 use super::store::{remove_index_files, stamp_of_file, SearchIndex};
-use super::walk::{is_online_only, is_outside, same_place, FileEntry, FileId, Limits, Root};
+use super::walk::{is_online_only, is_outside, FileEntry, FileId, Limits, Place, Root};
 use crate::time::now_ms;
 
 /// 見張れないフォルダ（ネットワークのドライブなど）を見直す間隔。
@@ -54,6 +54,28 @@ pub struct SearchFolder {
     /// 「中身を送らない」
     #[serde(default)]
     pub no_content: bool,
+    /// 足したときに開いたフォルダの実体。これと同じフォルダ（同じ場所で作り直したものを含む）だけを索引に入れる。
+    /// ない（実体を記録する前の設定・読めない値）ときは、利用者が選び直すまで、中身を読まない
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "place_or_none")]
+    pub place: Option<Place>,
+}
+
+impl SearchFolder {
+    /// 選んだフォルダを開き、その実体を記録した探すフォルダにする。
+    /// 文字に直せない名前（損なわずに保存できない）・リンク・フォルダでないものは、エラー。
+    pub fn register(path: &Path) -> std::io::Result<SearchFolder> {
+        let text = path.to_str().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "文字に直せない名前を含むフォルダは追加できません")
+        })?;
+        let root = Root::open(path)?;
+        Ok(SearchFolder { path: text.to_string(), no_content: false, place: Some(root.place()) })
+    }
+}
+
+/// 保存した実体を読む。読めない値は、記録していないものとして扱う（選び直すまで、中身を読まない）。
+fn place_or_none<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Place>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +103,8 @@ pub struct FolderStatus {
     pub missing: bool,
     /// ファイルが多く、一部だけを索引に入れている
     pub truncated: bool,
+    /// 足したときのフォルダの実体を記録していないため、選び直すまで索引に入れない
+    pub unconfirmed: bool,
 }
 
 /// 索引の状態（設定の欄に表示する）。
@@ -237,7 +261,7 @@ impl Worker {
             missing: HashSet::new(),
             erasure: Erasure::Unknown,
             last_purge: Instant::now(),
-            boundaries: HashMap::new(),
+            seen: HashMap::new(),
             changes: 0,
             incomplete: HashSet::new(),
         }
@@ -378,8 +402,8 @@ struct Worker {
     /// 索引を消し終えたか
     erasure: Erasure,
     last_purge: Instant,
-    /// 探すフォルダの境界（最初に開いたときの実際の場所と識別子）。一覧から外すまで覚えておく
-    boundaries: HashMap<PathBuf, Boundary>,
+    /// 探すフォルダを最後に調べたときの識別子（同じ場所で作り直されたら、すべて読み直す）。一覧から外すまで覚えておく
+    seen: HashMap<PathBuf, FileId>,
     /// 索引に書いた回数（変わったファイルがあったときだけ、更新した時刻を進める）
     changes: u64,
     /// 中を読めなかったフォルダがあり、調べ切れていないフォルダ（見直しの間隔で調べ直す）
@@ -418,14 +442,6 @@ enum Erasure {
     Erased,
     /// 消せなかった（あとで消し直す）
     Pending,
-}
-
-/// 探すフォルダの境界: 最初に開いたときの実際の場所と識別子。
-/// 上のフォルダがリンクに替わって、別の場所の同じ名前のフォルダを指すようになったら、実際の場所が変わる。
-#[derive(Debug, Clone)]
-struct Boundary {
-    real: PathBuf,
-    id: FileId,
 }
 
 /// 索引に入れる中身を読む。クラウドにだけあるファイルは、ダウンロードさせないよう読まない（読む直前にも確かめる）。
@@ -528,7 +544,7 @@ impl Worker {
     /// 見つからなかったフォルダが戻った、のどれかなら反映する（ネットワークのドライブは、見直しの間隔で調べる）。
     fn check_roots(&mut self) {
         let mut changed = BTreeSet::new();
-        for root in self.folders().iter().map(|folder| PathBuf::from(&folder.path)) {
+        for root in self.folders().iter().filter(|folder| folder.place.is_some()).map(|folder| PathBuf::from(&folder.path)) {
             if is_network_path(&root) {
                 continue;
             }
@@ -674,7 +690,7 @@ impl Worker {
         self.truncated.retain(|p| listed.contains(p.to_string_lossy().as_ref()));
         self.missing.retain(|p| listed.contains(p.to_string_lossy().as_ref()));
         self.incomplete.retain(|p| listed.contains(p.to_string_lossy().as_ref()));
-        self.boundaries.retain(|p, _| listed.contains(p.to_string_lossy().as_ref()));
+        self.seen.retain(|p, _| listed.contains(p.to_string_lossy().as_ref()));
         let Some(index) = self.open_index() else { return };
         let mut removed = 0;
         for folder in index.folders().unwrap_or_default() {
@@ -714,13 +730,28 @@ impl Worker {
 
     /// 1 つのフォルダを調べて索引に反映する。途中でやめたら false。
     fn scan_folder(&mut self, root: &Path, all: bool, generation: u64, done: &mut usize, total: &mut usize) -> bool {
+        let Some(place) = self.place_of(root) else {
+            // 足したときの実体を記録していない（実体を記録する前の設定）。どこを読んだか確かめられないので、
+            // それまでの索引も消し、選び直すまで読まない
+            self.missing.remove(root);
+            self.truncated.remove(root);
+            self.incomplete.remove(root);
+            if let Some(index) = self.open_index() {
+                if index.count_folder(root).unwrap_or(0) > 0 && index.remove_folder(root).is_ok() {
+                    self.changes += 1;
+                }
+            }
+            return true;
+        };
         let Some(opened) = self.open_root(root) else {
             // 見つからないとき・別の場所を指すようになったときは、索引を消さずに残す
             self.missing.insert(root.to_path_buf());
             return true;
         };
         // 同じ場所で別のフォルダに替わっていたら、名前・大きさ・日時が同じファイルも読み直す
-        let replaced = self.boundaries.get(root).is_some_and(|boundary| boundary.id != opened.id());
+        // （初めて調べるときは、足したときの実体と比べる。アプリを起動し直したあとも）
+        let previous = self.seen.get(root).copied().unwrap_or(place.id());
+        let replaced = previous != opened.id();
         let all = all || replaced;
         let walked = opened.walk(self.limits);
         self.missing.remove(root);
@@ -773,25 +804,22 @@ impl Worker {
             *done += 1;
             self.emit(generation, IndexState::Building, (*done, *total), false, None);
         }
-        if let Some(boundary) = self.boundaries.get_mut(root) {
-            boundary.id = opened.id();
-        }
+        self.seen.insert(root.to_path_buf(), opened.id());
         true
     }
 
-    /// 探すフォルダを開き、境界（最初に開いたときの実際の場所）と同じ場所にあるかを確かめる。
+    /// 一覧のフォルダの、足したときの実体（記録していなければ None）。
+    fn place_of(&self, root: &Path) -> Option<Place> {
+        self.shared.lock().unwrap().folders.iter().find(|folder| Path::new(&folder.path) == root).and_then(|folder| folder.place.clone())
+    }
+
+    /// 探すフォルダを開き、足したときの実体と同じフォルダか（同じ場所で作り直したものを含む）を確かめる。
     /// 上のフォルダがリンクに替わり、別の場所の同じ名前のフォルダを指すようになったら None（見つからないものとして扱う）。
-    /// 同じ場所で作り直されたフォルダは開く（識別子が変わったかは、呼び出し側が境界と比べる）。
+    /// 足したときの実体を記録していないフォルダも開かない。
     fn open_root(&mut self, root: &Path) -> Option<Root> {
+        let place = self.place_of(root)?;
         let opened = Root::open(root).ok()?;
-        match self.boundaries.get(root) {
-            Some(boundary) if !same_place(&boundary.real, opened.real()) => None,
-            Some(_) => Some(opened),
-            None => {
-                self.boundaries.insert(root.to_path_buf(), Boundary { real: opened.real().to_path_buf(), id: opened.id() });
-                Some(opened)
-            }
-        }
+        place.admits(&opened).then_some(opened)
     }
 
     /// 見張りの知らせ・見直しで届いたパスを、それを含むフォルダごとに反映する。
@@ -822,6 +850,10 @@ impl Worker {
             while let Some(root) = roots.pop_first() {
                 if self.stale(generation) {
                     return;
+                }
+                if self.place_of(&root).is_none() {
+                    // 足したときの実体を記録していない（選び直すまで読まない）
+                    continue;
                 }
                 let Some(opened) = self.open_root(&root) else {
                     // ドライブが外れた・フォルダが移った・フォルダそのものがリンクに替わった。
@@ -938,7 +970,8 @@ impl Worker {
         let config = notify::Config::default().with_follow_symlinks(false);
         self.watcher = <notify::RecommendedWatcher as notify::Watcher>::new(handler, config).ok();
         self.watched.clear();
-        self.polled = folders.iter().map(|folder| PathBuf::from(&folder.path)).collect();
+        // 足したときの実体を記録していないフォルダは、見張らず、見直さない（選び直すまで読まない）
+        self.polled = folders.iter().filter(|folder| folder.place.is_some()).map(|folder| PathBuf::from(&folder.path)).collect();
         // 調べ始める前なので、見張りに移したフォルダは、このあとすべて調べる
         let _ = self.rewatch();
         self.last_poll = Instant::now();
@@ -1005,6 +1038,7 @@ impl Worker {
                     files: index.and_then(|i| i.count_folder(&root).ok()).unwrap_or(0),
                     missing: enabled && self.missing.contains(&root),
                     truncated: enabled && self.truncated.contains(&root),
+                    unconfirmed: folder.place.is_none(),
                 }
             })
             .collect();
@@ -1074,6 +1108,7 @@ fn list_folders(shared: &mut Shared) {
                 files: before.map_or(0, |row| row.files),
                 missing: before.is_some_and(|row| row.missing),
                 truncated: before.is_some_and(|row| row.truncated),
+                unconfirmed: folder.place.is_none(),
             }
         })
         .collect();
@@ -1175,7 +1210,7 @@ mod tests {
         let root = dir.path().join("資料");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.txt"), "経費").unwrap();
-        let folders = vec![SearchFolder { path: root.to_string_lossy().to_string(), no_content: false }];
+        let folders = vec![SearchFolder::register(&root).unwrap()];
         let index_path = dir.path().join("data").join(INDEX_FILE_FOR_TEST);
         let seen = Arc::new(Mutex::new(Vec::new()));
         let state = shared(false, 1);
