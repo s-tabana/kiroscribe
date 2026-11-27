@@ -1883,3 +1883,32 @@ kbd {
 .popup-stop {
   color: var(--rec);
 }
+
+/* ---------- 文字起こしの区切り（録音の回） ---------- */
+
+.transcript-break {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+
+.transcript-break::before,
+.transcript-break::after {
+  flex: 1;
+  height: 1px;
+  content: "";
+  background: var(--line);
+}
+
+.resume-modal {
+  width: min(500px, 100%);
+}
+
+.resume-modal .modal-body p {
+  margin: 0 0 10px;
+  line-height: 1.7;
+}

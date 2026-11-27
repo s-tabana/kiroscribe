@@ -25,6 +25,7 @@ import type {
   ReleaseNotes,
   Segment,
   Settings,
+  TranscriptBreak,
   UpdateStatus,
 } from "./types";
 import { createMemoryBackend } from "./memoryBackend";
@@ -74,6 +75,8 @@ export interface Backend {
   // ---- 録音・文字起こし ----
   listAudioDevices(): Promise<AudioDevice[]>;
   listSegments(noteId: string): Promise<Segment[]>;
+  /** 文字起こしの区切り（開始時刻順）。区切りのないノートは空 */
+  listTranscriptBreaks(noteId: string): Promise<TranscriptBreak[]>;
   getRecordingStatus(): Promise<RecordingStatus>;
   startRecording(noteId: string): Promise<RecordingStatus>;
   pauseRecording(): Promise<RecordingStatus>;
@@ -82,6 +85,8 @@ export interface Backend {
   stopRecording(): Promise<RecordingStatus>;
   onRecordingStatus(cb: (status: RecordingStatus) => void): Unsubscribe;
   onSegment(cb: (segment: Segment) => void): Unsubscribe;
+  /** 文字起こしのあるノートで録音が始まり、区切りが付いた */
+  onTranscriptBreak(cb: (added: TranscriptBreak) => void): Unsubscribe;
   onLevel(cb: (event: LevelEvent) => void): Unsubscribe;
   onRecordingError(cb: (event: RecordingErrorEvent) => void): Unsubscribe;
   // ---- AI 議事録・チャット ----
@@ -191,6 +196,7 @@ export function createTauriBackend(): Backend {
 
     listAudioDevices: () => invoke("list_audio_devices"),
     listSegments: (noteId) => invoke("list_segments", { noteId }),
+    listTranscriptBreaks: (noteId) => invoke("list_transcript_breaks", { noteId }),
     getRecordingStatus: () => invoke("get_recording_status"),
     startRecording: (noteId) => invoke("start_recording", { noteId }),
     pauseRecording: () => invoke("pause_recording"),
@@ -198,6 +204,7 @@ export function createTauriBackend(): Backend {
     stopRecording: () => invoke("stop_recording"),
     onRecordingStatus: (cb) => subscribe("recording-status", cb),
     onSegment: (cb) => subscribe("transcript-segment", cb),
+    onTranscriptBreak: (cb) => subscribe("transcript-break", cb),
     onLevel: (cb) => subscribe("audio-level", cb),
     onRecordingError: (cb) => subscribe("recording-error", cb),
     enhanceNote: (noteId) => invoke("enhance_note", { noteId }),

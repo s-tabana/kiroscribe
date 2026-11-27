@@ -22,6 +22,7 @@ import {
   type SearchIndexStatus,
   type ReleaseNote,
   type Segment,
+  type TranscriptBreak,
   type Settings,
   type Speaker,
   type UpdateStatus,
@@ -211,6 +212,10 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
   const now = options.now ?? (() => Date.now());
   const notes = new Map<string, Note>();
   const segments = new Map<string, Segment[]>();
+  const breaks = new Map<string, TranscriptBreak[]>();
+  let breakId = 0;
+  /** 録音中の回の区切り（何も話さずに止めたら消す） */
+  let openBreak: TranscriptBreak | null = null;
   let settings: Settings = { ...DEFAULT_SETTINGS, ...options.settings };
   const keys: Record<Provider, boolean> = { openai: false, anthropic: false };
   let counter = 0;
@@ -219,6 +224,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
   let recording: RecordingStatus = { ...IDLE_STATUS };
   const statusEvents = new Emitter<RecordingStatus>();
   const segmentEvents = new Emitter<Segment>();
+  const breakEvents = new Emitter<TranscriptBreak>();
   const levelEvents = new Emitter<LevelEvent>();
   const errorEvents = new Emitter<RecordingErrorEvent>();
   const enhanceEvents = new Emitter<DeltaEvent>();
@@ -364,11 +370,13 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
 
   const addSegment = (noteId: string, speaker: Speaker, text: string): Segment => {
     const endedAt = now();
+    // 録音を始める前の音声はないので、録音中の回の発話は、その回の区切りより前には始まらない
+    const roundStart = openBreak?.noteId === noteId ? openBreak.startedAt : -Infinity;
     const segment: Segment = {
       id: ++segmentId,
       noteId,
       speaker,
-      startedAt: endedAt - 2500,
+      startedAt: Math.min(endedAt, Math.max(endedAt - 2500, roundStart)),
       endedAt,
       text,
     };
@@ -518,6 +526,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       if (recording.noteId === id) throw "録音中のノートは削除できません。先に録音を停止してください";
       notes.delete(id);
       segments.delete(id);
+      breaks.delete(id);
     },
     async getSettings() {
       return { ...settings };
@@ -593,6 +602,9 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
     async listSegments(noteId) {
       return [...(segments.get(noteId) ?? [])];
     },
+    async listTranscriptBreaks(noteId) {
+      return [...(breaks.get(noteId) ?? [])];
+    },
     async getRecordingStatus() {
       return { ...recording };
     },
@@ -608,6 +620,14 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       find(noteId);
       if (!keys.openai && !options.demo) {
         throw "API キーが設定されていません（OpenAI）。設定画面から入力してください";
+      }
+      // 本体と同じく、文字起こしのあるノートで始めるときは、始める位置に区切りを付ける
+      openBreak = null;
+      if ((segments.get(noteId)?.length ?? 0) > 0) {
+        const list = breaks.get(noteId) ?? [];
+        openBreak = { id: ++breakId, noteId, round: list.length + 2, startedAt: now() };
+        breaks.set(noteId, [...list, openBreak]);
+        breakEvents.emit({ ...openBreak });
       }
       if (options.demo) startDemo(noteId);
       return setRecording({
@@ -643,12 +663,19 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       stopDemo();
       setRecording({ ...recording, state: "finishing", runningSince: null });
       await new Promise((resolve) => setTimeout(resolve, options.demo ? 900 : 0));
+      // 何も話さないまま止めた回の区切りは残さない
+      const added = openBreak;
+      openBreak = null;
+      if (added && !(segments.get(added.noteId) ?? []).some((s) => s.startedAt >= added.startedAt)) {
+        breaks.set(added.noteId, (breaks.get(added.noteId) ?? []).filter((b) => b.id !== added.id));
+      }
       const stopped = setRecording({ ...IDLE_STATUS });
       autoInstall();
       return stopped;
     },
     onRecordingStatus: (cb) => statusEvents.on(cb),
     onSegment: (cb) => segmentEvents.on(cb),
+    onTranscriptBreak: (cb) => breakEvents.on(cb),
     onLevel: (cb) => levelEvents.on(cb),
     onRecordingError: (cb) => errorEvents.on(cb),
     onNoteCreated: (cb) => noteCreatedEvents.on(cb),
