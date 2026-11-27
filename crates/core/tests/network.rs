@@ -245,6 +245,8 @@ fn api_endpoints_are_fixed_https_hosts() {
     assert_eq!(kiroscribe_core::claude::ANTHROPIC_BASE_URL, "https://api.anthropic.com/v1");
     assert_eq!(kiroscribe_core::help::RAW_BASE_URL, "https://raw.githubusercontent.com");
     assert_eq!(kiroscribe_core::help::API_BASE_URL, "https://api.github.com");
+    assert_eq!(kiroscribe_core::log_submit::LOG_INTAKE_URL, "https://log-intake.seita-tabana.workers.dev");
+    assert_eq!(kiroscribe_core::log_submit::ALLOWED_INTAKE_HOSTS, ["log-intake.seita-tabana.workers.dev"]);
 }
 
 // [SEC-004]

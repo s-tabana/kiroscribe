@@ -136,6 +136,9 @@ export const called = {
   stopRecording: [
     [],
   ] satisfies Called<"stopRecording">[],
+  submitDebugLogs: [
+    ["contract"],
+  ] satisfies Called<"submitDebugLogs">[],
   takeUpdateNotice: [
     [],
   ] satisfies Called<"takeUpdateNotice">[],
@@ -266,6 +269,9 @@ export const returned = {
   stopRecording: [
     {"elapsedMs":0,"noteId":null,"runningSince":null,"sources":[],"state":"idle"},
   ] satisfies Returned<"stopRecording">[],
+  submitDebugLogs: [
+    {"id":"…","receivedAt":"…"},
+  ] satisfies Returned<"submitDebugLogs">[],
   takeUpdateNotice: [
     null,
   ] satisfies Returned<"takeUpdateNotice">[],
@@ -288,6 +294,9 @@ export const emitted = {
     {"level":0,"speaker":"me"},
     {"level":0,"speaker":"them"},
   ] satisfies Emitted<"onLevel">[],
+  onLogSubmitProgress: [
+    {"requestId":"contract","sent":0,"total":0},
+  ] satisfies Emitted<"onLogSubmitProgress">[],
   onNoteCreated: [
     {"createdAt":0,"enhancedAt":null,"enhancedNotes":null,"id":"…","title":"…","updatedAt":0,"userNotes":"…"},
   ] satisfies Emitted<"onNoteCreated">[],

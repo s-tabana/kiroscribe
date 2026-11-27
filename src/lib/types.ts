@@ -250,3 +250,18 @@ export interface DebugLogStatus {
   /** 「詳しい記録」の期限（UNIX ミリ秒）。オフなら null */
   verboseUntil: number | null;
 }
+
+/** デバッグ用のログを入口が受け付けたときの応答 */
+export interface LogSubmission {
+  /** 提出の番号（例: KS-20261127-7F3A） */
+  id: string;
+  /** 入口が受け取った時刻（ISO 8601） */
+  receivedAt: string;
+}
+
+/** デバッグ用のログの提出の進み具合（バイト） */
+export interface LogSubmitProgress {
+  requestId: string;
+  sent: number;
+  total: number;
+}

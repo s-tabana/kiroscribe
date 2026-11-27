@@ -14,6 +14,8 @@ import type {
   ExportResult,
   Guide,
   LevelEvent,
+  LogSubmission,
+  LogSubmitProgress,
   Note,
   NotePatch,
   NoteSummary,
@@ -125,6 +127,12 @@ export interface Backend {
    * 保存したパス、取り消したら null
    */
   saveDebugBundle(fileName: string): Promise<string | null>;
+  /**
+   * デバッグ用のログを zip にまとめて、ログの回収の入口に送る。返すのは提出の番号と受け取った時刻。
+   * 送れなかったら理由のメッセージで reject する。進み具合は onLogSubmitProgress
+   */
+  submitDebugLogs(requestId: string): Promise<LogSubmission>;
+  onLogSubmitProgress(cb: (progress: LogSubmitProgress) => void): Promise<Unsubscribe>;
 
   // ---- バージョン・ヘルプ ----
   getAppVersion(): Promise<string>;
@@ -152,11 +160,15 @@ export interface Backend {
   onSettingsChanged(cb: (settings: Settings) => void): Unsubscribe;
 }
 
+function subscribeAsync<T>(event: string, cb: (payload: T) => void): Promise<Unsubscribe> {
+  return listen<T>(event, (e) => cb(e.payload));
+}
+
 /** Tauri のイベント購読を、同期的に解除できる形にする */
 function subscribe<T>(event: string, cb: (payload: T) => void): Unsubscribe {
   let disposed = false;
   let unlisten: (() => void) | null = null;
-  void listen<T>(event, (e) => cb(e.payload)).then((fn) => {
+  void subscribeAsync<T>(event, cb).then((fn) => {
     if (disposed) fn();
     else unlisten = fn;
   });
@@ -255,6 +267,8 @@ export function createTauriBackend(): Backend {
       await invoke("save_debug_bundle", { path });
       return path;
     },
+    submitDebugLogs: (requestId) => invoke("submit_debug_logs", { requestId }),
+    onLogSubmitProgress: (cb) => subscribeAsync("log-submit-progress", cb),
 
     getAppVersion: () => invoke("get_app_version"),
     getGuide: () => invoke("get_guide"),

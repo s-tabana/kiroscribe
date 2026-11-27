@@ -7,6 +7,7 @@ use kiroscribe_core::Database;
 pub struct AppState {
     db: Mutex<Database>,
     pub secrets: Box<dyn SecretStore>,
+    pub log_submission: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -14,6 +15,7 @@ impl AppState {
         Self {
             db: Mutex::new(db),
             secrets,
+            log_submission: tokio::sync::Mutex::new(()),
         }
     }
 
