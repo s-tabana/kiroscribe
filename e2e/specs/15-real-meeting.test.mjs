@@ -20,6 +20,7 @@ import { noteTitles, sel } from "../lib/ui.mjs";
 const REAL_AUDIO = process.platform === "win32" && process.env.KIROSCRIBE_E2E_REAL_AUDIO === "1";
 const skip = !REAL_AUDIO && "仮想のオーディオケーブルを入れた Windows でだけ走る（KIROSCRIBE_E2E_REAL_AUDIO=1）";
 const HOLD_MIC = path.join(ROOT, "target", "debug", "examples", "hold_mic.exe");
+const MEETING_PROBE = path.join(ROOT, "target", "debug", "examples", "meeting_probe.exe");
 const EDGE = [
   path.join(process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)", "Microsoft", "Edge", "Application", "msedge.exe"),
   path.join(process.env.ProgramFiles ?? "C:\\Program Files", "Microsoft", "Edge", "Application", "msedge.exe"),
@@ -55,25 +56,23 @@ function startFakeApp(ctx, exeName) {
   return child;
 }
 
-/** 調べるための材料: Windows が記録しているマイクの使用状況（ConsentStore）と、マイクを使うプログラムの出力 */
+/** 検出に失敗した時点のセッション、判定、ConsentStore と、テスト用プロセスの出力。 */
 function detectionDiagnostics(ctx) {
+  const probe = spawnSync(MEETING_PROBE, ["--once"], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
+  const sessionLog = [probe.stdout, probe.stderr, probe.error?.message].filter(Boolean).join("\n");
+  fs.writeFileSync(ctx.work.file("meeting-probe.log"), sessionLog);
   const key = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone";
   const registry = spawnSync("reg", ["query", key, "/s"], { encoding: "utf8", windowsHide: true }).stdout ?? "";
   const logs = fs
     .readdirSync(ctx.work.dir)
     .filter((name) => name.endsWith(".exe.log"))
     .map((name) => `--- ${name} ---\n${fs.readFileSync(ctx.work.file(name), "utf8")}`);
-  return `--- マイクの使用状況（${key}） ---\n${registry.split("\n").slice(-60).join("\n")}\n${logs.join("\n")}`;
+  return `--- meeting_probe ---\n${sessionLog}\n--- マイクの使用状況（${key}） ---\n${registry.split("\n").slice(-60).join("\n")}\n${logs.join("\n")}`;
 }
 
 /** 会議が始まって、ポップアップとノートができ、録音が始まるまで待つ。できたノートのタイトルを返す */
 async function waitForMeetingStart(ctx, session, label) {
-  try {
-    await ctx.app.popup({ timeout: 60_000 });
-  } catch (error) {
-    error.message += `\n${detectionDiagnostics(ctx)}`;
-    throw error;
-  }
+  await ctx.app.popup({ timeout: 60_000 });
   const started = await session.waitForText(sel.popup, "自動で録音・文字起こしを始めました");
   assert.ok(started.includes(label), started);
   await ctx.app.main();
@@ -86,12 +85,17 @@ async function waitForMeetingStart(ctx, session, label) {
 
 /** 会議が終わって、自動で始めた録音が止まるまで待つ */
 async function waitForMeetingEnd(ctx, session) {
-  await ctx.app.popup({ timeout: 60_000 });
-  await session.waitForText(sel.popup, "録音を停止しました", { timeout: 60_000 });
-  await ctx.app.main();
-  await session.waitUntil(async () => !(await session.exists(`${sel.noteItems} [aria-label="録音中"]`)), {
-    message: "録音中の印が消える",
-  });
+  try {
+    await ctx.app.popup({ timeout: 60_000 });
+    await session.waitForText(sel.popup, "録音を停止しました", { timeout: 60_000 });
+    await ctx.app.main();
+    await session.waitUntil(async () => !(await session.exists(`${sel.noteItems} [aria-label="録音中"]`)), {
+      message: "録音中の印が消える",
+    });
+  } catch (error) {
+    error.message += `\n${detectionDiagnostics(ctx)}`;
+    throw error;
+  }
 }
 
 for (const [exeName, label] of [
@@ -108,6 +112,9 @@ for (const [exeName, label] of [
     try {
       await waitForMeetingStart(ctx, session, label);
       // 自分自身（録音中の Kiroscribe）がマイクを使っていても、会議の判定には入れない（会議アプリが止まれば終わる）
+    } catch (error) {
+      error.message += `\n${detectionDiagnostics(ctx)}`;
+      throw error;
     } finally {
       await killTree(app);
     }
@@ -151,6 +158,9 @@ navigator.mediaDevices.getUserMedia({ audio: true })
   );
   try {
     await waitForMeetingStart(ctx, session, "Google Meet");
+  } catch (error) {
+    error.message += `\n${detectionDiagnostics(ctx)}`;
+    throw error;
   } finally {
     await killTree(edge);
     server.close();

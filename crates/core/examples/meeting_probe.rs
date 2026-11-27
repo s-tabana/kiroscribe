@@ -12,13 +12,17 @@
 //! - `--interval <秒>`: 調べる間隔（既定は 2 秒）
 //! - `--titles`: マイクを使っているブラウザと、デスクトップの会議アプリ（slack.exe など）の、表示中のウィンドウのタイトルも出す
 //!   （メールの件名・チャンネルや相手の名前なども出るので、人に見せる前に確かめる）
+//! - `--require-sessions`: `--once` で録音セッションの一覧を取得できなければ終了コード 1 を返す
+//! - `--expect <アプリ>`: `--once` で指定した会議と判定できなければ終了コード 1 を返す
+//!   （`zoom`・`slack`・`teams`・`discord`・`meet`）
 
 use std::time::Duration;
 
 use kiroscribe_core::meetings::{
-    browser_titles, diagnose, observe_detailed, MeetingEvent, MeetingTracker, MicSource, MicSources, Observation, Phase,
+    browser_titles, diagnose, observe_detailed, MeetingApp, MeetingEvent, MeetingTracker, MicSource, MicSources,
+    Observation, Phase,
 };
-use kiroscribe_core::mic_sessions::MicSessions;
+use kiroscribe_core::mic_sessions::{MicSessions, ReadStatus};
 use kiroscribe_core::mic_store::{self, MicStore};
 use kiroscribe_core::time::now_ms;
 
@@ -26,15 +30,37 @@ struct Options {
     once: bool,
     interval: Duration,
     titles: bool,
+    require_sessions: bool,
+    expect: Option<MeetingApp>,
+}
+
+fn expected_app(name: &str) -> Option<MeetingApp> {
+    match name.to_lowercase().as_str() {
+        "zoom" => Some(MeetingApp::Zoom),
+        "slack" => Some(MeetingApp::SlackHuddle),
+        "teams" => Some(MeetingApp::Teams),
+        "discord" => Some(MeetingApp::Discord),
+        "meet" => Some(MeetingApp::GoogleMeet),
+        _ => None,
+    }
 }
 
 fn options() -> Result<Options, String> {
-    let mut options = Options { once: false, interval: Duration::from_secs(2), titles: false };
+    let mut options =
+        Options { once: false, interval: Duration::from_secs(2), titles: false, require_sessions: false, expect: None };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--once" => options.once = true,
             "--titles" => options.titles = true,
+            "--require-sessions" => options.require_sessions = true,
+            "--expect" => {
+                let app = args
+                    .next()
+                    .and_then(|value| expected_app(&value))
+                    .ok_or("--expect には zoom・slack・teams・discord・meet のどれかを指定してください")?;
+                options.expect = Some(app);
+            }
             "--interval" => {
                 let seconds: u64 = args
                     .next()
@@ -43,8 +69,15 @@ fn options() -> Result<Options, String> {
                     .ok_or("--interval には 1 以上の秒数を指定してください")?;
                 options.interval = Duration::from_secs(seconds);
             }
-            other => return Err(format!("分からない引数です: {other}（使えるのは --once・--interval <秒>・--titles）")),
+            other => {
+                return Err(format!(
+                    "分からない引数です: {other}（使えるのは --once・--interval <秒>・--titles・--require-sessions・--expect <アプリ>）"
+                ))
+            }
         }
+    }
+    if !options.once && (options.require_sessions || options.expect.is_some()) {
+        return Err("--require-sessions と --expect は --once と組み合わせてください".into());
     }
     Ok(options)
 }
@@ -59,18 +92,23 @@ fn phase_text(phase: Phase) -> String {
 }
 
 fn sessions_lines(sessions: &MicSessions) -> Vec<String> {
-    if !sessions.available {
-        return vec![format!(
-            "  オーディオのセッション: 取れない（{}）",
-            sessions.error.as_deref().unwrap_or("Windows 以外")
-        )];
-    }
-    let report = kiroscribe_core::mic_sessions::report(sessions);
+    let report = kiroscribe_core::mic_sessions::report(sessions, true);
+    let status = match report.status {
+        ReadStatus::Ok => "取得済み",
+        ReadStatus::NoDevices => "録音デバイスなし",
+        ReadStatus::Partial => "一部取得",
+        ReadStatus::Failed => "取得失敗",
+    };
     let mut lines = vec![format!(
-        "  オーディオのセッション: 録音のデバイス {} 台、セッション {} 件",
-        report.endpoints,
-        report.sessions.len()
+        "  オーディオのセッション: {status}（録音デバイス {} 台、取得したセッション {} 件）",
+        report.endpoints, report.total
     )];
+    if let Some(error) = report.error {
+        lines.push(format!(
+            "  取得失敗: デバイス {} 台、セッション {} 件（最初の理由 {error}）",
+            report.failed_endpoints, report.failed_sessions
+        ));
+    }
     for session in &report.sessions {
         let package = session.package.as_deref().map(|p| format!("  [{p}]")).unwrap_or_default();
         let meaning = match (session.app, session.browser) {
@@ -89,7 +127,7 @@ fn playback_lines() -> Vec<String> {
     if !playback.available {
         return vec![format!("  再生のセッション: 取れない（{}）", playback.error.as_deref().unwrap_or("Windows 以外"))];
     }
-    let report = kiroscribe_core::mic_sessions::report(&playback);
+    let report = kiroscribe_core::mic_sessions::report(&playback, true);
     let sessions: Vec<_> = report.sessions.iter().filter(|s| s.app.is_some() || s.browser).collect();
     let mut lines = vec![format!(
         "  再生のセッション（会議アプリ・ブラウザだけ。判定には使わない）: 再生のデバイス {} 台、{} 件",
@@ -219,8 +257,69 @@ fn main() {
             last = Some(lines);
         }
         if options.once {
-            break;
+            if let Some(message) = check(&options, &observation, sources.as_ref()) {
+                eprintln!("確認に失敗しました: {message}");
+                std::process::exit(1);
+            }
+            return;
         }
         std::thread::sleep(options.interval);
+    }
+}
+
+/// `--require-sessions`・`--expect` の確認。満たさないなら、その理由。
+fn check(options: &Options, observation: &Observation, sources: Option<&MicSources>) -> Option<String> {
+    if options.require_sessions {
+        match sources {
+            None => return Some("Windows 以外では、オーディオのセッションを読めない".into()),
+            Some(sources) if !sources.sessions.available => {
+                return Some(format!(
+                    "録音のオーディオのセッションの一覧を取れない（{}）",
+                    sources.sessions.error.as_deref().unwrap_or("理由不明")
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+    let expected = options.expect?;
+    let diagnosis = diagnose(observation, None);
+    (diagnosis.app != Some(expected)).then(|| {
+        format!(
+            "{} の会議と判定していない（判定: {}。{}）",
+            expected.label(),
+            diagnosis.app.map(|app| app.label()).unwrap_or("会議なし"),
+            diagnosis.verdict.describe()
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kiroscribe_core::meetings::MicUser;
+    use kiroscribe_core::mic_sessions::{summarize, EndpointSessions};
+
+    // [MTG-020]
+    #[test]
+    fn once_can_require_the_session_list_and_the_final_verdict() {
+        let options = Options {
+            once: true,
+            interval: Duration::from_secs(2),
+            titles: false,
+            require_sessions: true,
+            expect: Some(MeetingApp::Zoom),
+        };
+        let mut observation = Observation::default();
+        let mut sources = MicSources {
+            sessions: summarize(vec![Ok(EndpointSessions::default())]),
+            ..Default::default()
+        };
+        assert!(check(&options, &observation, Some(&sources)).is_some());
+        observation.mic_users.push(MicUser { id: "Zoom.exe".into(), in_use: true });
+        assert!(check(&options, &observation, Some(&sources)).is_none());
+        sources.sessions = summarize(vec![Err("0x80070005".into())]);
+        assert!(check(&options, &observation, Some(&sources)).unwrap().contains("0x80070005"));
+        let lines = sessions_lines(&sources.sessions).join("\n");
+        assert!(lines.contains("取得失敗") && lines.contains("デバイス 1 台") && lines.contains("0x80070005"));
     }
 }

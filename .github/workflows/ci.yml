@@ -104,9 +104,9 @@ jobs:
       - name: 会議の検出の確認用の道具のビルド
         run: cargo build -p kiroscribe-core --release --example meeting_probe --locked
 
-      # 音声デバイスのないランナーでも、オーディオのセッションの一覧を読めて、止まらずに終わることを確かめる
+      # 音声デバイスのないランナーでも、オーディオのセッションの一覧を読めて（読めなければ終了コード 1）、止まらずに終わることを確かめる
       - name: 会議の検出の確認用の道具の動作確認
-        run: target/release/examples/meeting_probe.exe --once
+        run: target/release/examples/meeting_probe.exe --once --require-sessions
 
       - name: 会議の検出の確認用の道具を成果物として保存
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

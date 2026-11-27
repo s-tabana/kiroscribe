@@ -158,7 +158,10 @@ pub fn report(store: &MicStore, now_ms: Option<i64>) -> MicStoreReport {
             since_stop_sec: now_ms.and_then(|now| entry.last_stop.and_then(|stop| age_sec(stop, now))),
         })
         .collect();
-    entries.sort_by(|a, b| (&a.name, &a.location).cmp(&(&b.name, &b.location)));
+    entries.sort_by(|a, b| {
+        let rank = |entry: &MicEntryReport| (!entry.in_use, entry.app.is_none() && !entry.browser);
+        (rank(a), &a.name, &a.location).cmp(&(rank(b), &b.name, &b.location))
+    });
     MicStoreReport {
         opened: store.opened,
         total: store.entries.len(),
@@ -211,9 +214,9 @@ mod tests {
         assert!(report.opened);
         assert_eq!(report.total, 4);
         let names: Vec<&str> = report.entries.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, vec!["com.tinyspeck.slackdesktop_8yrtsj140pw4g", "msedgewebview2.exe", "slack.exe"]);
+        assert_eq!(names, vec!["com.tinyspeck.slackdesktop_8yrtsj140pw4g", "slack.exe", "msedgewebview2.exe"]);
 
-        let slack = &report.entries[2];
+        let slack = &report.entries[1];
         assert_eq!((slack.name_kind, slack.location), ("exe", "AppDataLocal"));
         assert_eq!(slack.app, Some(MeetingApp::SlackHuddle));
         assert!(!slack.in_use);
@@ -227,7 +230,7 @@ mod tests {
         assert_eq!(msix.since_stop_sec, None, "使用中は、終了からの秒数を入れない");
         assert_eq!(msix.since_start_sec, Some(30));
 
-        let webview = &report.entries[1];
+        let webview = &report.entries[2];
         assert_eq!((webview.location, webview.app, webview.stop.clone()), ("ProgramFilesX86", None, None));
         assert!(!webview.in_use, "Stop がない記録は使用中にしない");
 
