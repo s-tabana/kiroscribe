@@ -1,5 +1,6 @@
 # 会議の検出の確認用の道具（crates/core/examples/meeting_probe.rs）だけを、Windows でビルドして成果物にする。
-# 配布の前に実機で確かめるとき、テストやインストーラを含む ci.yml の全体を待たずに作り直すためのもの（手動でだけ動かす）。
+# 配布の前に実機で確かめるとき、テストやインストーラを含む ci.yml の全体を待たずに作り直すためのもの。
+# 手動で動かすほか、会議の検出の部品か確認用の道具を変えたプルリクエストでも動く。
 #
 # - Secret は使わない。
 # - アクションは、タグではなくコミットのハッシュで固定している（ci.yml と同じ）。
@@ -7,6 +8,18 @@ name: meeting-probe
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - crates/core/src/meetings.rs
+      - crates/core/src/mic_sessions.rs
+      - crates/core/examples/meeting_probe.rs
+      - crates/core/examples/hold_mic.rs
+      - .github/workflows/meeting-probe.yml
+
+# 新しいコミットが来たら、同じプルリクエストの古いコミットの実行を止める
+concurrency:
+  group: meeting-probe-${{ github.ref }}
+  cancel-in-progress: true
 
 # このワークフローに渡すトークンは、リポジトリの読み取りだけ
 permissions:
