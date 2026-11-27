@@ -110,8 +110,9 @@ export interface Backend {
   /** 「詳しい記録」を切り替える（オンにすると 24 時間） */
   setDebugVerbose(enabled: boolean): Promise<DebugLogStatus>;
   /**
-   * 画面の出来事をデバッグ用のログに書く。fields には、本文（メモ・文字起こし・議事録・チャット）や API キーを入れない。
-   * 書けなくても失敗にしない
+   * 画面の出来事をデバッグ用のログに書く。event に「ui.」が付いていなければ、本体が付ける。
+   * fields には、本文（メモ・文字起こし・議事録・チャット）や API キーを入れない（本体でも、キーの形の文字列は伏せる）。
+   * 書けなくても reject しない
    */
   writeDebugLog(level: "info" | "error", event: string, fields?: Record<string, unknown>): Promise<void>;
   /**
@@ -176,6 +177,9 @@ async function invoke<T>(command: string, args?: Record<string, unknown>): Promi
   }
 }
 
+/** 結果も失敗も使わない */
+const ignore = (): undefined => undefined;
+
 export function createTauriBackend(): Backend {
   return {
     isPreview: false,
@@ -235,7 +239,8 @@ export function createTauriBackend(): Backend {
     answerRecordingCheck: (noteId, deadline, keep) => invoke("answer_recording_check", { noteId, deadline, keep }),
     getDebugLogStatus: () => invoke("get_debug_log_status"),
     setDebugVerbose: (enabled) => invoke("set_debug_verbose", { enabled }),
-    writeDebugLog: (level, event, fields) => invoke("write_debug_log", { level, event, fields }),
+    // 書けなくても失敗にしない（画面の操作を、ログのために止めない）
+    writeDebugLog: (level, event, fields) => invoke("write_debug_log", { level, event, fields }).then(ignore, ignore),
     async saveDebugBundle(fileName) {
       // 本体（save_debug_bundle）が受け付ける拡張子は .zip だけ
       const path = await save({ defaultPath: fileName, filters: [{ name: "ZIP", extensions: ["zip"] }] });

@@ -7,15 +7,15 @@
 //!
 //! 書かないもの: API キー・文字起こし・メモ・議事録・チャットの本文・音声・AI に送った内容と返ってきた内容。
 //! 呼び出す側は、これらを値に入れない。念のため、文字列の値は [`MAX_TEXT_CHARS`] 文字で切り、
-//! API キーの形の文字列と、パスの中の利用者のフォルダの名前を伏せてから書く（[`sanitize_text`]）。
+//! API キーの形の文字列・パスの中の利用者のフォルダの名前・URL のクエリを伏せてから書く（[`sanitize_text`]）。
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
 
-use chrono::{DateTime, Local, NaiveDate, TimeZone};
+use chrono::{DateTime, Local, NaiveDate, SecondsFormat, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -38,6 +38,8 @@ pub const VERBOSE_MS: i64 = 24 * 60 * 60 * 1000;
 pub const MAX_TEXT_CHARS: usize = 300;
 /// 1 つの出来事に入れる値の数の上限（入れ子を含む）。
 const MAX_VALUES: usize = 64;
+/// 1 日のファイルが上限に達したことを書く出来事の名前。
+const FULL_EVENT: &str = "log.file.full";
 
 /// 出来事の重さ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,45 +99,99 @@ pub fn valid_event_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// パスの中の利用者のフォルダの名前（`C:\Users\<名前>\`・`/home/<名前>/`・`/Users/<名前>/`）を `<user>` に置き換える。
-fn mask_user_folders(text: &str) -> String {
-    const ROOTS: &[&str] = &["\\users\\", "/users/", "/home/"];
-    let lower = text.to_lowercase();
-    // 小文字にしても長さが変わらない文字だけのときに限って、位置を使い回す（変わるなら、そのまま返す）
-    if lower.len() != text.len() {
-        return text.to_string();
+/// パスの区切り（`\\`・`/`）か。
+fn is_separator(b: u8) -> bool {
+    matches!(b, b'\\' | b'/')
+}
+
+/// 利用者のフォルダの名前の終わり（区切り・引用符・改行）か。
+fn ends_user_name(b: u8) -> bool {
+    matches!(b, b'\\' | b'/' | b'"' | b'\'' | b'\n' | b'\r' | b'\t')
+}
+
+/// `at` の区切りから始まる「区切り + users か home + 区切り」の並びなら、利用者のフォルダの名前が始まる位置を返す。
+/// 区切りは、続けて書かれていてもよい（JSON や Rust の `{:?}` で `\\` が `\\\\` になったパスも当てる）。
+/// 大文字と小文字は区別しない。
+fn user_name_start(bytes: &[u8], at: usize) -> Option<usize> {
+    let skip_separators = |mut i: usize| {
+        while i < bytes.len() && is_separator(bytes[i]) {
+            i += 1;
+        }
+        i
+    };
+    if !bytes.get(at).copied().is_some_and(is_separator) {
+        return None;
     }
+    let root = skip_separators(at);
+    let rest = &bytes[root..];
+    let root_len = ["users", "home"].iter().find_map(|word| {
+        (rest.len() >= word.len() && rest[..word.len()].eq_ignore_ascii_case(word.as_bytes())).then_some(word.len())
+    })?;
+    let after = root + root_len;
+    if !bytes.get(after).copied().is_some_and(is_separator) {
+        return None;
+    }
+    Some(skip_separators(after))
+}
+
+/// パスの中の利用者のフォルダの名前（`C:\Users\<名前>\`・`/home/<名前>/`・`/Users/<名前>/`）を `<user>` に置き換える。
+/// 名前に日本語などが入っていても、区切りが `\\` と書かれたパス（JSON などの中の文字列）でも伏せる。
+fn mask_user_folders(text: &str) -> String {
+    let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
+    // `out` に写し終えた位置。区切り・引用符は ASCII なので、どの位置も文字の境目になる
+    let mut copied = 0;
     let mut i = 0;
-    while i < text.len() {
-        let root = ROOTS
-            .iter()
-            .find(|root| lower.get(i..).is_some_and(|rest| rest.starts_with(**root)));
-        match root {
-            Some(root) => {
-                let start = i + root.len();
-                let end = text[start..]
-                    .find(['\\', '/', '"', '\''])
-                    .map_or(text.len(), |at| start + at);
-                out.push_str(&text[i..start]);
-                if end > start {
-                    out.push_str("<user>");
-                }
+    while i < bytes.len() {
+        if let Some(start) = user_name_start(bytes, i) {
+            let end = bytes[start..]
+                .iter()
+                .position(|b| ends_user_name(*b))
+                .map_or(bytes.len(), |at| start + at);
+            if end > start {
+                out.push_str(&text[copied..start]);
+                out.push_str("<user>");
+                copied = end;
                 i = end;
-            }
-            None => {
-                let c = text[i..].chars().next().unwrap();
-                out.push(c);
-                i += c.len_utf8();
+                continue;
             }
         }
+        i += 1;
     }
+    out.push_str(&text[copied..]);
     out
 }
 
-/// ログに書く文字列を整える: API キーの形の文字列と、利用者のフォルダの名前を伏せ、[`MAX_TEXT_CHARS`] 文字で切る。
+/// URL のクエリ（`?` から後ろ。署名つきのダウンロードの URL などに、使い捨ての鍵が入る）を `?<query>` に置き換える。
+fn mask_url_queries(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let Some(scheme) = [lower.find("https://"), lower.find("http://")].into_iter().flatten().min() else {
+            out.push_str(rest);
+            return out;
+        };
+        let url_end = rest[scheme..]
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '>' | '<'))
+            .map_or(rest.len(), |at| scheme + at);
+        let url = &rest[scheme..url_end];
+        out.push_str(&rest[..scheme]);
+        match url.find('?') {
+            Some(query) => {
+                out.push_str(&url[..query]);
+                out.push_str("?<query>");
+            }
+            None => out.push_str(url),
+        }
+        rest = &rest[url_end..];
+    }
+}
+
+/// ログに書く文字列を整える: API キーの形の文字列・利用者のフォルダの名前・URL のクエリを伏せ、
+/// [`MAX_TEXT_CHARS`] 文字で切る。
 pub fn sanitize_text(text: &str) -> String {
-    let masked = mask_user_folders(&redact_api_keys(text));
+    let masked = mask_url_queries(&mask_user_folders(&redact_api_keys(text)));
     if masked.chars().count() <= MAX_TEXT_CHARS {
         return masked;
     }
@@ -145,42 +201,73 @@ pub fn sanitize_text(text: &str) -> String {
 }
 
 /// 値の中の文字列をすべて [`sanitize_text`] で整え、値の数を [`MAX_VALUES`] までにする。
+/// 上限を超えるときは、浅いところの値から順に残す（深いところの細かい値だけを落とす）。
+/// 例えば `meeting.check` では、マイクの使用状況の記録が多くても、判定・理由・段階と、記録を開けたか・件数は残る。
 pub fn sanitize_value(value: Value) -> Value {
-    let mut budget = MAX_VALUES;
-    sanitize_inner(value, &mut budget)
+    let (cut_depth, kept_at_cut) = cutoff(&value, MAX_VALUES);
+    let mut seen_at_cut = 0;
+    prune(value, 0, cut_depth, kept_at_cut, &mut seen_at_cut).unwrap_or(Value::Null)
 }
 
-fn sanitize_inner(value: Value, budget: &mut usize) -> Value {
-    if *budget == 0 {
-        return Value::Null;
-    }
-    *budget -= 1;
+fn children(value: &Value) -> Vec<&Value> {
     match value {
-        Value::String(text) => Value::String(sanitize_text(&text)),
-        Value::Array(items) => {
-            let mut out = Vec::new();
-            for item in items {
-                if *budget == 0 {
-                    break;
-                }
-                out.push(sanitize_inner(item, budget));
-            }
-            Value::Array(out)
-        }
-        Value::Object(map) => Value::Object(sanitize_map(map, budget)),
-        other => other,
+        Value::Array(items) => items.iter().collect(),
+        Value::Object(map) => map.values().collect(),
+        _ => Vec::new(),
     }
 }
 
-fn sanitize_map(map: Map<String, Value>, budget: &mut usize) -> Map<String, Value> {
-    let mut out = Map::new();
-    for (key, value) in map {
-        if *budget == 0 {
-            break;
+/// 浅い順に数えて `budget` に収まる範囲: 途中で収まらなくなる深さと、その深さで残す値の数（左から）。
+/// すべて収まるなら、いちばん深い値の次の深さと 0。
+fn cutoff(value: &Value, budget: usize) -> (usize, usize) {
+    let mut level = vec![value];
+    let mut left = budget;
+    let mut depth = 0;
+    while !level.is_empty() {
+        if level.len() > left {
+            return (depth, left);
         }
-        out.insert(sanitize_text(&key), sanitize_inner(value, budget));
+        left -= level.len();
+        level = level.into_iter().flat_map(children).collect();
+        depth += 1;
     }
-    out
+    (depth, 0)
+}
+
+/// [`cutoff`] で決めた範囲の値だけを残し、文字列を整える。同じ深さの値は、左から（深さ優先でたどった順に）数える。
+fn prune(value: Value, depth: usize, cut_depth: usize, kept_at_cut: usize, seen_at_cut: &mut usize) -> Option<Value> {
+    if depth > cut_depth {
+        return None;
+    }
+    if depth == cut_depth {
+        if *seen_at_cut >= kept_at_cut {
+            return None;
+        }
+        *seen_at_cut += 1;
+    }
+    let mut child = |value: Value| prune(value, depth + 1, cut_depth, kept_at_cut, seen_at_cut);
+    Some(match value {
+        Value::String(text) => Value::String(sanitize_text(&text)),
+        Value::Array(items) => Value::Array(items.into_iter().filter_map(&mut child).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .filter_map(|(key, value)| child(value).map(|value| (sanitize_text(&key), value)))
+                .collect(),
+        ),
+        other => other,
+    })
+}
+
+/// ログに書く時刻の形（RFC 3339、ミリ秒まで、PC の時刻帯）。
+pub fn format_time<Tz: TimeZone>(at: &DateTime<Tz>) -> String {
+    at.with_timezone(&Local).to_rfc3339_opts(SecondsFormat::Millis, false)
+}
+
+/// UNIX ミリ秒の時刻を、[`format_time`] の形にする。
+pub fn format_ms(ms: i64) -> String {
+    DateTime::from_timestamp_millis(ms)
+        .map(|t| format_time(&t))
+        .unwrap_or_default()
 }
 
 struct Writer {
@@ -198,6 +285,9 @@ pub struct DebugLog {
     writer: Mutex<Writer>,
     /// 「詳しい記録」を続ける期限（UNIX ミリ秒）。0 ならオフ
     verbose_until: AtomicI64,
+    /// 期限が過ぎてオフに戻した「詳しい記録」の期限（UNIX ミリ秒）。0 ならなし。
+    /// 呼び出す側が [`DebugLog::take_expired`] で受け取り、保存してある期限を消す
+    expired: AtomicI64,
 }
 
 impl DebugLog {
@@ -214,6 +304,7 @@ impl DebugLog {
                 capped: false,
             }),
             verbose_until: AtomicI64::new(0),
+            expired: AtomicI64::new(0),
         })
     }
 
@@ -237,30 +328,52 @@ impl DebugLog {
         self.write_at(Local::now(), level, source, event, fields);
     }
 
+    /// 「詳しい記録」の期限が `at` までに過ぎていたら、オフに戻し、戻したこと（`log.verbose.ended`）を
+    /// `at` の日のファイルに 1 行書く。戻したなら、過ぎた期限を返す（同じ期限について 1 回だけ）。
+    /// アプリを止めている間に期限が過ぎたときは、起動して期限を読み込んだあとに呼ぶ。
+    pub fn expire_verbose_at<Tz: TimeZone>(&self, at: DateTime<Tz>) -> Option<i64> {
+        let at = at.with_timezone(&Local);
+        let mut writer = self.writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.expire_verbose(&mut writer, at)
+    }
+
+    fn expire_verbose(&self, writer: &mut Writer, at: DateTime<Local>) -> Option<i64> {
+        let until = self.verbose_until.load(Ordering::SeqCst);
+        if until == 0 || until > at.timestamp_millis() {
+            return None;
+        }
+        // 書く人は writer の鍵を持っているので、ここで戻せるのは 1 回だけ
+        self.verbose_until.store(0, Ordering::SeqCst);
+        let mut fields = Map::new();
+        fields.insert("until".into(), Value::String(format_ms(until)));
+        self.append(
+            writer,
+            at,
+            Line {
+                at: format_time(&at),
+                level: Level::Info,
+                source: Source::App,
+                event: "log.verbose.ended".into(),
+                fields,
+            },
+        );
+        self.expired.store(until, Ordering::SeqCst);
+        Some(until)
+    }
+
+    /// 期限が過ぎてオフに戻した「詳しい記録」の期限を、1 回だけ返す（保存してある期限を消すため）。
+    pub fn take_expired(&self) -> Option<i64> {
+        let until = self.expired.swap(0, Ordering::SeqCst);
+        (until != 0).then_some(until)
+    }
+
     /// `at` の時刻の出来事として書く。書けなかったとき（ディスクがいっぱい など）は、何もしない。
+    /// 「詳しい記録」の期限が過ぎていたら、先にオフに戻す（[`DebugLog::expire_verbose_at`]）。
     pub fn write_at<Tz: TimeZone>(&self, at: DateTime<Tz>, level: Level, source: Source, event: &str, fields: Value) {
         let at = at.with_timezone(&Local);
         let now_ms = at.timestamp_millis();
         let mut writer = self.writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        // 期限が過ぎた「詳しい記録」は、ここでオフに戻し、戻したことを書く
-        let until = self.verbose_until.load(Ordering::SeqCst);
-        if until != 0 && until <= now_ms {
-            self.verbose_until.store(0, Ordering::SeqCst);
-            let ended = DateTime::from_timestamp_millis(until)
-                .map(|t| t.with_timezone(&Local))
-                .unwrap_or(at);
-            self.append(
-                &mut writer,
-                ended,
-                Line {
-                    at: ended.to_rfc3339(),
-                    level: Level::Info,
-                    source: Source::App,
-                    event: "log.verbose.ended".into(),
-                    fields: Map::new(),
-                },
-            );
-        }
+        self.expire_verbose(&mut writer, at);
         if level == Level::Detail && self.verbose_until(now_ms).is_none() {
             return;
         }
@@ -278,7 +391,7 @@ impl DebugLog {
             &mut writer,
             at,
             Line {
-                at: at.to_rfc3339_opts(chrono::SecondsFormat::Millis, false),
+                at: format_time(&at),
                 level,
                 source,
                 event,
@@ -293,8 +406,10 @@ impl DebugLog {
             // 日付が変わったら（起動して最初の 1 行も）、古いファイルを消してから、その日のファイルに移る
             self.prune(day);
             writer.day = Some(day);
-            writer.size = fs::metadata(self.dir.join(file_name(day))).map(|m| m.len()).unwrap_or(0);
-            writer.capped = false;
+            let path = self.dir.join(file_name(day));
+            writer.size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            // 起動し直す前に上限に達していた日は、そのまま書かない（上限に達したことを書き直さない）
+            writer.capped = ends_with_full_marker(&path);
         }
         if writer.capped {
             return;
@@ -310,7 +425,7 @@ impl DebugLog {
                 at: line.at.clone(),
                 level: Level::Info,
                 source: Source::App,
-                event: "log.file.full".into(),
+                event: FULL_EVENT.into(),
                 fields: Map::new(),
             };
             if let Ok(mut text) = serde_json::to_string(&marker) {
@@ -359,6 +474,28 @@ impl DebugLog {
             }
         }
     }
+}
+
+/// ファイルの最後の行が、上限に達したことを書いた行か。
+fn ends_with_full_marker(path: &Path) -> bool {
+    const TAIL: u64 = 512;
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if file.seek(SeekFrom::Start(len.saturating_sub(TAIL))).is_err() {
+        return false;
+    }
+    let mut tail = Vec::new();
+    if file.read_to_end(&mut tail).is_err() {
+        return false;
+    }
+    let tail = String::from_utf8_lossy(&tail);
+    tail.trim_end()
+        .rsplit('\n')
+        .next()
+        .and_then(|line| serde_json::from_str::<Line>(line).ok())
+        .is_some_and(|line| line.event == FULL_EVENT)
 }
 
 /// `dir` の中のログのファイル（日付・パス・大きさ）を、古い順に返す。
@@ -480,7 +617,7 @@ mod tests {
         assert!(written.lines().last().unwrap().contains("log.file.full"));
     }
 
-    /// 「詳しい記録」は、期限までの間だけ書き、期限が過ぎたらオフに戻して、戻したことを書く。
+    /// 「詳しい記録」は、期限までの間だけ書き、期限が過ぎたらオフに戻して、戻したことを、そのときの日のファイルに 1 回だけ書く。
     // [LOG-010]
     #[test]
     fn detail_is_written_only_until_the_verbose_deadline() {
@@ -505,7 +642,114 @@ mod tests {
             })
             .collect();
         assert_eq!(summary, vec!["meeting.poll:2", "meeting.poll:3", "log.verbose.ended", "app.exit"]);
-        assert!(all[2].at.starts_with("2026-11-28T10:00:00"), "オフに戻した時刻は期限の時刻: {}", all[2].at);
+        assert!(all[2].at.starts_with("2026-11-28T10:01:00.000"), "オフに戻したときの時刻で書く: {}", all[2].at);
+        assert_eq!(all[2].fields["until"], format_ms(start.timestamp_millis() + VERBOSE_MS));
+        assert_eq!(log.take_expired(), Some(start.timestamp_millis() + VERBOSE_MS), "保存した期限を消せるよう、過ぎた期限を渡す");
+        assert_eq!(log.take_expired(), None, "渡すのは 1 回だけ");
+    }
+
+    /// アプリを止めている間に期限が過ぎたときは、起動して期限を読み込んだときに、その日のファイルに 1 回だけ書く。
+    /// 期限が日付をまたいで過ぎていても、前の日のファイルには書かない。
+    // [LOG-010]
+    #[test]
+    fn a_deadline_passed_while_stopped_is_ended_once_in_todays_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = DebugLog::open(dir.path()).unwrap();
+        let until = at("2026-11-26 10:00").timestamp_millis();
+        log.set_verbose_until(Some(until));
+        assert_eq!(log.expire_verbose_at(at("2026-11-28 08:00")), Some(until));
+        assert_eq!(log.expire_verbose_at(at("2026-11-28 08:00")), None, "2 回目は書かない");
+        log.write_at(at("2026-11-28 08:01"), Level::Info, Source::App, "app.started", json!({}));
+        assert_eq!(log.take_expired(), Some(until));
+        assert_eq!(log.verbose_until(at("2026-11-28 08:00").timestamp_millis()), None);
+
+        let names: Vec<String> = log
+            .files()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["kiroscribe-20261128.log"]);
+        let written = lines(&log.files()[0]);
+        let events: Vec<&str> = written.iter().map(|l| l.event.as_str()).collect();
+        assert_eq!(events, vec!["log.verbose.ended", "app.started"]);
+        assert!(written[0].at.starts_with("2026-11-28T08:00:00.000"), "{}", written[0].at);
+        assert_eq!(written[0].fields["until"], format_ms(until));
+
+        // 期限内なら、何もしない
+        log.set_verbose_until(Some(at("2026-11-29 08:00").timestamp_millis()));
+        assert_eq!(log.expire_verbose_at(at("2026-11-28 09:00")), None);
+        assert_eq!(log.take_expired(), None);
+    }
+
+    /// 1 日のファイルが上限に達したあとに起動し直しても、上限に達したことを書き直さない。
+    // [LOG-002]
+    #[test]
+    fn a_full_day_stays_full_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(file_name(NaiveDate::from_ymd_opt(2026, 11, 27).unwrap()));
+        let marker = serde_json::to_string(&Line {
+            at: "2026-11-27T09:00:00.000+09:00".into(),
+            level: Level::Info,
+            source: Source::App,
+            event: FULL_EVENT.into(),
+            fields: Map::new(),
+        })
+        .unwrap();
+        let mut full = vec![b'x'; (MAX_FILE_BYTES - 100) as usize];
+        full.push(b'\n');
+        full.extend_from_slice(marker.as_bytes());
+        full.push(b'\n');
+        fs::write(&path, &full).unwrap();
+        for _ in 0..2 {
+            // 起動し直すたびに、ログを開き直す
+            let log = DebugLog::open(dir.path()).unwrap();
+            log.write_at(at("2026-11-27 10:00"), Level::Info, Source::App, "app.started", json!({}));
+        }
+        assert_eq!(fs::read(&path).unwrap(), full, "上限に達した日には、もう書かない");
+
+        // 上限に達していない日は、起動し直しても書き足す
+        let other = dir.path().join(file_name(NaiveDate::from_ymd_opt(2026, 11, 28).unwrap()));
+        fs::write(&other, format!("{marker}\n{}\n", serde_json::to_string(&json!({"event": "x"})).unwrap())).unwrap();
+        let log = DebugLog::open(dir.path()).unwrap();
+        log.write_at(at("2026-11-28 10:00"), Level::Info, Source::App, "app.started", json!({}));
+        assert!(fs::read_to_string(&other).unwrap().contains("app.started"));
+    }
+
+    /// 値が多すぎるときは、浅いところの値から残す。会議の検出の判定の様子なら、マイクの使用状況の記録が多くても、
+    /// 判定・理由・段階と、記録を開けたか・件数は残る。
+    // [LOG-005][LOG-009]
+    #[test]
+    fn shallow_values_are_kept_when_there_are_too_many() {
+        let entry = |n: usize| {
+            json!({
+                "name": format!("app{n}.exe"), "nameKind": "exe", "location": "ProgramFiles", "app": null,
+                "browser": false, "inUse": false, "start": "1", "stop": "2", "sinceStartSec": 3, "sinceStopSec": 4,
+            })
+        };
+        let fields = json!({
+            "micInUse": ["chrome.exe"],
+            "browserWindows": 1,
+            "verdict": "noMeetingTab",
+            "why": "理由",
+            "app": null,
+            "phase": "idle",
+            "phaseApp": null,
+            "micStore": { "opened": true, "total": 40, "entries": (0..12).map(entry).collect::<Vec<_>>() },
+        });
+        let kept = sanitize_value(fields);
+        for key in ["verdict", "why", "phase", "browserWindows", "micInUse"] {
+            assert!(kept.get(key).is_some(), "{key} がない: {kept}");
+        }
+        assert_eq!(kept["verdict"], "noMeetingTab");
+        assert_eq!((&kept["micStore"]["opened"], &kept["micStore"]["total"]), (&json!(true), &json!(40)));
+        let entries = kept["micStore"]["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 12, "記録の数は分かる");
+        assert_eq!(entries[0]["name"], "app0.exe", "先の記録は中身も残る");
+        assert!(entries[11].as_object().unwrap().is_empty(), "後の記録の中身は落とす: {}", entries[11]);
+        fn count(value: &Value) -> usize {
+            1 + children(value).into_iter().map(count).sum::<usize>()
+        }
+        assert_eq!(count(&kept), MAX_VALUES);
     }
 
     /// API キーの形の文字列と、利用者のフォルダの名前を伏せ、長い文字列は切る。
@@ -522,6 +766,20 @@ mod tests {
         );
         assert_eq!(sanitize_text("/home/taro/.local/share/x"), "/home/<user>/.local/share/x");
         assert_eq!(sanitize_text("/Users/hanako/Library"), "/Users/<user>/Library");
+        // 小文字にすると長さが変わる文字が前にあっても伏せる
+        assert_eq!(sanitize_text(r"İ C:\USERS\taro\x"), r"İ C:\USERS\<user>\x");
+        // 区切りが \\ と書かれたパス（JSON や {:?} の中）も伏せる
+        assert_eq!(
+            sanitize_text(r#"open "C:\\Users\\山田 太郎\\AppData\\x.db": denied"#),
+            r#"open "C:\\Users\\<user>\\AppData\\x.db": denied"#
+        );
+        assert_eq!(sanitize_text("C:/Users/taro"), "C:/Users/<user>");
+        assert_eq!(sanitize_text("/usersettings/x and /home/"), "/usersettings/x and /home/");
+        // URL のクエリ（署名つきの URL の鍵など）は伏せる
+        assert_eq!(
+            sanitize_text("error sending request for url (https://example.com/a.zip?X-Amz-Signature=abc&x=1): timeout"),
+            "error sending request for url (https://example.com/a.zip?<query>): timeout"
+        );
         let long = "あ".repeat(MAX_TEXT_CHARS + 50);
         let cut = sanitize_text(&long);
         assert_eq!(cut.chars().count(), MAX_TEXT_CHARS + 1);

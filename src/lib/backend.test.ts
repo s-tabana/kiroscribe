@@ -79,10 +79,10 @@ describe("デバッグ用のログ（Tauri 上）", () => {
     });
   });
 
-  it("[LOG-008] ログを書くこと自体が失敗しても、ログを書き直そうとしない", async () => {
+  it("[LOG-008] ログを書くこと自体が失敗しても、失敗にせず、ログを書き直そうとしない", async () => {
     tauri.invoke.mockRejectedValue("書けません");
 
-    await expect(createTauriBackend().writeDebugLog("info", "ui.loaded", { view: "main" })).rejects.toBe("書けません");
+    await expect(createTauriBackend().writeDebugLog("info", "ui.loaded", { view: "main" })).resolves.toBeUndefined();
 
     expect(tauri.invoke).toHaveBeenCalledOnce();
   });

@@ -47,6 +47,9 @@ interface MemoryOptions {
 }
 
 /** テストから文字起こしやエラーを発生させるための追加機能 */
+/** 「詳しい記録」を続ける時間（本体の debug_log::VERBOSE_MS と同じ 24 時間） */
+const DEBUG_VERBOSE_MS = 24 * 60 * 60 * 1000;
+
 export interface MemoryBackend extends Backend {
   emitSegment(noteId: string, speaker: Speaker, text: string): Segment;
   emitError(noteId: string, message: string): void;
@@ -710,10 +713,12 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       return fileName;
     },
     async getDebugLogStatus() {
+      // 本体と同じく、期限が過ぎたらオフに戻す
+      if (verboseUntil !== null && verboseUntil <= now()) verboseUntil = null;
       return { verboseUntil };
     },
     async setDebugVerbose(enabled) {
-      verboseUntil = enabled ? Date.now() + 24 * 60 * 60 * 1000 : null;
+      verboseUntil = enabled ? now() + DEBUG_VERBOSE_MS : null;
       return { verboseUntil };
     },
     async writeDebugLog(level, event, fields) {

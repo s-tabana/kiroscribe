@@ -1,11 +1,18 @@
 //! デバッグ用のログ: 録音・文字起こし・AI・会議の検出・更新の出来事を書くこと、秘密や本文を書かないこと、書き出しの中身。
 
 use std::io::Read;
+use std::time::Duration;
 
+use kiroscribe_core::debug_log::{format_ms, DebugLog};
 use kiroscribe_core::meetings::{MeetingApp, MeetingEvent};
+use kiroscribe_core::time::now_ms;
 use serde_json::{json, Value};
+use tauri::Manager;
 
 use super::super::fixture::{wait_until, Harness, ANTHROPIC_KEY, OPENAI_KEY, TRANSCRIPT};
+
+/// 「詳しい記録」の期限を保存するキー（settings テーブル）。
+const VERBOSE_KEY: &str = "debugVerboseUntil";
 
 const USER_NOTES: &str = "- 社外秘: 新製品の値段は 9800 円";
 const QUESTION: &str = "決まったことを教えてください（質問の本文）";
@@ -224,4 +231,130 @@ fn start_and_exit_are_logged() {
     assert_eq!(started[0]["fields"]["osBuild"].is_string(), cfg!(windows), "{}", started[0]);
     assert_eq!(started[0]["fields"]["autostart"], true);
     assert_eq!(h.debug_log_events("app.exit").len(), 1);
+}
+
+impl Harness {
+    /// 起動し直したときと同じく、保存してある「詳しい記録」の期限を読み込む。
+    fn restart_debug_log(&self) {
+        let log = self.app.state::<DebugLog>();
+        crate::debug::restore_verbose(&log, &self.state().db(), now_ms());
+    }
+
+    fn save_verbose_until(&self, until: i64) {
+        self.state().db().set_value(VERBOSE_KEY, &until.to_string()).unwrap();
+    }
+}
+
+/// 「詳しい記録」をオフに戻したことは、その日のログに書く（時刻はオフに戻したとき）。
+fn assert_ended_today(line: &Value, until: i64) {
+    assert_eq!(line["fields"]["until"], format_ms(until), "{line}");
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    assert!(line["at"].as_str().unwrap().starts_with(&today), "{line}");
+}
+
+/// 期限内に起動し直したら「詳しい記録」を続け、動いている間に期限が過ぎたら、オフに戻したことを 1 回だけ書き、
+/// 保存した期限を消す。そのあと起動し直しても、もう一度は書かない。
+// [LOG-010]
+#[test]
+fn verbose_logging_that_expires_while_running_is_ended_once() {
+    let h = Harness::new();
+    let until = now_ms() + 600;
+    h.save_verbose_until(until);
+    h.restart_debug_log();
+    assert_eq!(h.ok("get_debug_log_status", json!({}))["verboseUntil"], until, "期限内の再起動では続ける");
+    assert!(h.debug_log_events("log.verbose.ended").is_empty());
+    assert_eq!(h.settings_value(VERBOSE_KEY), Some(until.to_string()));
+
+    std::thread::sleep(Duration::from_millis(700));
+    h.ok("write_debug_log", json!({ "level": "info", "event": "ui.loaded", "fields": { "view": "main" } }));
+    h.ok("write_debug_log", json!({ "level": "info", "event": "ui.loaded", "fields": { "view": "main" } }));
+    wait_until("保存した期限を消す", || h.settings_value(VERBOSE_KEY).is_none().then_some(()));
+    assert_eq!(h.ok("get_debug_log_status", json!({}))["verboseUntil"], Value::Null);
+    let ended = h.debug_log_events("log.verbose.ended");
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert_ended_today(&ended[0], until);
+
+    // 期限が過ぎたあとに起動し直しても、もう一度は書かない
+    h.restart_debug_log();
+    h.ok("write_debug_log", json!({ "level": "info", "event": "ui.loaded" }));
+    assert_eq!(h.debug_log_events("log.verbose.ended").len(), 1);
+}
+
+/// アプリを止めている間に期限が過ぎたら、起動したときにオフに戻したことをその日のログに 1 回だけ書き、
+/// 保存した期限を消す。もう一度起動し直しても、書き直さない。
+// [LOG-010]
+#[test]
+fn verbose_logging_that_expired_while_stopped_is_ended_once_at_the_next_start() {
+    let h = Harness::new();
+    let until = now_ms() - 2 * 24 * 60 * 60 * 1000;
+    h.save_verbose_until(until);
+    h.restart_debug_log();
+    assert_eq!(h.settings_value(VERBOSE_KEY), None, "保存した期限を消す");
+    assert_eq!(h.ok("get_debug_log_status", json!({}))["verboseUntil"], Value::Null);
+    let ended = h.debug_log_events("log.verbose.ended");
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert_ended_today(&ended[0], until);
+
+    h.restart_debug_log();
+    h.ok("write_debug_log", json!({ "level": "info", "event": "ui.loaded" }));
+    assert_eq!(h.debug_log_events("log.verbose.ended").len(), 1, "起動し直しても書き直さない");
+
+    // 動いている間にオンにし直せば、また期限まで続く
+    let on = h.ok("set_debug_verbose", json!({ "enabled": true }));
+    assert!(on["verboseUntil"].as_i64().unwrap() > now_ms());
+    h.restart_debug_log();
+    assert_eq!(h.ok("get_debug_log_status", json!({}))["verboseUntil"], on["verboseUntil"]);
+}
+
+/// 画面から渡された出来事の名前が使えない形でも、画面のものと分かる名前（ui.invalid-event-name）で書く。
+// [LOG-008]
+#[test]
+fn an_invalid_ui_event_name_keeps_the_ui_prefix() {
+    let h = Harness::new();
+    h.ok("write_debug_log", json!({ "level": "error", "event": "Bad Name!", "fields": { "x": 1 } }));
+    h.ok("write_debug_log", json!({ "level": "info", "event": "ui.Bad" }));
+    let invalid = h.debug_log_events("ui.invalid-event-name");
+    assert_eq!(invalid.len(), 2, "{}", h.debug_log_text());
+    assert_eq!((&invalid[0]["level"], &invalid[0]["source"]), (&json!("error"), &json!("ui")));
+    assert!(h.debug_log_events("invalid-event-name").is_empty());
+}
+
+/// 手動の更新の失敗は、段階（ダウンロード・インストール）ごとに、種類と理由を書く。
+/// 録音中で見送ったときは、決まった理由を書く。
+// [LOG-004]
+#[test]
+fn manual_update_failures_are_logged_by_stage() {
+    let h = Harness::new();
+    h.ok("check_for_update", json!({}));
+    assert!(h.call("install_update", json!({})).is_err());
+    let failed = h.debug_log_events("update.download_failed");
+    assert_eq!(failed.len(), 1, "{}", h.debug_log_text());
+    assert_eq!(failed[0]["level"], "error");
+    assert_eq!((&failed[0]["fields"]["auto"], &failed[0]["fields"]["kind"]), (&json!(false), &json!("signature")));
+    assert!(!failed[0]["fields"]["reason"].as_str().unwrap().is_empty());
+    assert!(h.debug_log_events("update.install_failed").is_empty(), "インストールの段階には進んでいない");
+    drop(h);
+
+    let h = Harness::with_endpoint("/update-signed-slow/latest.json");
+    h.set_key(kiroscribe_core::secrets::Provider::OpenAi, OPENAI_KEY);
+    let note = h.note("更新のテスト", "");
+    h.ok("check_for_update", json!({}));
+    let installing = h.spawn("install_update", json!({}));
+    wait_until("ダウンロードの開始", || {
+        h.events("update-status").iter().any(|s| s["phase"] == "downloading").then_some(())
+    });
+    h.ok("start_recording", json!({ "noteId": note }));
+    assert!(installing.join().unwrap().is_err());
+    let postponed = h.debug_log_events("update.install_postponed");
+    assert_eq!(postponed.len(), 1);
+    assert_eq!(postponed[0]["fields"]["reason"], "録音を停止してから更新してください");
+    h.ok("stop_recording", json!({}));
+
+    assert!(h.call("install_update", json!({})).is_err());
+    let failed = h.debug_log_events("update.install_failed");
+    assert_eq!(failed.len(), 1, "{}", h.debug_log_text());
+    assert_eq!(failed[0]["fields"]["auto"], false);
+    assert_ne!(failed[0]["fields"]["kind"], "signature", "署名の確認は通っている");
+    assert!(!failed[0]["fields"]["reason"].as_str().unwrap().is_empty());
+    assert!(h.debug_log_events("update.download_failed").is_empty());
 }

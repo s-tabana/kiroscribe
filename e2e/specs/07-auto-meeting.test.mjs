@@ -13,6 +13,25 @@ import { byText } from "../lib/webdriver.mjs";
 import { readZip } from "../lib/zip.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * 利用者の名前（ログオンの名前と、利用者のフォルダの名前）が入っていないことを確かめる。
+ * 大文字と小文字の違い、JSON の中で区切りが \\ と書かれたパスも見る
+ */
+function assertNoUserFolderName(text, ...userNames) {
+  const lower = text.toLowerCase();
+  for (const name of new Set(userNames.filter(Boolean).map((n) => n.toLowerCase()))) {
+    for (const root of ["users", "home"]) {
+      for (const sep of ["\\", "\\\\", "/"]) {
+        const needle = `${sep}${root}${sep}${name}`;
+        assert.ok(!lower.includes(needle), `利用者のフォルダの名前が zip に入っている: ${needle}`);
+      }
+    }
+    // 短い名前と、伏せた印（<user>）と同じ名前は、ほかの語の一部にも現れるので、パスの形でだけ確かめる
+    if (name.length >= 4 && name !== "user") assert.ok(!lower.includes(name), `利用者の名前が zip に入っている: ${name}`);
+  }
+}
+
 /** 会議が見えなくなってから録音を止めるまでの猶予（このテストでの値。製品では 20 秒） */
 const GRACE_MS = 3_000;
 
@@ -306,7 +325,7 @@ test(
     assert.equal(environment.appVersion, JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version);
 
     const all = names.map((name) => files.get(name).toString("utf8")).join("\n");
-    assert.ok(!all.includes(path.basename(os.homedir())), "利用者のフォルダの名前が zip に入っている");
+    assertNoUserFolderName(all, os.userInfo().username, path.basename(os.homedir()));
     for (const key of [OPENAI_KEY, ANTHROPIC_KEY]) assert.ok(!all.includes(key), "API キーが zip に入っている");
     await closeSettings(session);
   },

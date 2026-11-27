@@ -525,4 +525,53 @@ mod tests {
         assert!(verbose_log.next(&check(true), 14_999).is_none());
         assert!(verbose_log.next(&check(true), 15_000).is_some(), "詳しい記録のときは 15 秒ごと");
     }
+
+    /// 会議アプリに見える記録やブラウザのウィンドウが多く、値の数の上限を超えても、ログのファイルに書いた行には
+    /// 判定・理由・段階と、記録を開けたか・記録の件数が残る。
+    // [LOG-005][LOG-009]
+    #[test]
+    fn a_check_with_many_entries_keeps_the_verdict_in_the_log_file() {
+        use kiroscribe_core::debug_log::{DebugLog, Level, Source};
+        use kiroscribe_core::mic_store::MicEntry;
+
+        let names = ["slack.exe", "ms-teams.exe", "zoom.exe", "discord.exe", "webexmta.exe", "chrome.exe", "msedge.exe"];
+        let mut entries: Vec<MicEntry> = (0..12)
+            .map(|i| MicEntry {
+                id: format!(r"C:\Users\山田 太郎\AppData\Local\app{i}\{}", names[i % names.len()]),
+                last_start: 134_402_000_000_000_000 + i as u64,
+                last_stop: Some(134_402_100_000_000_000),
+            })
+            .collect();
+        // 会議アプリに見えない記録も、件数には入る
+        entries.push(MicEntry { id: r"C:\Program Files\Recorder\rec.exe".into(), last_start: 1, last_stop: Some(2) });
+        let store = MicStore { opened: true, entries };
+        let observation = Observation {
+            mic_users: vec![MicUser { id: r"C:\x\chrome.exe".into(), in_use: true }],
+            windows: (0..12)
+                .map(|i| WindowInfo { exe: "chrome.exe".into(), title: format!("タブ {i} - Google Chrome") })
+                .collect(),
+        };
+        let tracker = MeetingTracker::default();
+        let dir = tempfile::tempdir().unwrap();
+        let log = DebugLog::open(dir.path()).unwrap();
+        for verbose in [false, true] {
+            let check = Check { observation: &observation, store: Some(&store), own_exe: None, tracker: &tracker, verbose };
+            let fields = check_fields(&check, Some(kiroscribe_core::mic_store::filetime_to_unix_ms(134_402_160_000_000_000)));
+            assert!(fields["micStore"]["entries"].as_array().unwrap().len() >= 10, "{fields}");
+            log.write(Level::Info, Source::App, "meeting.check", fields);
+        }
+
+        let text = std::fs::read_to_string(&log.files()[0]).unwrap();
+        let lines: Vec<Value> = text.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(lines.len(), 2);
+        for line in &lines {
+            let fields = &line["fields"];
+            assert_eq!(fields["verdict"], "noMeetingTab", "{line}");
+            assert_eq!(fields["why"], "ブラウザがマイクを使っているが、そのブラウザに会議のタブが見えない");
+            assert_eq!(fields["phase"], "idle");
+            assert_eq!(fields["micStore"]["opened"], true);
+            assert_eq!(fields["micStore"]["total"], 13);
+        }
+        assert!(!text.contains("山田"), "{text}");
+    }
 }

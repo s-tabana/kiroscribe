@@ -417,13 +417,37 @@ describe("SettingsDialog: デバッグ用のログ", () => {
   });
 
   it("[LOG-010] 期限が過ぎて本体がオフに戻していたら、開いたときにオフで表示する", async () => {
-    const backend = createMemoryBackend();
-    vi.spyOn(backend, "getDebugLogStatus").mockResolvedValue({ verboseUntil: null });
+    let now = new Date(2026, 10, 27, 10, 0).getTime();
+    const backend = createMemoryBackend({ now: () => now });
+    expect((await backend.setDebugVerbose(true)).verboseUntil).toBe(now + 24 * 60 * 60 * 1000);
+    now += 24 * 60 * 60 * 1000;
     render(
       <BackendContext.Provider value={backend}>
         <SettingsDialog onClose={vi.fn()} />
       </BackendContext.Provider>,
     );
     expect(await screen.findByRole("checkbox", { name: /詳しい記録を残す（24 時間）/ })).not.toBeChecked();
+  });
+
+  it("[LOG-010] 切り替えの途中は、次の切り替えを受け付けない", async () => {
+    const user = userEvent.setup();
+    const { backend } = setup();
+    let finish: () => void = () => undefined;
+    const setVerbose = vi.spyOn(backend, "setDebugVerbose").mockImplementation(
+      (enabled) =>
+        new Promise((resolve) => {
+          finish = () => resolve({ verboseUntil: enabled ? Date.now() + 1000 : null });
+        }),
+    );
+    const check = await screen.findByRole("checkbox", { name: /詳しい記録を残す（24 時間）/ });
+
+    await user.click(check);
+    expect(check).toBeDisabled();
+    await user.click(check);
+    expect(setVerbose).toHaveBeenCalledOnce();
+
+    finish();
+    await waitFor(() => expect(check).toBeEnabled());
+    expect(check).toBeChecked();
   });
 });

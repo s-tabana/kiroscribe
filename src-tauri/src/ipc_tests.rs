@@ -360,15 +360,22 @@ fn mock_app(update_endpoint: &str) -> (tauri::App<MockRuntime>, WebviewWindow<Mo
 }
 
 /// 模擬のアプリごとの、デバッグ用のログのフォルダ（テストの実行ファイルの隣、target の中）。
+/// 模擬のアプリはテストの終わりまでログを書くので、フォルダはテストの間は残し、
+/// 次にテストを流したときに、前の回のフォルダをまとめて消す（溜まり続けないように）。
 fn debug_log_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("テストの実行ファイルの場所が分かりません");
-    let base = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("target の場所が分かりません")
-        .join("ipc-debug-logs");
-    std::fs::create_dir_all(&base).unwrap();
-    tempfile::Builder::new().tempdir_in(&base).unwrap().keep()
+    static BASE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let base = BASE.get_or_init(|| {
+        let exe = std::env::current_exe().expect("テストの実行ファイルの場所が分かりません");
+        let base = exe
+            .parent()
+            .and_then(Path::parent)
+            .expect("target の場所が分かりません")
+            .join("ipc-debug-logs");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    });
+    tempfile::Builder::new().tempdir_in(base).unwrap().keep()
 }
 
 /// 画面の `invoke(command, args)` と同じ経路でコマンドを呼ぶ。

@@ -166,19 +166,26 @@ pub fn os_description() -> String {
     }
 }
 
-/// Windows のビルド番号（例: 「26100.2314」）。Windows 以外では `None`。
+/// Windows のビルド番号（例: 「26100.2314」）。Windows 以外と、ビルド番号を読めないときは `None`。
 pub fn windows_build() -> Option<String> {
     #[cfg(windows)]
     {
         let key = windows_current_version()?;
         let build: String = key.get_value("CurrentBuild").ok()?;
         let ubr: u32 = key.get_value("UBR").unwrap_or(0);
-        Some(format!("{build}.{ubr}"))
+        build_number(&build, ubr)
     }
     #[cfg(not(windows))]
     {
         None
     }
+}
+
+/// ビルド番号の形にする。ビルド番号が空なら `None`（「.0」のような値を書かない）。
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn build_number(build: &str, ubr: u32) -> Option<String> {
+    let build = build.trim();
+    (!build.is_empty()).then(|| format!("{build}.{ubr}"))
 }
 
 #[cfg(windows)]
@@ -211,6 +218,15 @@ mod tests {
     use std::io::Read;
 
     use super::*;
+
+    /// Windows のビルド番号を読めないとき（空のとき）は、空の文字列でなく「なし」にする。
+    // [LOG-003]
+    #[test]
+    fn an_empty_windows_build_is_none() {
+        assert_eq!(build_number("26100", 2314), Some("26100.2314".into()));
+        assert_eq!(build_number("", 0), None);
+        assert_eq!(build_number("  ", 5), None);
+    }
     use crate::meeting_record::MeetingRecorder;
 
     fn settings() -> Settings {

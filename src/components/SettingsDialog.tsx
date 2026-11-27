@@ -447,6 +447,8 @@ function DebugLogSave() {
   const backend = useBackend();
   const [busy, setBusy] = useState(false);
   const [verboseUntil, setVerboseUntil] = useState<number | null | undefined>(undefined);
+  // 切り替えの途中は、次の切り替えを受け付けない（続けて押すと、答えの順番が入れ替わり、表示と本体が食い違うため）
+  const [switching, setSwitching] = useState(false);
   const [message, setMessage] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
 
   useEffect(() => {
@@ -458,11 +460,14 @@ function DebugLogSave() {
 
   const toggleVerbose = async (enabled: boolean) => {
     setMessage(null);
+    setSwitching(true);
     try {
       const status = await backend.setDebugVerbose(enabled);
       setVerboseUntil(status.verboseUntil);
     } catch (err) {
       setMessage({ kind: "error", text: errorMessage(err) });
+    } finally {
+      setSwitching(false);
     }
   };
 
@@ -486,6 +491,7 @@ function DebugLogSave() {
           <input
             type="checkbox"
             checked={verboseUntil !== null}
+            disabled={switching}
             onChange={(e) => void toggleVerbose(e.target.checked)}
           />
           <span>

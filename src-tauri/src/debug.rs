@@ -7,7 +7,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Local};
 use kiroscribe_core::debug_bundle::{self, BundleInput, Environment, SafeSettings};
-use kiroscribe_core::debug_log::{self, DebugLog, Level, Source, VERBOSE_MS};
+use kiroscribe_core::debug_log::{self, format_ms, DebugLog, Level, Source, VERBOSE_MS};
 use kiroscribe_core::secrets::api_key_status;
 use kiroscribe_core::time::now_ms;
 use kiroscribe_core::Database;
@@ -33,21 +33,52 @@ pub fn open(data_dir: &Path) -> Option<DebugLog> {
     }
 }
 
-/// 保存してある「詳しい記録」の期限を読み込む（期限が過ぎていれば、オフのまま）。
+/// 保存してある「詳しい記録」の期限を読み込む（起動したときに呼ぶ）。
+/// アプリを止めている間に期限が過ぎていたら、オフに戻したことをいまの日のログに書き、保存した期限を消す
+/// （次に起動したときに、もう一度書かないように）。
 pub fn restore_verbose(log: &DebugLog, db: &Database, now_ms: i64) {
-    let until = db
-        .get_value(VERBOSE_KEY)
-        .ok()
-        .flatten()
-        .and_then(|value| value.parse::<i64>().ok())
-        .filter(|until| *until > now_ms);
+    let saved = db.get_value(VERBOSE_KEY).ok().flatten();
+    let until = saved.as_deref().and_then(|value| value.parse::<i64>().ok());
     log.set_verbose_until(until);
+    let at = DateTime::from_timestamp_millis(now_ms).unwrap_or_else(|| Local::now().into());
+    log.expire_verbose_at(at);
+    let expired = log.take_expired();
+    // 読めない値は、期限が過ぎたものと同じく消す
+    if saved.is_some() && (expired.is_some() || until.is_none()) {
+        let _ = db.delete_value(VERBOSE_KEY);
+    }
+}
+
+/// アプリを動かしている間に「詳しい記録」の期限が過ぎてオフに戻ったら、保存した期限を消す
+/// （次に起動したときに、オフに戻したことをもう一度書かないように）。
+/// 書く側がデータベースの鍵を持ったまま書くこともあるので、別のスレッドで消す。
+/// その間に利用者がオンにし直していたら（保存した期限が違えば）、消さない。
+fn forget_expired(app: &AppHandle, log: &DebugLog) {
+    let Some(until) = log.take_expired() else {
+        return;
+    };
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        let db = state.db();
+        if db.get_value(VERBOSE_KEY).ok().flatten() == Some(until.to_string()) {
+            let _ = db.delete_value(VERBOSE_KEY);
+        }
+    });
+}
+
+/// ログに書き、「詳しい記録」の期限が過ぎていたら、保存した期限も消す。
+fn write_log(app: &AppHandle, log: &DebugLog, level: Level, source: Source, event: &str, fields: Value) {
+    log.write(level, source, event, fields);
+    forget_expired(app, log);
 }
 
 /// 出来事を書く（ログを用意していなければ、何もしない）。
 pub fn write(app: &AppHandle, level: Level, event: &str, fields: Value) {
     if let Some(log) = app.try_state::<DebugLog>() {
-        log.write(level, Source::App, event, fields);
+        write_log(app, &log, level, Source::App, event, fields);
     }
 }
 
@@ -105,8 +136,18 @@ pub fn set_debug_verbose(app: AppHandle, state: State<'_, AppState>, enabled: bo
     }
     log.set_verbose_until(until);
     let event = if enabled { "log.verbose.started" } else { "log.verbose.stopped" };
-    log.write(Level::Info, Source::App, event, serde_json::json!({ "until": until.map(rfc3339) }));
+    write_log(&app, &log, Level::Info, Source::App, event, serde_json::json!({ "until": until.map(format_ms) }));
     Ok(status(&app))
+}
+
+/// 画面の出来事の名前: 「ui.」を付け（付いていなければ）、使えない名前なら `ui.invalid-event-name` にする。
+fn ui_event_name(event: &str) -> String {
+    let event = if event.starts_with("ui.") { event.to_string() } else { format!("ui.{event}") };
+    if debug_log::valid_event_name(&event) {
+        event
+    } else {
+        "ui.invalid-event-name".into()
+    }
 }
 
 /// 画面の出来事を書く。`level` は "info" か "error"。出来事の名前には、画面のものと分かるよう「ui.」を付ける。
@@ -116,14 +157,7 @@ pub fn write_debug_log(app: AppHandle, level: String, event: String, fields: Opt
         return;
     };
     let level = if level == "error" { Level::Error } else { Level::Info };
-    let event = if event.starts_with("ui.") { event } else { format!("ui.{event}") };
-    log.write(level, Source::Ui, &event, fields.unwrap_or(Value::Null));
-}
-
-fn rfc3339(ms: i64) -> String {
-    DateTime::from_timestamp_millis(ms)
-        .map(|t| t.with_timezone(&Local).to_rfc3339())
-        .unwrap_or_default()
+    write_log(&app, &log, level, Source::Ui, &ui_event_name(&event), fields.unwrap_or(Value::Null));
 }
 
 /// 書き出す環境の情報。
@@ -137,11 +171,11 @@ fn environment(app: &AppHandle) -> Environment {
         os: debug_bundle::os_description(),
         os_build: debug_bundle::windows_build(),
         arch: std::env::consts::ARCH.to_string(),
-        created_at: rfc3339(now),
+        created_at: format_ms(now),
         verbose_until: app
             .try_state::<DebugLog>()
             .and_then(|log| log.verbose_until(now))
-            .map(rfc3339),
+            .map(format_ms),
         settings: settings.map(|settings| SafeSettings::new(&settings, keys.as_ref())),
     }
 }
