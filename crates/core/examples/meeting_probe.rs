@@ -10,7 +10,8 @@
 //! 引数:
 //! - `--once`: 1 回だけ調べて終わる
 //! - `--interval <秒>`: 調べる間隔（既定は 2 秒）
-//! - `--titles`: マイクを使っているブラウザの、表示中のウィンドウのタイトルも出す（メールの件名なども出るので、人に見せる前に確かめる）
+//! - `--titles`: マイクを使っているブラウザと、デスクトップの会議アプリ（slack.exe など）の、表示中のウィンドウのタイトルも出す
+//!   （メールの件名・チャンネルや相手の名前なども出るので、人に見せる前に確かめる）
 
 use std::time::Duration;
 
@@ -82,6 +83,26 @@ fn sessions_lines(sessions: &MicSessions) -> Vec<String> {
     lines
 }
 
+/// 再生のセッションのうち、会議アプリとブラウザのもの（判定には使わない。通話中に音を鳴らしているかを見るため）。
+fn playback_lines() -> Vec<String> {
+    let playback = kiroscribe_core::mic_sessions::read_playback();
+    if !playback.available {
+        return vec![format!("  再生のセッション: 取れない（{}）", playback.error.as_deref().unwrap_or("Windows 以外"))];
+    }
+    let report = kiroscribe_core::mic_sessions::report(&playback);
+    let sessions: Vec<_> = report.sessions.iter().filter(|s| s.app.is_some() || s.browser).collect();
+    let mut lines = vec![format!(
+        "  再生のセッション（会議アプリ・ブラウザだけ。判定には使わない）: 再生のデバイス {} 台、{} 件",
+        report.endpoints,
+        sessions.len()
+    )];
+    for session in sessions {
+        let package = session.package.as_deref().map(|p| format!("  [{p}]")).unwrap_or_default();
+        lines.push(format!("    {:<8}  {}{}", session.state.name(), session.exe, package));
+    }
+    lines
+}
+
 fn store_line(store: &MicStore) -> String {
     if !store.opened {
         return "  ConsentStore: 開けない".into();
@@ -122,6 +143,7 @@ fn render(observation: &Observation, sources: Option<&MicSources>, tracker: &Mee
     let mut lines = vec![format!("  判定に使う手がかり: {}", source_text(sources))];
     if let Some(sources) = sources {
         lines.extend(sessions_lines(&sources.sessions));
+        lines.extend(playback_lines());
         lines.push(store_line(&sources.store));
     }
     lines.push(format!(
@@ -138,8 +160,27 @@ fn render(observation: &Observation, sources: Option<&MicSources>, tracker: &Mee
         for title in browser_titles(observation, None) {
             lines.push(format!("  ブラウザのタブ: {title}"));
         }
+        for title in meeting_app_titles() {
+            lines.push(format!("  会議アプリのウィンドウ: {title}"));
+        }
     }
     lines
+}
+
+/// デスクトップの会議アプリの、表示中のウィンドウのタイトル（マイクを使っているかによらない）。
+fn meeting_app_titles() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        kiroscribe_core::meetings::windows_observer::list_windows()
+            .into_iter()
+            .filter(|window| kiroscribe_core::meetings::desktop_app(&window.exe).is_some())
+            .map(|window| format!("{}: {}", window.exe, window.title))
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
 }
 
 fn main() {
