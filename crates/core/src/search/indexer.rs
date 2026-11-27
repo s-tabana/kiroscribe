@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::extract::{extract_within, Extracted};
-use super::store::{remove_index_files, stamp_of_file, SearchIndex};
+use super::store::{remove_index_files, stamp_of_file, Binding, SearchIndex};
 use super::walk::{is_online_only, is_outside, FileEntry, FileId, Limits, Place, Root};
 use crate::time::now_ms;
 
@@ -62,13 +62,19 @@ pub struct SearchFolder {
 
 impl SearchFolder {
     /// 選んだフォルダを開き、その実体を記録した探すフォルダにする。
-    /// 文字に直せない名前（損なわずに保存できない）・リンク・フォルダでないものは、エラー。
+    /// 文字に直せない名前（損なわずに保存できない）・リンク・フォルダでないもの・同じフォルダかをあとで確かめられないものは、エラー。
     pub fn register(path: &Path) -> std::io::Result<SearchFolder> {
         let text = path.to_str().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "文字に直せない名前を含むフォルダは追加できません")
         })?;
-        let root = Root::open(path)?;
-        Ok(SearchFolder { path: text.to_string(), no_content: false, place: Some(root.place()) })
+        let place = Root::open(path)?.place();
+        if place.is_unverifiable() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "このフォルダは、あとで同じフォルダかを確かめられない（実際の場所も作成日時も取れない）ため追加できません",
+            ));
+        }
+        Ok(SearchFolder { path: text.to_string(), no_content: false, place: Some(place) })
     }
 }
 
@@ -261,9 +267,10 @@ impl Worker {
             missing: HashSet::new(),
             erasure: Erasure::Unknown,
             last_purge: Instant::now(),
-            seen: HashMap::new(),
             changes: 0,
             incomplete: HashSet::new(),
+            unverified: HashSet::new(),
+            last_retry: Instant::now(),
         }
     }
 }
@@ -402,12 +409,23 @@ struct Worker {
     /// 索引を消し終えたか
     erasure: Erasure,
     last_purge: Instant,
-    /// 探すフォルダを最後に調べたときの識別子（同じ場所で作り直されたら、すべて読み直す）。一覧から外すまで覚えておく
-    seen: HashMap<PathBuf, FileId>,
     /// 索引に書いた回数（変わったファイルがあったときだけ、更新した時刻を進める）
     changes: u64,
     /// 中を読めなかったフォルダがあり、調べ切れていないフォルダ（見直しの間隔で調べ直す）
     incomplete: HashSet<PathBuf>,
+    /// 出どころを確かめられない行を消せなかったフォルダ（検索には出さず、消し直す間隔で消し直す。
+    /// 起動し直したあとは、索引の記録から同じことが分かる）
+    unverified: HashSet<PathBuf>,
+    last_retry: Instant,
+}
+
+/// 探すフォルダの行を、どの実体から読むかの記録（足したときの実体と、開いたフォルダの識別子）。
+fn binding_of(place: &Place, root: FileId) -> Binding {
+    Binding { place: place_key(place), root: format!("{}:{}", root.0, root.1) }
+}
+
+fn place_key(place: &Place) -> String {
+    serde_json::to_string(place).unwrap_or_default()
 }
 
 /// ネットワークのドライブ（UNC のパス `\\server\share` か、ネットワークに割り当てたドライブ）か。
@@ -460,7 +478,9 @@ impl Worker {
         let mut watch_failed = false;
         loop {
             let timeout = match pending_since {
-                None if self.erasure == Erasure::Pending => self.intervals.root_check.min(self.intervals.poll).min(self.intervals.purge_retry),
+                None if self.erasure == Erasure::Pending || !self.unverified.is_empty() => {
+                    self.intervals.root_check.min(self.intervals.poll).min(self.intervals.purge_retry)
+                }
                 None => self.intervals.root_check.min(self.intervals.poll),
                 Some(since) => CHANGE_DEBOUNCE.min(MAX_CHANGE_DELAY.saturating_sub(since.elapsed())),
             };
@@ -507,6 +527,18 @@ impl Worker {
                     let generation = self.generation();
                     self.emit(generation, IndexState::Off, (0, 0), true, None);
                 }
+            }
+            if self.enabled() && !self.unverified.is_empty() && self.last_retry.elapsed() >= self.intervals.purge_retry {
+                // 出どころを確かめられない行を消し直す（フォルダが見つからなくても消す）。
+                // 消せたフォルダは、一覧にあれば、すべて読み直す（消せなかったフォルダは、また消し直す）
+                self.last_retry = Instant::now();
+                let mut erased = BTreeSet::new();
+                for folder in std::mem::take(&mut self.unverified) {
+                    if self.erase_folder(&folder) {
+                        erased.insert(folder);
+                    }
+                }
+                self.apply_changes(erased);
             }
             if self.enabled() && self.last_root_check.elapsed() >= self.intervals.root_check {
                 self.last_root_check = Instant::now();
@@ -624,7 +656,7 @@ impl Worker {
             }
             Command::Enable(folders) | Command::SetFolders(folders) => {
                 let changes = self.changes;
-                self.remove_unlisted(&folders);
+                self.retire(&folders);
                 self.build(generation, false, changes);
             }
             Command::Rebuild => {
@@ -638,6 +670,7 @@ impl Worker {
                 self.truncated.clear();
                 self.missing.clear();
                 self.incomplete.clear();
+                self.unverified.clear();
                 self.purge();
                 // 消し終えてから「オフ」を知らせる。消せなかったときは、作成と見張りは止めたまま「消している」を知らせ、
                 // 消し直せたときに「オフ」を知らせる
@@ -684,21 +717,81 @@ impl Worker {
         }
     }
 
-    /// 一覧にないフォルダのファイルを、索引から消す。
-    fn remove_unlisted(&mut self, folders: &[SearchFolder]) {
-        let listed: HashSet<&str> = folders.iter().map(|f| f.path.as_str()).collect();
-        self.truncated.retain(|p| listed.contains(p.to_string_lossy().as_ref()));
-        self.missing.retain(|p| listed.contains(p.to_string_lossy().as_ref()));
-        self.incomplete.retain(|p| listed.contains(p.to_string_lossy().as_ref()));
-        self.seen.retain(|p, _| listed.contains(p.to_string_lossy().as_ref()));
+    /// 一覧にないフォルダのファイルを、索引から消す。一覧にあっても、足したときの実体が索引の記録と違う
+    /// （選び直した・実体を記録していない）フォルダの行は、出どころを確かめられないので、調べる前に検索から外す。
+    /// 世代が替わって調べる前にやめても、検索には出ない（行は、そのフォルダを調べるときに消す）。
+    fn retire(&mut self, folders: &[SearchFolder]) {
+        let listed: HashMap<&str, Option<String>> =
+            folders.iter().map(|f| (f.path.as_str(), f.place.as_ref().map(place_key))).collect();
+        let is_listed = |p: &PathBuf| listed.contains_key(p.to_string_lossy().as_ref());
+        self.truncated.retain(is_listed);
+        self.missing.retain(is_listed);
+        self.incomplete.retain(is_listed);
         let Some(index) = self.open_index() else { return };
-        let mut removed = 0;
+        let mut unlisted = Vec::new();
+        let mut unconfirmed = Vec::new();
         for folder in index.folders().unwrap_or_default() {
-            if !listed.contains(folder.to_string_lossy().as_ref()) && index.remove_folder(&folder).is_ok() {
-                removed += 1;
+            match listed.get(folder.to_string_lossy().as_ref()) {
+                None => unlisted.push(folder),
+                Some(place) => {
+                    let bound = index.binding(&folder).ok().flatten().map(|binding| binding.place);
+                    if bound.is_some() && bound != *place {
+                        unconfirmed.push(folder);
+                    }
+                }
             }
         }
-        self.changes += removed;
+        for folder in unlisted {
+            self.erase_folder(&folder);
+        }
+        for folder in unconfirmed {
+            self.hide(&folder);
+        }
+    }
+
+    /// フォルダの行と記録を、索引から消す。消せなければ、検索から外して、あとで消し直す。
+    /// 消せたら true。
+    fn erase_folder(&mut self, folder: &Path) -> bool {
+        let Some(index) = self.open_index() else { return false };
+        let rows = index.stored_rows(folder).unwrap_or(0);
+        let bound = index.binding(folder).ok().flatten().is_some();
+        if rows == 0 && !bound {
+            self.unverified.remove(folder);
+            return true;
+        }
+        match index.remove_folder(folder) {
+            Ok(()) => {
+                self.unverified.remove(folder);
+                self.changes += 1;
+                true
+            }
+            Err(err) => {
+                eprintln!("資料の索引から、フォルダの行を消せません（あとで消し直します）: {err}");
+                self.hide(folder);
+                self.unverified.insert(folder.to_path_buf());
+                false
+            }
+        }
+    }
+
+    /// フォルダの行を、出どころを確かめられないものにする（検索に出さない）。
+    /// 索引に書けないときは、索引のファイルを消して作り直す（確かめられない行を、検索に残さない）。
+    fn hide(&mut self, folder: &Path) {
+        let Some(index) = self.open_index() else { return };
+        if index.binding(folder).is_ok_and(|binding| binding.is_none()) {
+            return;
+        }
+        if let Err(err) = index.unbind(folder) {
+            eprintln!("資料の索引の行を、検索から外せません（索引を作り直します）: {err}");
+            self.reset_index();
+            self.changes += 1;
+        }
+    }
+
+    /// 探すフォルダの行が、足したときの実体 `place` の、開いたフォルダ `root` から読んだものだと記録されているか。
+    fn is_bound(&self, folder: &Path, place: &Place, root: FileId) -> bool {
+        let Some(index) = self.index.as_ref() else { return false };
+        index.binding(folder).ok().flatten() == Some(binding_of(place, root))
     }
 
     /// すべてのフォルダを調べ、変わったファイルだけを読み直す（`all` なら、すべて読み直す）。
@@ -732,15 +825,11 @@ impl Worker {
     fn scan_folder(&mut self, root: &Path, all: bool, generation: u64, done: &mut usize, total: &mut usize) -> bool {
         let Some(place) = self.place_of(root) else {
             // 足したときの実体を記録していない（実体を記録する前の設定）。どこを読んだか確かめられないので、
-            // それまでの索引も消し、選び直すまで読まない
+            // それまでの索引も消し（消せなければ検索から外して消し直し）、選び直すまで読まない
             self.missing.remove(root);
             self.truncated.remove(root);
             self.incomplete.remove(root);
-            if let Some(index) = self.open_index() {
-                if index.count_folder(root).unwrap_or(0) > 0 && index.remove_folder(root).is_ok() {
-                    self.changes += 1;
-                }
-            }
+            self.erase_folder(root);
             return true;
         };
         let Some(opened) = self.open_root(root) else {
@@ -748,11 +837,30 @@ impl Worker {
             self.missing.insert(root.to_path_buf());
             return true;
         };
-        // 同じ場所で別のフォルダに替わっていたら、名前・大きさ・日時が同じファイルも読み直す
-        // （初めて調べるときは、足したときの実体と比べる。アプリを起動し直したあとも）
-        let previous = self.seen.get(root).copied().unwrap_or(place.id());
-        let replaced = previous != opened.id();
-        let all = all || replaced;
+        // 索引の行を、選び直す前の実体・同じ場所で作り直す前のフォルダから読んでいた（記録がない・違う）なら、
+        // 名前・大きさ・日時が同じファイルも使い回さない。それまでの行を消してから、すべて読み直す
+        // （記録は索引にあるので、世代が替わっても、アプリを起動し直しても同じ）。消せなければ読まずに、あとで消し直す
+        if self.open_index().is_none() {
+            return true;
+        }
+        if !self.is_bound(root, &place, opened.id()) {
+            let Some(index) = self.index.as_ref() else { return true };
+            let rows = index.stored_rows(root).unwrap_or(0);
+            match index.rebind(root, &binding_of(&place, opened.id())) {
+                Ok(()) => {
+                    self.unverified.remove(root);
+                    if rows > 0 {
+                        self.changes += 1;
+                    }
+                }
+                Err(err) => {
+                    eprintln!("資料の索引から、確かめられない行を消せません（あとで消し直します）: {err}");
+                    self.hide(root);
+                    self.unverified.insert(root.to_path_buf());
+                    return true;
+                }
+            }
+        }
         let walked = opened.walk(self.limits);
         self.missing.remove(root);
         if walked.unreadable.is_empty() {
@@ -766,9 +874,6 @@ impl Worker {
             self.truncated.remove(root);
         }
         *total += walked.files.len();
-        if self.open_index().is_none() {
-            return true;
-        }
         let Some(index) = self.index.as_ref() else { return true };
         let known = index.known_files(root).unwrap_or_default();
         let found: HashSet<&PathBuf> = walked.files.iter().map(|f| &f.path).collect();
@@ -804,7 +909,6 @@ impl Worker {
             *done += 1;
             self.emit(generation, IndexState::Building, (*done, *total), false, None);
         }
-        self.seen.insert(root.to_path_buf(), opened.id());
         true
     }
 
@@ -851,10 +955,11 @@ impl Worker {
                 if self.stale(generation) {
                     return;
                 }
-                if self.place_of(&root).is_none() {
-                    // 足したときの実体を記録していない（選び直すまで読まない）
+                let Some(place) = self.place_of(&root) else {
+                    // 足したときの実体を記録していない（選び直すまで読まない）。残っている行があれば消す
+                    self.erase_folder(&root);
                     continue;
-                }
+                };
                 let Some(opened) = self.open_root(&root) else {
                     // ドライブが外れた・フォルダが移った・フォルダそのものがリンクに替わった。
                     // 1 つずつのファイルを反映する前に見張りを外し、それまでの索引は残して、戻るまで見直す
@@ -867,8 +972,10 @@ impl Worker {
                 };
                 // 見つからなかったフォルダが戻ったときは、すべて調べ直す
                 let returned = self.missing.contains(&root);
-                // 変わったファイルが分かっているときは、そのファイルだけを読み直す（フォルダそのものなら、すべて調べ直す）
-                let whole = returned || changed.contains(&root);
+                // 変わったファイルが分かっているときは、そのファイルだけを読み直す（フォルダそのものなら、すべて調べ直す）。
+                // 索引の行を、いまの実体から読んだと記録していなければ、フォルダごと調べ直す
+                self.open_index();
+                let whole = returned || changed.contains(&root) || !self.is_bound(&root, &place, opened.id());
                 let single: Vec<&PathBuf> = changed.iter().filter(|p| p.starts_with(&root) && *p != &root).collect();
                 let mut handled = !whole && !single.is_empty();
                 for path in &single {

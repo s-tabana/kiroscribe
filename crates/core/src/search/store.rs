@@ -17,7 +17,7 @@ pub const EXCERPT_CHARS: usize = 600;
 /// 抜粋の位置を決めるときに数える、1 つの検索語の一致の数の上限。
 const MAX_HITS_PER_TERM: usize = 5_000;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const SCHEMA: &str = r#"
 CREATE TABLE docs (
     id          INTEGER PRIMARY KEY,
@@ -36,6 +36,11 @@ CREATE TABLE docs (
     online_only INTEGER NOT NULL
 );
 CREATE INDEX docs_folder ON docs(folder);
+CREATE TABLE bindings (
+    folder TEXT PRIMARY KEY,
+    place  TEXT NOT NULL,
+    root   TEXT NOT NULL
+);
 "#;
 
 /// 探し先の種類（索引の行の source）。
@@ -58,6 +63,14 @@ pub struct Hit {
 
 pub struct SearchIndex {
     conn: Connection,
+}
+
+/// 探すフォルダの行を、どの実体から読んだか: 足したときの実体（設定に保存したもの）と、読んだときに開いたフォルダの識別子。
+/// 索引は、フォルダごとにこれを記録する。記録のないフォルダの行は、出どころを確かめられないので、検索に出さない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Binding {
+    pub place: String,
+    pub root: String,
 }
 
 /// 読み直すかを決める、ファイルの目印（更新日時・大きさ・クラウドにだけあるか）。
@@ -129,7 +142,7 @@ impl SearchIndex {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version != SCHEMA_VERSION {
             // 索引は作り直せるので、形が違えば捨てて作る
-            conn.execute_batch("DROP TABLE IF EXISTS docs;")?;
+            conn.execute_batch("DROP TABLE IF EXISTS docs; DROP TABLE IF EXISTS bindings;")?;
             conn.execute_batch(SCHEMA)?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -179,15 +192,55 @@ impl SearchIndex {
         Ok(())
     }
 
-    /// フォルダのファイルを、すべて索引から消す。
+    /// フォルダのファイルを、すべて索引から消し、どの実体から読んだかの記録も消す（1 つの書き込みで行う）。
     pub fn remove_folder(&self, folder: &Path) -> Result<()> {
-        self.conn.execute("DELETE FROM docs WHERE folder = ?1", [folder.to_string_lossy()])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM bindings WHERE folder = ?1", [folder.to_string_lossy()])?;
+        tx.execute("DELETE FROM docs WHERE folder = ?1", [folder.to_string_lossy()])?;
+        tx.commit()?;
         Ok(())
+    }
+
+    /// フォルダの行を、どの実体から読んだかの記録（なければ None）。
+    pub fn binding(&self, folder: &Path) -> Result<Option<Binding>> {
+        let mut stmt = self.conn.prepare("SELECT place, root FROM bindings WHERE folder = ?1")?;
+        let mut rows = stmt.query([folder.to_string_lossy()])?;
+        Ok(match rows.next()? {
+            Some(row) => Some(Binding { place: row.get(0)?, root: row.get(1)? }),
+            None => None,
+        })
+    }
+
+    /// フォルダのそれまでの行をすべて消し、これから `binding` の実体から読むと記録する（1 つの書き込みで行う）。
+    pub fn rebind(&self, folder: &Path, binding: &Binding) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM docs WHERE folder = ?1", [folder.to_string_lossy()])?;
+        tx.execute(
+            "INSERT INTO bindings (folder, place, root) VALUES (?1, ?2, ?3)
+             ON CONFLICT(folder) DO UPDATE SET place = excluded.place, root = excluded.root",
+            params![folder.to_string_lossy(), binding.place, binding.root],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// フォルダの行を、出どころを確かめられないものにする（検索に出さない。行は、あとで消す）。
+    pub fn unbind(&self, folder: &Path) -> Result<()> {
+        self.conn.execute("DELETE FROM bindings WHERE folder = ?1", [folder.to_string_lossy()])?;
+        Ok(())
+    }
+
+    /// フォルダの、索引に残っている行の数（出どころを確かめられない行も数える）。
+    pub fn stored_rows(&self, folder: &Path) -> Result<usize> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM docs WHERE folder = ?1", [folder.to_string_lossy()], |row| row.get::<_, i64>(0))?
+            as usize)
     }
 
     /// 索引を空にする。消した内容が、本体と `-wal` のファイルに残らないところまで済ませる。
     pub fn clear(&self) -> Result<()> {
-        self.conn.execute("DELETE FROM docs", [])?;
+        self.conn.execute_batch("DELETE FROM docs; DELETE FROM bindings;")?;
         // 空き領域を詰めてから、書き込みの途中の内容（-wal）を本体に反映して空にする
         self.conn.execute_batch("VACUUM;")?;
         let busy: i64 = self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
@@ -213,20 +266,22 @@ impl SearchIndex {
         })
     }
 
+    /// フォルダの、検索に出す行の数（出どころを確かめられない行は数えない）。
     pub fn count_folder(&self, folder: &Path) -> Result<usize> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM docs WHERE folder = ?1", [folder.to_string_lossy()], |row| row.get::<_, i64>(0))?
-            as usize)
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM docs WHERE folder = ?1 AND folder IN (SELECT folder FROM bindings)",
+            [folder.to_string_lossy()],
+            |row| row.get::<_, i64>(0),
+        )? as usize)
     }
 
     pub fn count(&self) -> Result<usize> {
         Ok(self.conn.query_row("SELECT COUNT(*) FROM docs", [], |row| row.get::<_, i64>(0))? as usize)
     }
 
-    /// 索引に入っているフォルダ。
+    /// 索引に行か記録があるフォルダ。
     pub fn folders(&self) -> Result<Vec<PathBuf>> {
-        let mut stmt = self.conn.prepare("SELECT DISTINCT folder FROM docs WHERE source = ?1")?;
+        let mut stmt = self.conn.prepare("SELECT folder FROM docs WHERE source = ?1 UNION SELECT folder FROM bindings")?;
         let rows = stmt.query_map([SOURCE_FOLDER], |row| Ok(PathBuf::from(row.get::<_, String>(0)?)))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
@@ -238,6 +293,7 @@ impl SearchIndex {
 
     /// 検索語のどれかを、題名・ファイル名・中身に含む資料を、よく一致する順に `limit` 件まで返す。
     /// 並びは、一致した検索語の数、題名かファイル名に一致したか、更新日時の新しさの順。
+    /// どの実体から読んだかの記録がないフォルダの行（出どころを確かめられない行）は返さない。
     pub fn search(&self, terms: &[String], limit: usize) -> Result<Vec<Hit>> {
         let mut terms: Vec<String> = terms.iter().map(|t| normalize(t.trim())).filter(|t| !t.is_empty()).collect();
         terms.sort();
@@ -252,6 +308,7 @@ impl SearchIndex {
         let sql = format!(
             "SELECT path, folder, title, file_name, body, name_only, modified, matched FROM (
                SELECT path, folder, title, file_name, body, name_only, modified, ({matched}) AS matched, ({named}) AS named FROM docs
+               WHERE folder IN (SELECT folder FROM bindings)
              ) WHERE matched > 0 ORDER BY matched DESC, named DESC, modified DESC LIMIT {limit}"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -349,6 +406,10 @@ mod tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
+    fn bound(index: &SearchIndex, folder: &str) {
+        index.rebind(Path::new(folder), &Binding { place: "p".into(), root: "r".into() }).unwrap();
+    }
+
     fn paths(hits: &[Hit]) -> Vec<String> {
         hits.iter().map(|h| h.path.to_string_lossy().to_string()).collect()
     }
@@ -373,6 +434,7 @@ mod tests {
     fn substring_search_ignores_case_and_width() {
         let index = SearchIndex::open_in_memory().unwrap();
         let folder = Path::new("/r");
+        bound(&index, "/r");
         index.upsert(folder, &entry("/r/規程.txt", 1), &content(None, "経費の精算は月末までに申請する")).unwrap();
         index.upsert(folder, &entry("/r/VPN.md", 2), &content(Some("ＶＰＮの設定"), "社内の Wiki を見る")).unwrap();
         index.upsert(folder, &entry("/r/無関係.txt", 3), &content(None, "昼食の予定")).unwrap();
@@ -390,6 +452,7 @@ mod tests {
     fn ranks_by_matched_terms_then_title_then_recency() {
         let index = SearchIndex::open_in_memory().unwrap();
         let folder = Path::new("/r");
+        bound(&index, "/r");
         index.upsert(folder, &entry("/r/a.txt", 100), &content(None, "経費 と 精算 の 手順")).unwrap();
         index.upsert(folder, &entry("/r/b.txt", 300), &content(None, "経費 だけ")).unwrap();
         index.upsert(folder, &entry("/r/c.txt", 200), &content(Some("経費の規程"), "本文")).unwrap();
@@ -414,6 +477,7 @@ mod tests {
 
         let index = SearchIndex::open_in_memory().unwrap();
         let folder = Path::new("/r");
+        bound(&index, "/r");
         let name_only = Extracted { title: None, body: String::new(), name_only: true };
         index.upsert(folder, &entry("/r/経費.png", 1), &name_only).unwrap();
         let hit = &index.search(&terms(&["経費"]), 8).unwrap()[0];
@@ -425,6 +489,8 @@ mod tests {
     #[test]
     fn remove_folder_and_paths() {
         let index = SearchIndex::open_in_memory().unwrap();
+        bound(&index, "/a");
+        bound(&index, "/b");
         index.upsert(Path::new("/a"), &entry("/a/1.txt", 1), &content(None, "x")).unwrap();
         index.upsert(Path::new("/a"), &entry("/a/2.txt", 1), &content(None, "x")).unwrap();
         index.upsert(Path::new("/b"), &entry("/b/3.txt", 1), &content(None, "x")).unwrap();
@@ -433,8 +499,35 @@ mod tests {
         assert_eq!(index.count_folder(Path::new("/a")).unwrap(), 1);
         index.remove_folder(Path::new("/a")).unwrap();
         assert_eq!(index.count().unwrap(), 1);
+        assert_eq!(index.binding(Path::new("/a")).unwrap(), None, "記録も消す");
+        assert_eq!(index.folders().unwrap(), [PathBuf::from("/b")]);
         index.clear().unwrap();
         assert_eq!(index.count().unwrap(), 0);
+    }
+
+    /// どの実体から読んだかの記録がないフォルダの行は、検索に出さず、件数にも数えない。
+    /// 記録し直すと、それまでの行を消す（出どころを確かめられない行を、新しい記録の行として使わない）。
+    // [IDX-027]
+    #[test]
+    fn rows_without_a_binding_are_not_searched() {
+        let index = SearchIndex::open_in_memory().unwrap();
+        let folder = Path::new("/r");
+        index.upsert(folder, &entry("/r/a.txt", 1), &content(None, "経費")).unwrap();
+        assert!(index.search(&terms(&["経費"]), 8).unwrap().is_empty(), "記録がない");
+        assert_eq!(index.count_folder(folder).unwrap(), 0);
+        assert_eq!(index.stored_rows(folder).unwrap(), 1);
+        assert_eq!(index.folders().unwrap(), [PathBuf::from("/r")], "消すために、記録のないフォルダも返す");
+
+        let binding = Binding { place: "p".into(), root: "r".into() };
+        index.rebind(folder, &binding).unwrap();
+        assert_eq!(index.stored_rows(folder).unwrap(), 0, "記録し直すと、それまでの行を消す");
+        index.upsert(folder, &entry("/r/a.txt", 1), &content(None, "経費")).unwrap();
+        assert_eq!(paths(&index.search(&terms(&["経費"]), 8).unwrap()), ["/r/a.txt"]);
+        assert_eq!(index.binding(folder).unwrap(), Some(binding));
+
+        index.unbind(folder).unwrap();
+        assert!(index.search(&terms(&["経費"]), 8).unwrap().is_empty(), "記録を外すと、検索に出さない");
+        assert_eq!(index.stored_rows(folder).unwrap(), 1, "行は残る（あとで消す）");
     }
 
     // [IDX-012][DAT-001]

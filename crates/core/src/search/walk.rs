@@ -168,21 +168,33 @@ pub fn is_link(path: &Path) -> bool {
 /// 移したフォルダの代わりに、同じ名前のフォルダが作られたら変わる。
 pub type FileId = (u64, u128);
 
-/// 探すフォルダとして足したときに開いた実体: 実際の場所（OS の表し方のまま、文字に直さずに持つ）と識別子。
+/// 探すフォルダとして足したときに開いた実体: 実際の場所（OS の表し方のまま、文字に直さずに持つ）・識別子・作成日時。
 /// 設定に保存し、次に開いたフォルダが、足したときと同じものかを確かめる（アプリを起動し直したあとも）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "StoredPlace", into = "StoredPlace")]
 pub struct Place {
-    /// 実際の場所を、損なわずに文字にしたもの（[`encode_os`]）。取れなかったときは None（識別子だけで確かめる）
+    /// 実際の場所を、損なわずに文字にしたもの（[`encode_os`]）。取れなかったときは None（識別子と作成日時で確かめる）
     real: Option<String>,
     id: FileId,
+    /// 作成日時（1970 年からのナノ秒）。取れなかったときは None
+    born: Option<u128>,
 }
 
 impl Place {
-    /// 開いたフォルダが、足したときと同じものか、同じ場所で作り直されたもの（実際の場所が、大文字と小文字を含めて完全に一致する）か。
-    /// 上のフォルダがリンクに替わって、別の場所の同じ名前のフォルダを指すようになったら、どちらでもない。
+    /// 開いたフォルダが、足したときと同じ場所にあるか（同じ場所で作り直したフォルダを含む）。
+    /// 足したときと開いたときの両方で実際の場所が取れたら、実際の場所が大文字と小文字を含めて完全に一致するときだけ認める
+    /// （識別子が同じでも、別の場所なら認めない。消したフォルダの識別子は、別の場所のフォルダに使い回されることがある）。
+    /// どちらかで取れなかったら、識別子と作成日時がともに一致するときだけ認める（作成日時が取れなければ認めない）。
     pub fn admits(&self, opened: &Root) -> bool {
-        opened.id == self.id || (self.real.is_some() && self.real == opened.real.as_deref().map(|real| encode_os(real.as_os_str())))
+        match (&self.real, opened.real.as_deref()) {
+            (Some(real), Some(opened_real)) => *real == encode_os(opened_real.as_os_str()),
+            _ => opened.id == self.id && self.born.is_some() && self.born == opened.born,
+        }
+    }
+
+    /// 実際の場所も作成日時も取れず、あとで同じフォルダかを確かめられない。
+    pub fn is_unverifiable(&self) -> bool {
+        self.real.is_none() && self.born.is_none()
     }
 
     pub fn id(&self) -> FileId {
@@ -197,6 +209,8 @@ struct StoredPlace {
     real: Option<String>,
     volume: String,
     file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    born: Option<String>,
 }
 
 impl TryFrom<StoredPlace> for Place {
@@ -205,13 +219,24 @@ impl TryFrom<StoredPlace> for Place {
     fn try_from(stored: StoredPlace) -> Result<Self, Self::Error> {
         let volume = stored.volume.parse().map_err(|_| "識別子を読めません".to_string())?;
         let file = stored.file.parse().map_err(|_| "識別子を読めません".to_string())?;
-        Ok(Place { real: stored.real, id: (volume, file) })
+        let born = stored.born.map(|born| born.parse().map_err(|_| "作成日時を読めません".to_string())).transpose()?;
+        let place = Place { real: stored.real, id: (volume, file), born };
+        // 同じフォルダかを確かめられない値は、記録していないものとして扱う（選び直してもらう）
+        if place.is_unverifiable() {
+            return Err("同じフォルダかを確かめられません".into());
+        }
+        Ok(place)
     }
 }
 
 impl From<Place> for StoredPlace {
     fn from(place: Place) -> Self {
-        StoredPlace { real: place.real, volume: place.id.0.to_string(), file: place.id.1.to_string() }
+        StoredPlace {
+            real: place.real,
+            volume: place.id.0.to_string(),
+            file: place.id.1.to_string(),
+            born: place.born.map(|born| born.to_string()),
+        }
     }
 }
 
@@ -279,13 +304,20 @@ pub struct Root {
     dir: File,
     id: FileId,
     real: Option<PathBuf>,
+    born: Option<u128>,
 }
 
 impl Root {
     /// 探すフォルダを開く。フォルダがない・フォルダそのものがリンク・フォルダでないときはエラー。
     pub fn open(path: &Path) -> io::Result<Root> {
         let (dir, id, real) = sys::open_root(path)?;
-        Ok(Root { path: path.to_path_buf(), dir, id, real })
+        let born = dir
+            .metadata()
+            .and_then(|meta| meta.created())
+            .ok()
+            .and_then(|created| created.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|since| since.as_nanos());
+        Ok(Root { path: path.to_path_buf(), dir, id, real, born })
     }
 
     /// 足したときのパス（索引の行のパスは、これを基準にする）。
@@ -304,7 +336,7 @@ impl Root {
 
     /// 開いたフォルダの実体（足したときに設定へ保存する）。
     pub fn place(&self) -> Place {
-        Place { real: self.real.as_deref().map(|real| encode_os(real.as_os_str())), id: self.id }
+        Place { real: self.real.as_deref().map(|real| encode_os(real.as_os_str())), id: self.id, born: self.born }
     }
 
     /// `path` の、このフォルダからの名前の並び。中を指さない・除くフォルダを通るときは None。
@@ -1202,8 +1234,16 @@ mod tests {
         let stored = serde_json::to_string(&place).unwrap();
         let loaded: Place = serde_json::from_str(&stored).unwrap();
         assert_eq!(loaded, place, "保存して読み直しても同じ");
-        let big = Place { real: None, id: (u64::MAX, u128::MAX) };
+        let big = Place { real: None, id: (u64::MAX, u128::MAX), born: Some(u128::MAX) };
         assert_eq!(serde_json::from_str::<Place>(&serde_json::to_string(&big).unwrap()).unwrap(), big);
+        // 実際の場所も作成日時もない値は、同じフォルダかを確かめられないので読まない（選び直してもらう）
+        let unverifiable = Place { real: None, id: (1, 2), born: None };
+        assert!(serde_json::from_str::<Place>(&serde_json::to_string(&unverifiable).unwrap()).is_err());
+        // 作成日時を記録する前の値も読める
+        assert_eq!(
+            serde_json::from_str::<Place>(r#"{"real":"b:00","volume":"1","file":"2"}"#).unwrap(),
+            Place { real: Some("b:00".into()), id: (1, 2), born: None }
+        );
 
         // 別の場所の、同じ名前のフォルダは認めない
         let other = dir.path().join("別").join("資料");
@@ -1216,6 +1256,37 @@ mod tests {
         let recreated = Root::open(&root).unwrap();
         assert_ne!(recreated.id(), place.id());
         assert!(place.admits(&recreated));
+    }
+
+    /// 足したときと開いたときの両方で実際の場所が取れたら、識別子が同じでも、別の場所のフォルダは認めない
+    /// （消したフォルダの識別子が、別の場所のフォルダに使い回された場合）。
+    /// 実際の場所が取れないときは、識別子と作成日時がともに一致するときだけ認める。
+    // [IDX-027]
+    #[test]
+    fn a_reused_identifier_at_another_place_is_not_admitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("資料");
+        let other = dir.path().join("別").join("資料");
+        touch(&root.join("a.txt"));
+        touch(&other.join("a.txt"));
+        let at_other = Root::open(&other).unwrap();
+        // 足したときの実体の識別子が、いまは別の場所のフォルダに使われている
+        let registered = Place { id: at_other.id(), ..Root::open(&root).unwrap().place() };
+        assert!(!registered.admits(&at_other), "実際の場所が違えば、識別子が同じでも認めない");
+        assert!(registered.admits(&Root::open(&root).unwrap()), "足した場所のフォルダは認める");
+
+        // 開いたときに実際の場所が取れない
+        let mut opened = Root::open(&other).unwrap();
+        opened.real = None;
+        opened.born = Some(100);
+        assert!(!registered.admits(&opened), "足したときと作成日時が違えば認めない");
+        let by_id = Place { real: None, id: at_other.id(), born: Some(100) };
+        assert!(by_id.admits(&opened), "識別子と作成日時が一致する");
+        assert!(Place { real: registered.real.clone(), ..by_id.clone() }.admits(&opened), "足したときにだけ実際の場所が取れた");
+        assert!(!Place { born: Some(101), ..by_id.clone() }.admits(&opened), "作成日時が違えば、作り直したフォルダ");
+        assert!(!Place { id: (0, 0), ..by_id.clone() }.admits(&opened), "識別子が違う");
+        opened.born = None;
+        assert!(!Place { born: None, ..by_id.clone() }.admits(&opened), "作成日時が取れなければ認めない");
     }
 
     /// 開いたあとで、中のフォルダが探すフォルダの外へ移されたら、そのフォルダの中身は読まない

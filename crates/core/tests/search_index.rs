@@ -717,7 +717,6 @@ fn redirect_parent(parent: &Path, outside: &Path) -> PathBuf {
     moved
 }
 
-#[cfg(unix)]
 fn search_at(index_path: &Path, term: &str) -> Vec<String> {
     let index = SearchIndex::open(index_path).unwrap();
     index.search(&[term.to_string()], 10).unwrap().into_iter().map(|hit| hit.file_name).collect()
@@ -850,4 +849,105 @@ fn a_folder_saved_without_its_place_is_not_read_until_chosen_again() {
     f.indexer.set_folders(vec![registered]);
     wait_ready(&f, 2);
     assert!(!f.indexer.status().folders[0].unconfirmed);
+}
+
+/// 索引の行の削除を、失敗させる・失敗させないようにする（索引のファイルに、削除を止めるトリガーを作る・外す）。
+fn block_deletes(index_path: &Path, table: &str, blocked: bool) {
+    let conn = rusqlite::Connection::open(index_path).unwrap();
+    conn.busy_timeout(Duration::from_secs(10)).unwrap();
+    let sql = if blocked {
+        format!("CREATE TRIGGER block_{table} BEFORE DELETE ON {table} BEGIN SELECT RAISE(ABORT, '消せない'); END;")
+    } else {
+        format!("DROP TRIGGER IF EXISTS block_{table};")
+    };
+    conn.execute_batch(&sql).unwrap();
+}
+
+/// 更新日時と大きさを変えずに、ファイルの中身を書き換える（索引の行を使い回すと、前の中身が残る）。
+fn overwrite_keeping_stamp(path: &Path, text: &str) {
+    let modified = std::fs::metadata(path).unwrap().modified().unwrap();
+    assert_eq!(std::fs::metadata(path).unwrap().len(), text.len() as u64);
+    std::fs::write(path, text).unwrap();
+    std::fs::File::options().write(true).open(path).unwrap().set_modified(modified).unwrap();
+}
+
+fn stored_rows(index_path: &Path, root: &Path) -> usize {
+    SearchIndex::open(index_path).unwrap().stored_rows(root).unwrap()
+}
+
+/// 出どころを確かめられない行（実体を記録していない設定のときの行）は、消せないあいだも検索に出さない。
+/// 消す前に選び直しても、アプリを起動し直しても、その行を使い回さず、消し直す。消せたら、いまの中身を読み直す。
+// [IDX-027][IDX-001]
+#[test]
+fn rows_that_could_not_be_erased_stay_out_of_search_until_erased() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("共有資料");
+    write(&root.join("a.txt"), "経費");
+    let index_path = dir.path().join("data").join(INDEX_FILE);
+    let intervals = Intervals { purge_retry: Duration::from_millis(200), ..Intervals::default() };
+    let registered = folder(&root);
+    let settled = |indexer: &Indexer, after: u64, files: usize| {
+        wait_until("索引", Duration::from_secs(20), || {
+            let status = indexer.status();
+            status.state == IndexState::Ready && status.revision > after && status.files == files
+        });
+    };
+
+    let first = Indexer::spawn_with_intervals(index_path.clone(), Limits::default(), intervals, |_| {});
+    first.enable(vec![registered.clone()]);
+    settled(&first, 0, 1);
+    block_deletes(&index_path, "docs", true);
+    overwrite_keeping_stamp(&root.join("a.txt"), "予算");
+
+    // 実体を記録していない設定になった。行を消せなくても、検索に出さない
+    let returned = first.set_folders(vec![SearchFolder { place: None, ..registered.clone() }]);
+    settled(&first, returned.revision, 0);
+    assert_eq!(stored_rows(&index_path, &root), 1, "削除に失敗している");
+    assert!(search_at(&index_path, "経費").is_empty(), "消せない行も検索に出さない");
+
+    // 消す前に選び直しても、前の行を使い回さない（読まずに、消し直す）
+    let returned = first.set_folders(vec![registered.clone()]);
+    settled(&first, returned.revision, 0);
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(stored_rows(&index_path, &root), 1);
+    assert!(search_at(&index_path, "経費").is_empty());
+    assert!(search_at(&index_path, "予算").is_empty());
+    assert!(first.shutdown_and_wait(Duration::from_secs(5)));
+    drop(first);
+
+    // 起動し直しても、消すまでは検索に出さない
+    let second = Indexer::spawn_with_intervals(index_path.clone(), Limits::default(), intervals, |_| {});
+    second.enable(vec![registered]);
+    settled(&second, 0, 0);
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(search_at(&index_path, "経費").is_empty());
+    assert_eq!(stored_rows(&index_path, &root), 1);
+
+    // 消せるようになったら、消し直して、選び直したフォルダの中身を読み直す
+    block_deletes(&index_path, "docs", false);
+    settled(&second, 0, 1);
+    assert_eq!(search_at(&index_path, "予算"), ["a.txt"]);
+    assert!(search_at(&index_path, "経費").is_empty(), "前の中身を残さない");
+    assert!(second.shutdown_and_wait(Duration::from_secs(5)));
+}
+
+/// 出どころを確かめられない行を、検索から外すこともできないときは、索引のファイルを消して作り直す。
+// [IDX-027]
+#[test]
+fn when_rows_cannot_even_be_hidden_the_index_is_recreated() {
+    let f = fixture();
+    write(&f.root.join("a.txt"), "経費");
+    let registered = folder(&f.root);
+    f.indexer.enable(vec![registered.clone()]);
+    wait_ready(&f, 1);
+    block_deletes(&f.index_path, "docs", true);
+    block_deletes(&f.index_path, "bindings", true);
+
+    let returned = f.indexer.set_folders(vec![SearchFolder { place: None, ..registered }]);
+    wait_until("作り直した索引", Duration::from_secs(20), || {
+        let status = f.indexer.status();
+        status.state == IndexState::Ready && status.revision > returned.revision && status.files == 0
+    });
+    assert_eq!(stored_rows(&f.index_path, &f.root), 0, "索引のファイルを作り直した");
+    assert!(search(&f, "経費").is_empty());
 }
