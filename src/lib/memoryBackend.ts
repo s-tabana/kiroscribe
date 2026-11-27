@@ -44,6 +44,8 @@ interface MemoryOptions {
   version?: string;
   /** 更新のダウンロードを 10% ずつ進める間隔（ミリ秒）。テストでは 0 */
   updateStepDelayMs?: number;
+  /** 更新のインストールの段階（「インストールしています」）を続ける時間（ミリ秒。既定は updateStepDelayMs と同じ） */
+  installStepDelayMs?: number;
   /** 設定の初期値（指定した項目だけ既定値から変える） */
   settings?: Partial<Settings>;
   /** 「フォルダを追加…」のダイアログで選ぶフォルダ（null なら取り消し。既定はプレビュー用のフォルダ） */
@@ -855,7 +857,8 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
         }
       }
       setUpdate({ ...update, phase: "installing" });
-      await updateStep();
+      if (options.installStepDelayMs !== undefined) await new Promise((resolve) => setTimeout(resolve, options.installStepDelayMs));
+      else await updateStep();
       // 実物はここでアプリが終了し、新しい版で起動し直される。その後の状態を再現する
       appVersion = target.version;
       published = null;

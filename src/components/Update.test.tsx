@@ -11,7 +11,8 @@ const NOTES = "### 新しい機能\n\n- 話者ごとに名前を付けられま�
 
 /** 自動更新がオフ（既定。新しいバージョンがあることを知らせるだけ）のバックエンド */
 function updateBackend(confirm: (message: string) => boolean = () => true) {
-  return createMemoryBackend({ seed: true, version: "0.2.0", confirm, updateStepDelayMs: 15 });
+  // インストールの段階は、遅い環境でも画面に出たことを確かめられるよう、長めに続ける
+  return createMemoryBackend({ seed: true, version: "0.2.0", confirm, updateStepDelayMs: 15, installStepDelayMs: 300 });
 }
 
 /** 設定で自動更新をオンにしたバックエンド */
