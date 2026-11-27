@@ -193,7 +193,11 @@ export type PopupPayload =
   | { kind: "recording"; app: string; noteId: string; title: string }
   | { kind: "finishing"; app: string; noteId: string; title: string }
   | { kind: "stopped"; app: string; noteId: string; title: string }
-  | { kind: "error"; app: string; message: string };
+  | { kind: "error"; app: string; message: string }
+  /** 長い録音で、会議が終わったかを聞いている。deadline は、答えがなければ止める時刻（UNIX ミリ秒） */
+  | { kind: "confirmEnd"; app: string; noteId: string; title: string; deadline: number }
+  /** 会議が終わったかの確認に答えがなかったので、録音を止めた */
+  | { kind: "stoppedUnanswered"; app: string; noteId: string; title: string };
 
 export interface OpenNoteRequest {
   noteId: string;

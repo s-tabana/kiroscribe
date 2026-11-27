@@ -5,5 +5,6 @@ mod ai;
 mod meeting;
 mod misc;
 mod recording;
+mod recording_check;
 mod startup;
 mod update;

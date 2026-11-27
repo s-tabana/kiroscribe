@@ -9,6 +9,7 @@ import { chooseMenuItem, clickTrayIcon, describeTopWindows, minimizeWindow, open
 
 const TOOLTIP = "Kiroscribe（会議の自動検出）";
 const OPEN = "Kiroscribe を開く";
+const STOP = "録音を停止";
 const AUTO_RECORD = "会議を検出したら自動で録音";
 const QUIT = "Kiroscribe を終了";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -81,7 +82,7 @@ test(
     let items = await menuItems(pid);
     assert.deepEqual(
       items.map((item) => item.name).filter(Boolean),
-      [OPEN, AUTO_RECORD, QUIT],
+      [OPEN, STOP, AUTO_RECORD, QUIT],
       JSON.stringify(items),
     );
     const checkedAtFirst = items.find((item) => item.name === AUTO_RECORD).checked;

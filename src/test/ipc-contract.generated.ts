@@ -25,6 +25,10 @@ export const called = {
   addSearchFolder: [
     [],
   ] satisfies Called<"addSearchFolder">[],
+  answerRecordingCheck: [
+    ["…",0,false],
+    ["…",0,true],
+  ] satisfies Called<"answerRecordingCheck">[],
   cancelAi: [
     ["…","enhance"],
   ] satisfies Called<"cancelAi">[],
@@ -152,6 +156,9 @@ export const returned = {
     {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"revision":0,"state":"off","total":0,"updatedAt":null},
     {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"revision":0,"state":"ready","total":0,"updatedAt":0},
   ] satisfies Returned<"addSearchFolder">[],
+  answerRecordingCheck: [
+    null,
+  ] satisfies Returned<"answerRecordingCheck">[],
   cancelAi: [
     null,
   ] satisfies Returned<"cancelAi">[],
@@ -190,9 +197,11 @@ export const returned = {
   ] satisfies Returned<"getNote">[],
   getPopupState: [
     null,
+    {"app":"…","deadline":0,"kind":"confirmEnd","noteId":"…","title":"…"},
     {"app":"…","kind":"error","message":"…"},
     {"app":"…","kind":"recording","noteId":"…","title":"…"},
     {"app":"…","kind":"stopped","noteId":"…","title":"…"},
+    {"app":"…","kind":"stoppedUnanswered","noteId":"…","title":"…"},
   ] satisfies Returned<"getPopupState">[],
   getRecordingStatus: [
     {"elapsedMs":0,"noteId":"…","runningSince":0,"sources":["me","them"],"state":"recording"},
@@ -295,10 +304,12 @@ export const emitted = {
     {"enhance":true,"noteId":"…"},
   ] satisfies Emitted<"onOpenNote">[],
   onPopupUpdate: [
+    {"app":"…","deadline":0,"kind":"confirmEnd","noteId":"…","title":"…"},
     {"app":"…","kind":"error","message":"…"},
     {"app":"…","kind":"finishing","noteId":"…","title":"…"},
     {"app":"…","kind":"recording","noteId":"…","title":"…"},
     {"app":"…","kind":"stopped","noteId":"…","title":"…"},
+    {"app":"…","kind":"stoppedUnanswered","noteId":"…","title":"…"},
   ] satisfies Emitted<"onPopupUpdate">[],
   onRecordingError: [
     {"message":"…","noteId":"…"},

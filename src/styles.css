@@ -1802,8 +1802,9 @@ kbd {
 .popup {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   height: 100vh;
+  overflow: hidden;
   padding: 10px 12px 12px 14px;
   background: var(--surface);
   border: 1px solid var(--line-strong);
@@ -1811,6 +1812,7 @@ kbd {
 
 .popup-header {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 8px;
   font-size: 12.5px;
@@ -1821,19 +1823,39 @@ kbd {
 }
 
 .popup-header .icon-button {
-  width: 26px;
-  height: 26px;
+  width: 22px;
+  height: 22px;
   margin-left: auto;
 }
 
+.popup-app {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 高さ 128px の中で、操作のボタンが隠れないよう、文は残りの高さに収め、はみ出す分は切る */
 .popup-message {
   display: flex;
+  flex: 0 1 auto;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 0 8px;
+  min-height: 0;
   margin: 0;
-  font-size: 13.5px;
-  line-height: 1.5;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* 長いタイトルを含む文は 2 行までにし、残りは「…」にする */
+.popup-text {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
 }
 
 .popup-message strong {
@@ -1846,6 +1868,7 @@ kbd {
 
 .popup-actions {
   display: flex;
+  flex-shrink: 0;
   justify-content: flex-end;
   gap: 8px;
   margin-top: auto;
