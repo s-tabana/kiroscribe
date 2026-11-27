@@ -207,6 +207,23 @@ async fn start_server(api: Arc<Api>) -> MockServer {
         }])))
         .mount(&server)
         .await;
+    // デバッグ用のログの回収の入口（共通の入口の契約どおりに振る舞う偽物）
+    //   /logs/       受け付けて、提出の番号を返す
+    //   /logs-busy/  回数の上限に当たったことにする（429）
+    Mock::given(method("POST"))
+        .and(path("/logs/v1/logs/kiroscribe"))
+        .respond_with(
+            ResponseTemplate::new(201).set_body_json(json!({ "id": LOG_SUBMISSION_ID, "receivedAt": "2026-11-27T12:50:30.217Z" })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/logs-busy/v1/logs/kiroscribe"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(
+            json!({ "error": "rate_limited", "message": "提出が多すぎます。1 時間ほど待ってから送ってください" }),
+        ))
+        .mount(&server)
+        .await;
     // 更新の配布元。配るファイルは、インストーラではないただのバイト列（署名が正しくても、インストールの段階で止まる）
     //   /update/              署名が正しくない（ダウンロードのあと、署名の確認で止まる）
     //   /update-signed/       署名が正しい
@@ -253,6 +270,9 @@ fn work_dir() -> PathBuf {
 }
 
 /// このテストのプロセス全体で 1 つだけ用意するもの（差し替えの設定はプロセスに 1 つしか持てないため）。
+/// 偽の入口が返す提出の番号
+pub(super) const LOG_SUBMISSION_ID: &str = "KS-20261127-TEST";
+
 pub(super) struct Fixture {
     pub dir: PathBuf,
     pub server_uri: String,
@@ -554,6 +574,29 @@ impl Harness {
 }
 
 impl Harness {
+    /// settings テーブルの、設定以外の値。
+    pub fn settings_value(&self, key: &str) -> Option<String> {
+        self.state().db().get_value(key).unwrap()
+    }
+
+    /// これまでに書いたデバッグ用のログ（すべてのファイルをつなげたもの）。
+    pub fn debug_log_text(&self) -> String {
+        let log = self.app.state::<kiroscribe_core::debug_log::DebugLog>();
+        log.files()
+            .iter()
+            .map(|path| std::fs::read_to_string(path).unwrap())
+            .collect()
+    }
+
+    /// これまでに書いたデバッグ用のログの行のうち、出来事の名前が `event` のもの。
+    pub fn debug_log_events(&self, event: &str) -> Vec<Value> {
+        self.debug_log_text()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("ログの行が JSON ではありません"))
+            .filter(|line| line["event"] == event)
+            .collect()
+    }
+
     /// 会議の検出の結果を、検出のスレッドと同じように、順番待ちの列へ入れる（処理が終わるのは待たない）。
     pub fn submit_meeting(&self, event: MeetingEvent) {
         crate::meeting_watch::submit(self.app.handle(), event);

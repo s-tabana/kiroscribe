@@ -83,8 +83,13 @@ impl Settings {
 
     /// デバッグ用のログの送り先。入口と提出用の値のどちらかが、設定にも既定にもなければ `None`
     pub fn log_intake(&self) -> Option<Intake> {
-        let base = self.log_intake_url.as_deref().or(DEFAULT_LOG_INTAKE_URL)?;
-        let token = self.log_intake_token.as_deref().or(DEFAULT_LOG_INTAKE_TOKEN)?;
+        self.log_intake_or(DEFAULT_LOG_INTAKE_URL, DEFAULT_LOG_INTAKE_TOKEN)
+    }
+
+    /// [`Self::log_intake`] の既定の値を差し替えたもの
+    pub fn log_intake_or(&self, default_url: Option<&str>, default_token: Option<&str>) -> Option<Intake> {
+        let base = self.log_intake_url.as_deref().or(default_url)?;
+        let token = self.log_intake_token.as_deref().or(default_token)?;
         Some(Intake::new(base, token))
     }
 }
@@ -233,11 +238,12 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let loaded = db.load_settings().unwrap();
         assert_eq!((loaded.log_intake_url.as_deref(), loaded.log_intake_token.as_deref()), (None, None));
+        // 未設定なら既定の値を使う
         assert_eq!(
-            loaded.log_intake().is_some(),
-            DEFAULT_LOG_INTAKE_URL.is_some() && DEFAULT_LOG_INTAKE_TOKEN.is_some(),
-            "既定がそろっているときだけ送れる"
+            loaded.log_intake(),
+            Some(Intake::new(DEFAULT_LOG_INTAKE_URL.unwrap(), DEFAULT_LOG_INTAKE_TOKEN.unwrap()))
         );
+        assert!(loaded.log_intake().unwrap().url.starts_with("https://"));
         // 画面とは camelCase でやり取りし、未設定は null
         let json = serde_json::to_value(&loaded).unwrap();
         assert_eq!(json["logIntakeUrl"], serde_json::Value::Null);
@@ -250,11 +256,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert_eq!(
-            saved.log_intake(),
-            Some(Intake::new("http://127.0.0.1:4010", "token")),
-            "設定の値を使う"
-        );
+        assert_eq!(saved.log_intake(), Some(Intake::new("http://127.0.0.1:4010", "token")), "設定の値を使う");
         assert_eq!(db.load_settings().unwrap(), saved);
 
         // 空なら未設定に戻す
@@ -267,11 +269,15 @@ mod tests {
             .unwrap();
         assert_eq!((blank.log_intake_url, blank.log_intake_token), (None, None));
 
-        // 片方だけでは送らない（既定がないとき）
-        if DEFAULT_LOG_INTAKE_TOKEN.is_none() {
-            let url_only = Settings { log_intake_url: Some("https://logs.example.com".into()), ..Default::default() };
-            assert_eq!(url_only.log_intake(), None);
-        }
+        // 既定がないときは、片方だけでは送らない
+        let url_only = Settings { log_intake_url: Some("https://logs.example.com".into()), ..Default::default() };
+        assert_eq!(url_only.log_intake_or(None, None), None);
+        let token_only = Settings { log_intake_token: Some("t".into()), ..Default::default() };
+        assert_eq!(token_only.log_intake_or(None, None), None);
+        assert_eq!(
+            token_only.log_intake_or(Some("https://logs.example.com"), None),
+            Some(Intake::new("https://logs.example.com", "t"))
+        );
     }
 
     #[test]

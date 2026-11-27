@@ -7,5 +7,7 @@
   "myName": "",
   "autoRecordMeetings": true,
   "launchAtLogin": true,
-  "autoUpdate": false
+  "autoUpdate": false,
+  "logIntakeUrl": null,
+  "logIntakeToken": null
 }

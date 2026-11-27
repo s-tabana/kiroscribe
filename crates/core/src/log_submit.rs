@@ -19,12 +19,12 @@ use crate::settings::Settings;
 /// 入口に登録してあるアプリの ID
 pub const APP_ID: &str = "kiroscribe";
 
-/// 既定の入口（`https://<ホスト>`）。決まるまでは `None` で、設定（`logIntakeUrl`）もなければ送らない
-pub const DEFAULT_LOG_INTAKE_URL: Option<&str> = None;
+/// 既定の入口（`https://<ホスト>`）。`None` にすると、設定（`logIntakeUrl`）がなければ送らない
+pub const DEFAULT_LOG_INTAKE_URL: Option<&str> = Some("https://log-intake.seita-tabana.workers.dev");
 
 /// 既定の提出用の値（`X-Log-Token`）。配布物から読めるので秘密ではない。
-/// 決まるまでは `None` で、設定（`logIntakeToken`）もなければ送らない
-pub const DEFAULT_LOG_INTAKE_TOKEN: Option<&str> = None;
+/// `None` にすると、設定（`logIntakeToken`）がなければ送らない
+pub const DEFAULT_LOG_INTAKE_TOKEN: Option<&str> = Some("l1vY5LKo4aXh8uXei-_AEHwAonWAKr1G6nGq3rqDzvY");
 
 /// 送れる zip の大きさの上限（入口の上限と同じ 20 MB）
 pub const MAX_LOG_BYTES: usize = 20 * 1024 * 1024;
@@ -70,7 +70,14 @@ pub const NOT_CONFIGURED: &str =
 
 /// 設定から送り先を決める。入口か提出用の値が決まっていなければ、送らずに [`NOT_CONFIGURED`] を返す
 pub fn intake(settings: &Settings) -> Result<Intake> {
-    settings.log_intake().ok_or_else(|| CoreError::Other(NOT_CONFIGURED.into()))
+    intake_or(settings, DEFAULT_LOG_INTAKE_URL, DEFAULT_LOG_INTAKE_TOKEN)
+}
+
+/// [`intake`] の既定の値を差し替えたもの
+pub fn intake_or(settings: &Settings, default_url: Option<&str>, default_token: Option<&str>) -> Result<Intake> {
+    settings
+        .log_intake_or(default_url, default_token)
+        .ok_or_else(|| CoreError::Other(NOT_CONFIGURED.into()))
 }
 
 /// 入口が受け付けたときの応答
@@ -239,12 +246,12 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(intake(&both).unwrap().url, "https://logs.example.com/v1/logs/kiroscribe");
-        if DEFAULT_LOG_INTAKE_URL.is_none() {
-            let err = intake(&Settings { log_intake_url: None, ..both.clone() }).unwrap_err();
-            assert_eq!(err.to_string(), NOT_CONFIGURED);
-        }
-        if DEFAULT_LOG_INTAKE_TOKEN.is_none() {
-            let err = intake(&Settings { log_intake_token: None, ..both }).unwrap_err();
+        assert!(intake(&Settings::default()).is_ok(), "既定の値で送れる");
+        for missing in [
+            Settings { log_intake_url: None, ..both.clone() },
+            Settings { log_intake_token: None, ..both.clone() },
+        ] {
+            let err = intake_or(&missing, None, None).unwrap_err();
             assert_eq!(err.to_string(), NOT_CONFIGURED);
         }
     }

@@ -1,4 +1,4 @@
-import type { Segment, Speaker } from "../lib/types";
+import type { Segment, Speaker, TranscriptBreak } from "../lib/types";
 import { ChatPanel } from "./ChatPanel";
 import { TranscriptList } from "./TranscriptPanel";
 import { CloseIcon } from "./icons";
@@ -9,6 +9,7 @@ interface SidePanelProps {
   noteId: string;
   tab: PanelTab;
   segments: Segment[];
+  breaks: TranscriptBreak[];
   live: boolean;
   sources: Speaker[];
   onTabChange(tab: PanelTab): void;
@@ -42,7 +43,12 @@ export function SidePanel(props: SidePanelProps) {
         </button>
       </header>
       {tab === "transcript" ? (
-        <TranscriptList segments={props.segments} live={props.live} sources={props.sources} />
+        <TranscriptList
+          segments={props.segments}
+          breaks={props.breaks}
+          live={props.live}
+          sources={props.sources}
+        />
       ) : (
         <ChatPanel noteId={props.noteId} onError={props.onError} />
       )}

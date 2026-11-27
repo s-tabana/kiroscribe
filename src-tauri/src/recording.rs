@@ -10,9 +10,10 @@ use kiroscribe_core::recording_check::{CheckAction, RecordingCheck, Signals};
 use kiroscribe_core::secrets::{require_api_key, Provider};
 use kiroscribe_core::session::{RecordingSession, SessionOptions};
 use kiroscribe_core::time::now_ms;
-use kiroscribe_core::transcribe::OpenAiTranscriber;
-use kiroscribe_core::transcript::{Segment, Speaker};
+use kiroscribe_core::transcribe::{BoxFuture, OpenAiTranscriber, Transcribe};
+use kiroscribe_core::transcript::{Segment, Speaker, TranscriptBreak};
 use serde::Serialize;
+use serde_json::json;
 use tauri::{Emitter, Manager, State};
 
 use crate::background::{popup_recording_stopped, recording_changed, show_popup, PopupPayload};
@@ -24,6 +25,7 @@ pub const EVENT_STATUS: &str = "recording-status";
 pub const EVENT_SEGMENT: &str = "transcript-segment";
 pub const EVENT_LEVEL: &str = "audio-level";
 pub const EVENT_ERROR: &str = "recording-error";
+pub const EVENT_BREAK: &str = "transcript-break";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -84,6 +86,10 @@ struct ActiveRecording {
     last_speech: Arc<AtomicI64>,
     /// 長い録音で、会議が続いているかを確かめる状態
     check: RecordingCheck,
+    /// 文字起こしの回数と時間（デバッグ用のログに書く）
+    stats: Arc<TranscriptionStats>,
+    /// 文字起こしのあるノートで始めた録音なら、そのときに足した区切りの ID
+    resumed_break: Option<i64>,
 }
 
 impl ActiveRecording {
@@ -260,6 +266,56 @@ impl RecorderState {
     }
 }
 
+/// 1 回の録音の、文字起こしの回数と時間（デバッグ用のログに書く）。
+#[derive(Default)]
+struct TranscriptionStats {
+    ok: AtomicI64,
+    failed: AtomicI64,
+    total_ms: AtomicI64,
+    max_ms: AtomicI64,
+}
+
+/// 文字起こしの成否と時間をログに書く（送った音声と、返ってきた文は書かない）。
+struct LoggedTranscriber {
+    inner: OpenAiTranscriber,
+    app: AppHandle,
+    note_id: String,
+    stats: Arc<TranscriptionStats>,
+}
+
+impl Transcribe for LoggedTranscriber {
+    fn transcribe(&self, wav: Vec<u8>, prompt: Option<String>) -> BoxFuture<'_, kiroscribe_core::Result<String>> {
+        Box::pin(async move {
+            let bytes = wav.len();
+            let started = std::time::Instant::now();
+            crate::debug::detail(&self.app, "transcription.started", json!({ "noteId": self.note_id, "bytes": bytes }));
+            let result = self.inner.transcribe(wav, prompt).await;
+            let ms = started.elapsed().as_millis() as i64;
+            self.stats.total_ms.fetch_add(ms, Ordering::SeqCst);
+            self.stats.max_ms.fetch_max(ms, Ordering::SeqCst);
+            match &result {
+                Ok(text) => {
+                    self.stats.ok.fetch_add(1, Ordering::SeqCst);
+                    crate::debug::detail(
+                        &self.app,
+                        "transcription.finished",
+                        json!({ "noteId": self.note_id, "ms": ms, "chars": text.chars().count() }),
+                    );
+                }
+                Err(err) => {
+                    self.stats.failed.fetch_add(1, Ordering::SeqCst);
+                    crate::debug::error(
+                        &self.app,
+                        "transcription.failed",
+                        json!({ "noteId": self.note_id, "ms": ms, "bytes": bytes, "reason": err.to_string() }),
+                    );
+                }
+            }
+            result
+        })
+    }
+}
+
 /// パイプラインからの結果を DB に保存し、画面に通知する。
 struct TauriSink {
     app: AppHandle,
@@ -290,6 +346,7 @@ impl RecorderSink for TauriSink {
     }
 
     fn on_error(&self, message: String) {
+        crate::debug::error(&self.app, "recording.error", json!({ "noteId": self.note_id, "message": message }));
         let _ = self.app.emit(
             EVENT_ERROR,
             ErrorEvent {
@@ -342,6 +399,11 @@ pub fn list_segments(state: State<'_, AppState>, note_id: String) -> CmdResult<V
 }
 
 #[tauri::command]
+pub fn list_transcript_breaks(state: State<'_, AppState>, note_id: String) -> CmdResult<Vec<TranscriptBreak>> {
+    Ok(state.db().list_breaks(&note_id)?)
+}
+
+#[tauri::command]
 pub async fn get_recording_status(recorder: State<'_, RecorderState>) -> CmdResult<RecordingStatus> {
     Ok(recorder.status().await)
 }
@@ -352,6 +414,18 @@ pub async fn start_for_note(
     note_id: String,
     auto: Option<MeetingApp>,
 ) -> CmdResult<RecordingStatus> {
+    let result = start_inner(app, note_id.clone(), auto).await;
+    if let Err(err) = &result {
+        crate::debug::error(
+            app,
+            "recording.start_failed",
+            json!({ "noteId": note_id, "auto": auto, "reason": err.0 }),
+        );
+    }
+    result
+}
+
+async fn start_inner(app: &AppHandle, note_id: String, auto: Option<MeetingApp>) -> CmdResult<RecordingStatus> {
     let state = app.state::<AppState>();
     let recorder = app.state::<RecorderState>();
     let mut active = recorder.active.lock().await;
@@ -377,18 +451,22 @@ pub async fn start_for_note(
             require_api_key(state.secrets.as_ref(), Provider::OpenAi)?,
         )
     };
-    let transcriber = Arc::new(OpenAiTranscriber::new(
-        &api_key,
-        &settings.transcription_model,
-        &settings.language,
-    ));
+    let stats = Arc::new(TranscriptionStats::default());
+    let transcriber = Arc::new(LoggedTranscriber {
+        inner: OpenAiTranscriber::new(&api_key, &settings.transcription_model, &settings.language),
+        app: app.clone(),
+        note_id: note_id.clone(),
+        stats: stats.clone(),
+    });
     let last_speech = Arc::new(AtomicI64::new(now_ms()));
     let sink = Arc::new(TauriSink {
         app: app.clone(),
         note_id: note_id.clone(),
         last_speech: last_speech.clone(),
     });
-    let session = RecordingSession::start(
+    // 文字起こしのあるノートで始めるときは、始める位置に区切りを付ける（新しい発話は、この時刻より後に始まる）
+    let resumed_break = state.db().add_break_if_resumed(&note_id, now_ms())?;
+    let session = match RecordingSession::start(
         SessionOptions {
             mic_device_id: settings.input_device_id.clone(),
             capture_system_audio: settings.capture_system_audio,
@@ -396,8 +474,33 @@ pub async fn start_for_note(
         transcriber,
         sink,
         &tokio::runtime::Handle::current(),
-    )?;
+    ) {
+        Ok(session) => session,
+        Err(err) => {
+            // 録音を始められなかったときは、区切りを残さない
+            if let Some(added) = &resumed_break {
+                let _ = state.db().remove_break_if_empty(added.id);
+            }
+            return Err(err.into());
+        }
+    };
+    if let Some(added) = &resumed_break {
+        let _ = app.emit(EVENT_BREAK, added);
+    }
 
+    crate::debug::info(
+        app,
+        "recording.started",
+        json!({
+            "noteId": note_id,
+            "auto": auto,
+            "micSelected": settings.input_device_id.is_some(),
+            "systemAudio": settings.capture_system_audio,
+            "sources": session.sources(),
+            "transcriptionModel": settings.transcription_model,
+            "language": settings.language,
+        }),
+    );
     let recording = ActiveRecording {
         note_id,
         session,
@@ -406,6 +509,8 @@ pub async fn start_for_note(
         auto,
         last_speech,
         check: RecordingCheck::default(),
+        stats,
+        resumed_break: resumed_break.map(|added| added.id),
     };
     let status = recording.status();
     *active = Some(recording);
@@ -431,6 +536,7 @@ pub async fn pause_recording(
         recording.elapsed_before_ms += now_ms() - since;
     }
     recording.session.pause();
+    crate::debug::info(&app, "recording.paused", json!({ "noteId": recording.note_id }));
     let status = recording.status();
     emit_status(&app, &status);
     Ok(status)
@@ -452,6 +558,7 @@ pub async fn resume_recording(
         recording.last_speech.fetch_max(now, Ordering::SeqCst);
     }
     recording.session.resume();
+    crate::debug::info(&app, "recording.resumed", json!({ "noteId": recording.note_id }));
     let status = recording.status();
     emit_status(&app, &status);
     Ok(status)
@@ -495,7 +602,33 @@ pub(crate) async fn finish_stop(app: &AppHandle, taken: TakenRecording) -> Stopp
         note_id: recording.note_id.clone(),
         auto: recording.auto,
     };
+    let elapsed_ms = recording.elapsed_ms(now_ms());
+    crate::debug::info(
+        app,
+        "recording.stopping",
+        json!({ "noteId": recording.note_id, "auto": recording.auto, "elapsedMs": elapsed_ms }),
+    );
+    let finishing_since = std::time::Instant::now();
+    let stats = recording.stats.clone();
     recording.session.stop().await;
+    crate::debug::info(
+        app,
+        "recording.stopped",
+        json!({
+            "noteId": stopped.note_id,
+            "finishMs": finishing_since.elapsed().as_millis() as i64,
+            "transcribed": stats.ok.load(Ordering::SeqCst),
+            "transcriptionFailed": stats.failed.load(Ordering::SeqCst),
+            "transcriptionTotalMs": stats.total_ms.load(Ordering::SeqCst),
+            "transcriptionMaxMs": stats.max_ms.load(Ordering::SeqCst),
+        }),
+    );
+    // 何も話さないまま止めた回の区切りは残さない
+    if let Some(break_id) = recording.resumed_break {
+        if let Err(err) = app.state::<AppState>().db().remove_break_if_empty(break_id) {
+            eprintln!("空の区切りを消せませんでした: {err}");
+        }
+    }
 
     *recorder.finishing.lock().unwrap() = None;
     emit_status(app, &recorder.status().await);

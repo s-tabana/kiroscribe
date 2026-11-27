@@ -19,7 +19,7 @@ function breakDatabase(ctx) {
   return dbFile;
 }
 
-test("[DAT-007] データベースを開けないときは、理由を知らせるダイアログを出して終了し、空のデータベースで始めない", async (ctx) => {
+test("[DAT-007][LOG-003] データベースを開けないときは、理由を知らせるダイアログを出して終了し、空のデータベースで始めない", async (ctx) => {
   const dbFile = breakDatabase(ctx);
 
   const exited = await ctx.launchSecondInstance({ timeout: 60_000 });
@@ -37,6 +37,20 @@ test("[DAT-007] データベースを開けないときは、理由を知らせ�
   assert.ok(dialogs[0].message.includes("データは変更していません"), dialogs[0].message);
   // 壊れたファイルを、空のデータベースで置き換えていない（中身を調べたり、直したりできるように残す）
   assert.equal(fs.readFileSync(dbFile, "utf8"), "データベースではない内容");
+  // デバッグ用のログに、起動したことと、起動できなかった理由を書いている
+  const logDir = path.join(ctx.work.dataDir, "logs");
+  const log = fs
+    .readdirSync(logDir)
+    .filter((name) => /^kiroscribe-\d{8}\.log$/.test(name))
+    .map((name) => fs.readFileSync(path.join(logDir, name), "utf8"))
+    .join("");
+  const events = log
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.ok(events.some((e) => e.event === "app.started" && e.fields.appVersion), log);
+  const failed = events.find((e) => e.event === "app.start_failed");
+  assert.ok(failed && failed.level === "error" && failed.fields.reason.includes("データベース"), log);
 
   // 原因を取り除けば、次の起動はふつうに始まる
   fs.rmSync(dbFile);

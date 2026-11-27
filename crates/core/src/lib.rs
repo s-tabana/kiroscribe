@@ -5,6 +5,8 @@ pub mod autostart;
 pub mod chat;
 pub mod claude;
 pub mod db;
+pub mod debug_bundle;
+pub mod debug_log;
 #[cfg(feature = "e2e")]
 pub mod e2e;
 pub mod error;
@@ -15,6 +17,7 @@ pub mod legacy;
 pub mod log_submit;
 pub mod meeting_record;
 pub mod meetings;
+pub mod mic_store;
 pub mod notes;
 pub mod prompts;
 pub mod recorder;

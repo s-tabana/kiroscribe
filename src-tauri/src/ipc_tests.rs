@@ -352,10 +352,30 @@ fn mock_app(update_endpoint: &str) -> (tauri::App<MockRuntime>, WebviewWindow<Mo
     app.manage(BackgroundState::default());
     app.manage(crate::meeting_watch::MeetingState::default());
     app.manage(UpdateState::new(false, None));
+    app.manage(kiroscribe_core::debug_log::DebugLog::open(debug_log_dir()).expect("デバッグ用のログを用意できません"));
     let window = WebviewWindowBuilder::new(&app, MAIN_LABEL, Default::default())
         .build()
         .expect("模擬のウィンドウを作れません");
     (app, window)
+}
+
+/// 模擬のアプリごとの、デバッグ用のログのフォルダ（テストの実行ファイルの隣、target の中）。
+/// 模擬のアプリはテストの終わりまでログを書くので、フォルダはテストの間は残し、
+/// 次にテストを流したときに、前の回のフォルダをまとめて消す（溜まり続けないように）。
+fn debug_log_dir() -> PathBuf {
+    static BASE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let base = BASE.get_or_init(|| {
+        let exe = std::env::current_exe().expect("テストの実行ファイルの場所が分かりません");
+        let base = exe
+            .parent()
+            .and_then(Path::parent)
+            .expect("target の場所が分かりません")
+            .join("ipc-debug-logs");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    });
+    tempfile::Builder::new().tempdir_in(base).unwrap().keep()
 }
 
 /// 画面の `invoke(command, args)` と同じ経路でコマンドを呼ぶ。

@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorMessage, useBackend } from "../lib/backend";
 import { currentEnhanceRun, startEnhanceRun } from "../lib/enhanceRuns";
-import type { Note, NotePatch, RecordingStatus, Segment } from "../lib/types";
+import type { Note, NotePatch, RecordingStatus, Segment, TranscriptBreak } from "../lib/types";
 import { fullDateLabel } from "../lib/dates";
 import { UNTITLED } from "../lib/notes";
 import { RecordingBar } from "./RecordingBar";
 import { SidePanel, type PanelTab } from "./SidePanel";
 import { MinutesView } from "./MinutesView";
 import { ShareMenu } from "./ShareMenu";
+import { ResumeDialog, type ResumeChoice } from "./ResumeDialog";
 import { TrashIcon } from "./icons";
 
 const SAVE_DELAY_MS = 500;
@@ -19,6 +20,8 @@ export interface RecordingControls {
   status: RecordingStatus;
   busy: boolean;
   start(noteId: string): void;
+  /** 新しいノートを作り、そこで録音を始める */
+  startInNewNote(): void;
   pause(): void;
   resume(): void;
   stop(): void;
@@ -64,6 +67,8 @@ export function NoteView({
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [segments, setSegments] = useState<Segment[]>([]);
+  const [breaks, setBreaks] = useState<TranscriptBreak[]>([]);
+  const [askingResume, setAskingResume] = useState(false);
   const [panel, setPanel] = useState<PanelTab | null>(null);
 
   const pending = useRef<NotePatch>({});
@@ -123,6 +128,27 @@ export function NoteView({
       unsubscribe();
     };
   }, [backend, noteId]);
+
+  // 文字起こしの区切り: 保存済みのものを読み込み、録音を始め直したら届いたものを追加する。
+  // 何も話さずに止めた回の区切りは本体が消すので、録音の状態が変わったら読み直す
+  useEffect(() => {
+    let cancelled = false;
+    const unsubscribe = backend.onTranscriptBreak((added) => {
+      if (added.noteId !== noteId) return;
+      setBreaks((prev) => (prev.some((b) => b.id === added.id) ? prev : [...prev, added]));
+    });
+    void backend.listTranscriptBreaks(noteId).then((loaded) => {
+      if (cancelled) return;
+      // 録音中は、読み込みより先に届いた区切りも残す。録音していなければ、保存されているものだけにする
+      setBreaks((prev) =>
+        recordingHere ? [...loaded, ...prev.filter((b) => !loaded.some((l) => l.id === b.id))] : loaded,
+      );
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [backend, noteId, recordingHere]);
 
   // 議事録の生成中は、届いた文字を表示に足していく（この画面が生成中の表示をしているときだけ）
   useEffect(
@@ -221,6 +247,21 @@ export function NoteView({
       setStreaming(null);
     }
   };
+
+  // 録音の開始・再開。議事録のあるノートで再開するときは、同じ会議の続きか、新しいノートにするかを先に聞く
+  const startRecording = () => {
+    if (segments.length > 0 && minutes !== null) setAskingResume(true);
+    else recording.start(noteId);
+  };
+
+  const answerResume = useCallback(
+    (choice: ResumeChoice | null) => {
+      setAskingResume(false);
+      if (choice === "continue") recording.start(noteId);
+      else if (choice === "newNote") recording.startInNewNote();
+    },
+    [recording, noteId],
+  );
 
   // 会議終了のポップアップから「議事録を作成」が押されたとき
   const autoEnhanceStarted = useRef(false);
@@ -371,7 +412,7 @@ export function NoteView({
                 ? { running: streaming !== null, onClick: () => void generate() }
                 : null
             }
-            onStart={() => recording.start(noteId)}
+            onStart={startRecording}
             onPause={recording.pause}
             onResume={recording.resume}
             onStop={recording.stop}
@@ -386,6 +427,7 @@ export function NoteView({
           noteId={noteId}
           tab={panel}
           segments={segments}
+          breaks={breaks}
           live={live}
           sources={status.sources}
           onTabChange={setPanel}
@@ -393,6 +435,7 @@ export function NoteView({
           onError={onError}
         />
       )}
+      {askingResume && <ResumeDialog onClose={answerResume} />}
     </div>
   );
 }

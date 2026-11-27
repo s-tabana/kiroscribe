@@ -2,6 +2,8 @@
 //! 振る舞いを、模擬の音声と模擬サーバーを相手に確かめる。土台は `fixture`（テストは 1 件ずつ順に動く）。
 
 mod ai;
+mod debug_log;
+mod log_submit;
 mod meeting;
 mod misc;
 mod recording;

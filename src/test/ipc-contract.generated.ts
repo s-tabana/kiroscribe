@@ -56,6 +56,9 @@ export const called = {
   getAppVersion: [
     [],
   ] satisfies Called<"getAppVersion">[],
+  getDebugLogStatus: [
+    [],
+  ] satisfies Called<"getDebugLogStatus">[],
   getGuide: [
     [],
   ] satisfies Called<"getGuide">[],
@@ -92,6 +95,9 @@ export const called = {
   listSegments: [
     ["…"],
   ] satisfies Called<"listSegments">[],
+  listTranscriptBreaks: [
+    ["…"],
+  ] satisfies Called<"listTranscriptBreaks">[],
   openExternal: [
     ["…"],
   ] satisfies Called<"openExternal">[],
@@ -108,7 +114,8 @@ export const called = {
     [],
   ] satisfies Called<"resumeRecording">[],
   saveSettings: [
-    [{"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"}],
+    [{"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"logIntakeToken":null,"logIntakeUrl":null,"myName":"…","transcriptionModel":"…"}],
+    [{"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"logIntakeToken":"…","logIntakeUrl":"…","myName":"…","transcriptionModel":"…"}],
   ] satisfies Called<"saveSettings">[],
   searchNotes: [
     ["…"],
@@ -120,18 +127,28 @@ export const called = {
     ["openai","…"],
     ["anthropic","…"],
   ] satisfies Called<"setApiKey">[],
+  setDebugVerbose: [
+    [true],
+    [false],
+  ] satisfies Called<"setDebugVerbose">[],
   startRecording: [
     ["…"],
   ] satisfies Called<"startRecording">[],
   stopRecording: [
     [],
   ] satisfies Called<"stopRecording">[],
+  submitDebugLogs: [
+    [],
+  ] satisfies Called<"submitDebugLogs">[],
   takeUpdateNotice: [
     [],
   ] satisfies Called<"takeUpdateNotice">[],
   updateNote: [
     ["…",{"title":"…","userNotes":"…"}],
   ] satisfies Called<"updateNote">[],
+  writeDebugLog: [
+    ["error","…",{"command":"x","message":"y"}],
+  ] satisfies Called<"writeDebugLog">[],
 };
 
 export const returned = {
@@ -168,6 +185,9 @@ export const returned = {
   getAppVersion: [
     "…",
   ] satisfies Returned<"getAppVersion">[],
+  getDebugLogStatus: [
+    {"verboseUntil":null},
+  ] satisfies Returned<"getDebugLogStatus">[],
   getGuide: [
     {"fetchedAt":0,"markdown":"…","source":"network"},
   ] satisfies Returned<"getGuide">[],
@@ -191,7 +211,7 @@ export const returned = {
     {"fetchedAt":0,"releases":[{"body":"…","htmlUrl":"…","name":"…","publishedAt":"…","tagName":"…","version":"…"}],"source":"network"},
   ] satisfies Returned<"getReleaseNotes">[],
   getSettings: [
-    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
+    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"logIntakeToken":null,"logIntakeUrl":null,"myName":"…","transcriptionModel":"…"},
   ] satisfies Returned<"getSettings">[],
   getUpdateStatus: [
     {"available":null,"checkedAt":null,"downloadedBytes":0,"phase":"idle","ready":false,"totalBytes":null},
@@ -209,6 +229,9 @@ export const returned = {
   listSegments: [
     [{"endedAt":0,"id":0,"noteId":"…","speaker":"me","startedAt":0,"text":"…"},{"endedAt":0,"id":0,"noteId":"…","speaker":"them","startedAt":0,"text":"…"}],
   ] satisfies Returned<"listSegments">[],
+  listTranscriptBreaks: [
+    [{"id":0,"noteId":"…","round":0,"startedAt":0}],
+  ] satisfies Returned<"listTranscriptBreaks">[],
   openExternal: [
     null,
   ] satisfies Returned<"openExternal">[],
@@ -225,7 +248,8 @@ export const returned = {
     {"elapsedMs":0,"noteId":"…","runningSince":0,"sources":["me","them"],"state":"recording"},
   ] satisfies Returned<"resumeRecording">[],
   saveSettings: [
-    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
+    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"logIntakeToken":null,"logIntakeUrl":null,"myName":"…","transcriptionModel":"…"},
+    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"logIntakeToken":"…","logIntakeUrl":"…","myName":"…","transcriptionModel":"…"},
   ] satisfies Returned<"saveSettings">[],
   searchNotes: [
     ["…"],
@@ -237,18 +261,28 @@ export const returned = {
     {"anthropic":false,"openai":true,"storage":"…"},
     {"anthropic":true,"openai":true,"storage":"…"},
   ] satisfies Returned<"setApiKey">[],
+  setDebugVerbose: [
+    {"verboseUntil":0},
+    {"verboseUntil":null},
+  ] satisfies Returned<"setDebugVerbose">[],
   startRecording: [
     {"elapsedMs":0,"noteId":"…","runningSince":0,"sources":["me","them"],"state":"recording"},
   ] satisfies Returned<"startRecording">[],
   stopRecording: [
     {"elapsedMs":0,"noteId":null,"runningSince":null,"sources":[],"state":"idle"},
   ] satisfies Returned<"stopRecording">[],
+  submitDebugLogs: [
+    {"id":"…","receivedAt":"…"},
+  ] satisfies Returned<"submitDebugLogs">[],
   takeUpdateNotice: [
     null,
   ] satisfies Returned<"takeUpdateNotice">[],
   updateNote: [
     {"createdAt":0,"enhancedAt":null,"enhancedNotes":null,"id":"…","title":"…","updatedAt":0,"userNotes":"…"},
   ] satisfies Returned<"updateNote">[],
+  writeDebugLog: [
+    null,
+  ] satisfies Returned<"writeDebugLog">[],
 };
 
 export const emitted = {
@@ -262,6 +296,9 @@ export const emitted = {
     {"level":0,"speaker":"me"},
     {"level":0,"speaker":"them"},
   ] satisfies Emitted<"onLevel">[],
+  onLogSubmitProgress: [
+    {"sent":0,"total":0},
+  ] satisfies Emitted<"onLogSubmitProgress">[],
   onNoteCreated: [
     {"createdAt":0,"enhancedAt":null,"enhancedNotes":null,"id":"…","title":"…","updatedAt":0,"userNotes":"…"},
   ] satisfies Emitted<"onNoteCreated">[],
@@ -290,9 +327,12 @@ export const emitted = {
     {"endedAt":0,"id":0,"noteId":"…","speaker":"them","startedAt":0,"text":"…"},
   ] satisfies Emitted<"onSegment">[],
   onSettingsChanged: [
-    {"autoRecordMeetings":false,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
-    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"myName":"…","transcriptionModel":"…"},
+    {"autoRecordMeetings":false,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"logIntakeToken":null,"logIntakeUrl":null,"myName":"…","transcriptionModel":"…"},
+    {"autoRecordMeetings":true,"autoUpdate":false,"captureSystemAudio":true,"claudeModel":"…","inputDeviceId":null,"language":"ja","launchAtLogin":true,"logIntakeToken":null,"logIntakeUrl":null,"myName":"…","transcriptionModel":"…"},
   ] satisfies Emitted<"onSettingsChanged">[],
+  onTranscriptBreak: [
+    {"id":0,"noteId":"…","round":0,"startedAt":0},
+  ] satisfies Emitted<"onTranscriptBreak">[],
   onUpdateStatus: [
     {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"idle","ready":false,"totalBytes":null},
     {"available":{"notes":"…","publishedAt":0,"version":"…"},"checkedAt":0,"downloadedBytes":0,"phase":"downloading","ready":false,"totalBytes":null},

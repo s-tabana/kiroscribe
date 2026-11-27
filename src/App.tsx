@@ -162,6 +162,16 @@ export function App() {
       status: recordingStatus,
       busy: recordingBusy,
       start: (noteId) => void run(() => backend.startRecording(noteId)),
+      // 新しいノートを作って開き、そこで録音を始める（作れなかったら録音しない）
+      startInNewNote: () =>
+        void run(async () => {
+          const note = await backend.createNote();
+          setNotes((prev) => [toSummary(note), ...prev]);
+          setQuery("");
+          setSelectedId(note.id);
+          setJustCreatedId(note.id);
+          return backend.startRecording(note.id);
+        }),
       pause: () => void run(() => backend.pauseRecording()),
       resume: () => void run(() => backend.resumeRecording()),
       stop: () => void run(() => backend.stopRecording()),

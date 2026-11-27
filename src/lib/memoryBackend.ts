@@ -22,6 +22,7 @@ import {
   type RecordingStatus,
   type ReleaseNote,
   type Segment,
+  type TranscriptBreak,
   type Settings,
   type Speaker,
   type UpdateStatus,
@@ -54,6 +55,9 @@ interface MemoryOptions {
 }
 
 /** テストから文字起こしやエラーを発生させるための追加機能 */
+/** 「詳しい記録」を続ける時間（本体の debug_log::VERBOSE_MS と同じ 24 時間） */
+const DEBUG_VERBOSE_MS = 24 * 60 * 60 * 1000;
+
 export interface MemoryBackend extends Backend {
   emitSegment(noteId: string, speaker: Speaker, text: string): Segment;
   emitError(noteId: string, message: string): void;
@@ -69,6 +73,8 @@ export interface MemoryBackend extends Backend {
   /** 最後にコピー・保存した内容（テスト用） */
   readonly lastCopied: string | null;
   readonly lastSaved: { fileName: string; markdown: string } | null;
+  /** writeDebugLog で書いた出来事（テスト用） */
+  readonly debugLog: { level: "info" | "error"; event: string; fields?: Record<string, unknown> }[];
 
   /** ヘルプの内容を差し替える（既定はリポジトリの docs/guide.md と CHANGELOG.md） */
   setHelpContent(content: { guide?: string; releases?: ReleaseNote[] }): void;
@@ -208,6 +214,10 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
   const now = options.now ?? (() => Date.now());
   const notes = new Map<string, Note>();
   const segments = new Map<string, Segment[]>();
+  const breaks = new Map<string, TranscriptBreak[]>();
+  let breakId = 0;
+  /** 録音中の回の区切り（何も話さずに止めたら消す） */
+  let openBreak: TranscriptBreak | null = null;
   let settings: Settings = { ...DEFAULT_SETTINGS, ...options.settings };
   const keys: Record<Provider, boolean> = { openai: false, anthropic: false };
   let counter = 0;
@@ -216,6 +226,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
   let recording: RecordingStatus = { ...IDLE_STATUS };
   const statusEvents = new Emitter<RecordingStatus>();
   const segmentEvents = new Emitter<Segment>();
+  const breakEvents = new Emitter<TranscriptBreak>();
   const levelEvents = new Emitter<LevelEvent>();
   const errorEvents = new Emitter<RecordingErrorEvent>();
   const enhanceEvents = new Emitter<DeltaEvent>();
@@ -233,6 +244,8 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
   let popupClosed = false;
   const recordingCheckAnswers: { noteId: string; deadline: number; keep: boolean }[] = [];
   let lastSaved: { fileName: string; markdown: string } | null = null;
+  let verboseUntil: number | null = null;
+  const debugLog: { level: "info" | "error"; event: string; fields?: Record<string, unknown> }[] = [];
 
   let appVersion = options.version ?? packageVersion;
   let helpGuide: string = bundledGuide;
@@ -332,11 +345,13 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
 
   const addSegment = (noteId: string, speaker: Speaker, text: string): Segment => {
     const endedAt = now();
+    // 録音を始める前の音声はないので、録音中の回の発話は、その回の区切りより前には始まらない
+    const roundStart = openBreak?.noteId === noteId ? openBreak.startedAt : -Infinity;
     const segment: Segment = {
       id: ++segmentId,
       noteId,
       speaker,
-      startedAt: endedAt - 2500,
+      startedAt: Math.min(endedAt, Math.max(endedAt - 2500, roundStart)),
       endedAt,
       text,
     };
@@ -486,6 +501,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       if (recording.noteId === id) throw "録音中のノートは削除できません。先に録音を停止してください";
       notes.delete(id);
       segments.delete(id);
+      breaks.delete(id);
     },
     async getSettings() {
       return { ...settings };
@@ -521,6 +537,9 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
     async listSegments(noteId) {
       return [...(segments.get(noteId) ?? [])];
     },
+    async listTranscriptBreaks(noteId) {
+      return [...(breaks.get(noteId) ?? [])];
+    },
     async getRecordingStatus() {
       return { ...recording };
     },
@@ -536,6 +555,14 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       find(noteId);
       if (!keys.openai && !options.demo) {
         throw "API キーが設定されていません（OpenAI）。設定画面から入力してください";
+      }
+      // 本体と同じく、文字起こしのあるノートで始めるときは、始める位置に区切りを付ける
+      openBreak = null;
+      if ((segments.get(noteId)?.length ?? 0) > 0) {
+        const list = breaks.get(noteId) ?? [];
+        openBreak = { id: ++breakId, noteId, round: list.length + 2, startedAt: now() };
+        breaks.set(noteId, [...list, openBreak]);
+        breakEvents.emit({ ...openBreak });
       }
       if (options.demo) startDemo(noteId);
       return setRecording({
@@ -571,12 +598,19 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       stopDemo();
       setRecording({ ...recording, state: "finishing", runningSince: null });
       await new Promise((resolve) => setTimeout(resolve, options.demo ? 900 : 0));
+      // 何も話さないまま止めた回の区切りは残さない
+      const added = openBreak;
+      openBreak = null;
+      if (added && !(segments.get(added.noteId) ?? []).some((s) => s.startedAt >= added.startedAt)) {
+        breaks.set(added.noteId, (breaks.get(added.noteId) ?? []).filter((b) => b.id !== added.id));
+      }
       const stopped = setRecording({ ...IDLE_STATUS });
       autoInstall();
       return stopped;
     },
     onRecordingStatus: (cb) => statusEvents.on(cb),
     onSegment: (cb) => segmentEvents.on(cb),
+    onTranscriptBreak: (cb) => breakEvents.on(cb),
     onLevel: (cb) => levelEvents.on(cb),
     onRecordingError: (cb) => errorEvents.on(cb),
     onNoteCreated: (cb) => noteCreatedEvents.on(cb),
@@ -713,9 +747,24 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       lastSaved = { fileName, markdown: toMarkdown(noteId, options).markdown };
       return fileName;
     },
-    async saveMeetingRecord(fileName) {
-      // プレビューには会議の検出がないので、記録は空
-      return { path: fileName, entries: 0 };
+    async getDebugLogStatus() {
+      // 本体と同じく、期限が過ぎたらオフに戻す
+      if (verboseUntil !== null && verboseUntil <= now()) verboseUntil = null;
+      return { verboseUntil };
+    },
+    async setDebugVerbose(enabled) {
+      verboseUntil = enabled ? now() + DEBUG_VERBOSE_MS : null;
+      return { verboseUntil };
+    },
+    async writeDebugLog(level, event, fields) {
+      debugLog.push({ level, event, fields });
+    },
+    async saveDebugBundle(fileName) {
+      // プレビューにはログのファイルがないので、名前だけ返す
+      return fileName;
+    },
+    get debugLog() {
+      return debugLog;
     },
     async submitDebugLogs() {
       const report = (value: LogSubmitProgress) => logSubmitEvents.emit({ ...value });
