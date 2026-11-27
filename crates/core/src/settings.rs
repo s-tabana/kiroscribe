@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::Database;
 use crate::error::Result;
-use crate::log_submit::{Intake, DEFAULT_LOG_INTAKE_TOKEN, DEFAULT_LOG_INTAKE_URL};
 
 pub const DEFAULT_TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe";
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
@@ -35,10 +34,6 @@ pub struct Settings {
     pub launch_at_login: bool,
     /// 見つけた新しいバージョンを自動でインストールする（既定はオフで、知らせるだけ）。
     pub auto_update: bool,
-    /// デバッグ用のログの回収の入口（`https://<ホスト>`）。`None` なら既定（[`DEFAULT_LOG_INTAKE_URL`]）。画面には出さない
-    pub log_intake_url: Option<String>,
-    /// 入口に添える提出用の値（`X-Log-Token`）。`None` なら既定（[`DEFAULT_LOG_INTAKE_TOKEN`]）。画面には出さない
-    pub log_intake_token: Option<String>,
 }
 
 impl Default for Settings {
@@ -53,8 +48,6 @@ impl Default for Settings {
             auto_record_meetings: true,
             launch_at_login: true,
             auto_update: false,
-            log_intake_url: None,
-            log_intake_token: None,
         }
     }
 }
@@ -75,22 +68,7 @@ impl Settings {
             .input_device_id
             .map(|id| id.trim().to_string())
             .filter(|id| !id.is_empty());
-        let optional = |value: Option<String>| value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-        self.log_intake_url = optional(self.log_intake_url);
-        self.log_intake_token = optional(self.log_intake_token);
         self
-    }
-
-    /// デバッグ用のログの送り先。入口と提出用の値のどちらかが、設定にも既定にもなければ `None`
-    pub fn log_intake(&self) -> Option<Intake> {
-        self.log_intake_or(DEFAULT_LOG_INTAKE_URL, DEFAULT_LOG_INTAKE_TOKEN)
-    }
-
-    /// [`Self::log_intake`] の既定の値を差し替えたもの
-    pub fn log_intake_or(&self, default_url: Option<&str>, default_token: Option<&str>) -> Option<Intake> {
-        let base = self.log_intake_url.as_deref().or(default_url)?;
-        let token = self.log_intake_token.as_deref().or(default_token)?;
-        Some(Intake::new(base, token))
     }
 }
 
@@ -232,51 +210,29 @@ mod tests {
         assert!(!loaded.auto_update);
     }
 
-    // [SET-001][SET-019]
+    /// 送り先は設定に持たない。設定に送り先を書いても使わず、ほかの値はそのまま読める
+    // [SET-004][SET-019][SEC-015]
     #[test]
-    fn log_intake_comes_from_settings_or_defaults() {
+    fn log_intake_is_not_a_setting() {
+        let json = serde_json::to_value(Settings::default()).unwrap();
+        assert!(json.get("logIntakeUrl").is_none() && json.get("logIntakeToken").is_none(), "{json}");
+
         let db = Database::open_in_memory().unwrap();
+        db.set_value(
+            SETTINGS_KEY,
+            r#"{"myName":"田花","autoUpdate":true,"logIntakeUrl":"https://evil.example","logIntakeToken":"x"}"#,
+        )
+        .unwrap();
         let loaded = db.load_settings().unwrap();
-        assert_eq!((loaded.log_intake_url.as_deref(), loaded.log_intake_token.as_deref()), (None, None));
-        // 未設定なら既定の値を使う
-        assert_eq!(
-            loaded.log_intake(),
-            Some(Intake::new(DEFAULT_LOG_INTAKE_URL.unwrap(), DEFAULT_LOG_INTAKE_TOKEN.unwrap()))
-        );
-        assert!(loaded.log_intake().unwrap().url.starts_with("https://"));
-        // 画面とは camelCase でやり取りし、未設定は null
-        let json = serde_json::to_value(&loaded).unwrap();
-        assert_eq!(json["logIntakeUrl"], serde_json::Value::Null);
-        assert_eq!(json["logIntakeToken"], serde_json::Value::Null);
-
-        let saved = db
-            .save_settings(Settings {
-                log_intake_url: Some(" http://127.0.0.1:4010/ ".into()),
-                log_intake_token: Some(" token ".into()),
-                ..Default::default()
-            })
-            .unwrap();
-        assert_eq!(saved.log_intake(), Some(Intake::new("http://127.0.0.1:4010", "token")), "設定の値を使う");
+        assert_eq!(loaded.my_name, "田花");
+        assert!(loaded.auto_update);
+        let saved = db.save_settings(loaded).unwrap();
+        let stored = db.get_value(SETTINGS_KEY).unwrap().unwrap();
+        assert!(!stored.contains("logIntake"), "{stored}");
         assert_eq!(db.load_settings().unwrap(), saved);
-
-        // 空なら未設定に戻す
-        let blank = db
-            .save_settings(Settings {
-                log_intake_url: Some("  ".into()),
-                log_intake_token: Some("".into()),
-                ..Default::default()
-            })
-            .unwrap();
-        assert_eq!((blank.log_intake_url, blank.log_intake_token), (None, None));
-
-        // 既定がないときは、片方だけでは送らない
-        let url_only = Settings { log_intake_url: Some("https://logs.example.com".into()), ..Default::default() };
-        assert_eq!(url_only.log_intake_or(None, None), None);
-        let token_only = Settings { log_intake_token: Some("t".into()), ..Default::default() };
-        assert_eq!(token_only.log_intake_or(None, None), None);
         assert_eq!(
-            token_only.log_intake_or(Some("https://logs.example.com"), None),
-            Some(Intake::new("https://logs.example.com", "t"))
+            crate::log_submit::intake().unwrap().url(),
+            "https://log-intake.seita-tabana.workers.dev/v1/logs/kiroscribe"
         );
     }
 

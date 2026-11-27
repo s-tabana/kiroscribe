@@ -472,7 +472,7 @@ describe("SettingsDialog: デバッグ用のログの提出", () => {
     return { backend, confirm, submit };
   }
 
-  it("[SET-014] 押すと、送るもの・送らないもの・置く期間を確認し、取り消したら送らない", async () => {
+  it("[SET-014][SEC-015] 押すと、送るもの・送らないもの・置く期間を確認し、取り消したら送らない", async () => {
     const user = userEvent.setup();
     const { confirm, submit } = setupSubmit();
     confirm.mockReturnValue(false);

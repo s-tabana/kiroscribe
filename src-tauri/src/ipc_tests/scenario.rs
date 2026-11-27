@@ -315,10 +315,6 @@ fn ipc_contract_matches_the_frontend() {
     assert_eq!(refused, "保存できるのは .zip ファイルだけです");
 
     // ---- デバッグ用のログの提出（偽の入口に送る）[SET-015][SET-017] ----
-    let mut configured = s.ok("get_settings", json!({}));
-    configured["logIntakeUrl"] = json!(format!("{}/logs", fixture.server_uri));
-    configured["logIntakeToken"] = json!("kiroscribe-test-token");
-    s.ok("save_settings", json!({ "settings": configured }));
     let submission = s.ok("submit_debug_logs", json!({}));
     assert_eq!(submission["id"], LOG_SUBMISSION_ID);
     let progress = wait_until("提出の進み具合", || events_named(&events, "log-submit-progress").into_iter().last());

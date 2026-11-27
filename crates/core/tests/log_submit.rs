@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use kiroscribe_core::log_submit::{
-    submit_logs, Intake, Progress, Submission, CLIENT_ID_HEADER, TOKEN_HEADER, VERSION_HEADER,
+    client, submit_logs, Intake, Progress, Submission, CLIENT_ID_HEADER, TOKEN_HEADER, VERSION_HEADER,
 };
 use serde_json::json;
 use wiremock::matchers::{header, method, path};
@@ -24,8 +24,8 @@ fn recorder() -> (Progress, Arc<Mutex<Vec<(u64, u64)>>>) {
 async fn send(server: &MockServer, body: Vec<u8>) -> kiroscribe_core::Result<Submission> {
     let (progress, _) = recorder();
     submit_logs(
-        &kiroscribe_core::http::client(),
-        &Intake::new(&server.uri(), "kiroscribe-token"),
+        &client(),
+        &Intake::local(&server.uri(), "kiroscribe-token").unwrap(),
         "0.4.1",
         "3f6c0a5e-0000-4000-8000-000000000000",
         body,
@@ -55,8 +55,8 @@ async fn sends_the_zip_as_is_and_returns_the_submission() {
     let body = zip(200_000);
     let (progress, seen) = recorder();
     let submission = submit_logs(
-        &kiroscribe_core::http::client(),
-        &Intake::new(&format!("{}/", server.uri()), "kiroscribe-token"),
+        &client(),
+        &Intake::local(&format!("{}/", server.uri()), "kiroscribe-token").unwrap(),
         "0.4.1",
         "3f6c0a5e-0000-4000-8000-000000000000",
         body.clone(),
@@ -131,8 +131,8 @@ async fn unreachable_intake_says_to_check_the_connection() {
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let (progress, _) = recorder();
     let err = submit_logs(
-        &kiroscribe_core::http::client(),
-        &Intake::new(&format!("http://127.0.0.1:{port}"), "t"),
+        &client(),
+        &Intake::local(&format!("http://127.0.0.1:{port}"), "t").unwrap(),
         "0.4.1",
         "client",
         zip(100),
@@ -145,4 +145,25 @@ async fn unreachable_intake_says_to_check_the_connection() {
             .starts_with("ログを送れませんでした。送り先につながりませんでした。インターネットに接続しているか"),
         "{err}"
     );
+}
+
+/// 入口がリダイレクトを返しても従わず、ほかの場所には送らない。
+// [SEC-015]
+#[tokio::test]
+async fn redirects_are_not_followed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/logs/kiroscribe"))
+        .respond_with(ResponseTemplate::new(308).insert_header("location", format!("{}/elsewhere", server.uri())))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/elsewhere"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": "KS-ELSEWHERE", "receivedAt": "" })))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let err = send(&server, zip(100)).await.unwrap_err();
+    assert_eq!(err.to_string(), "ログの送り先がエラーを返しました（HTTP 308）。しばらく待ってから、もう一度お試しください");
 }

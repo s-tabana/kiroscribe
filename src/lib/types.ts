@@ -40,10 +40,6 @@ export interface Settings {
   launchAtLogin: boolean;
   /** 見つけた新しいバージョンを自動でインストールする（既定はオフで、知らせるだけ） */
   autoUpdate: boolean;
-  /** デバッグ用のログの回収の入口（https://<ホスト>）。null なら既定（画面には出さない） */
-  logIntakeUrl: string | null;
-  /** 入口に添える提出用の値。null なら既定（画面には出さない） */
-  logIntakeToken: string | null;
 }
 
 export type Provider = "openai" | "anthropic";
@@ -65,8 +61,6 @@ export const DEFAULT_SETTINGS: Settings = {
   autoRecordMeetings: true,
   launchAtLogin: true,
   autoUpdate: false,
-  logIntakeUrl: null,
-  logIntakeToken: null,
 };
 
 // ---- 録音・文字起こし ----

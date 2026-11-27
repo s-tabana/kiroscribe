@@ -69,6 +69,8 @@ pub(super) struct Api {
     /// 文字起こし API が応答するまでの時間
     pub transcription_delay: Mutex<Duration>,
     pub claude: Mutex<ClaudeReply>,
+    /// ログの回収の入口が返す HTTP の状態（`None` なら受け付ける）
+    pub log_intake_status: Mutex<Option<u16>>,
 }
 
 impl Api {
@@ -77,6 +79,7 @@ impl Api {
             transcription_status: Mutex::new(None),
             transcription_delay: Mutex::new(Duration::ZERO),
             claude: Mutex::new(Self::default_claude()),
+            log_intake_status: Mutex::new(None),
         }
     }
 
@@ -88,6 +91,7 @@ impl Api {
         *self.transcription_status.lock().unwrap() = None;
         *self.transcription_delay.lock().unwrap() = Duration::ZERO;
         *self.claude.lock().unwrap() = Self::default_claude();
+        *self.log_intake_status.lock().unwrap() = None;
     }
 }
 
@@ -150,6 +154,23 @@ impl Respond for Claude {
     }
 }
 
+/// デバッグ用のログの回収の入口（共通の入口の契約どおりに振る舞う偽物）
+struct LogIntake(Arc<Api>);
+
+impl Respond for LogIntake {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        match *self.0.log_intake_status.lock().unwrap() {
+            None => ResponseTemplate::new(201)
+                .set_body_json(json!({ "id": LOG_SUBMISSION_ID, "receivedAt": "2026-11-27T12:50:30.217Z" })),
+            Some(429) => ResponseTemplate::new(429).set_body_json(
+                json!({ "error": "rate_limited", "message": "提出が多すぎます。1 時間ほど待ってから送ってください" }),
+            ),
+            Some(status @ 300..=399) => ResponseTemplate::new(status).insert_header("location", "/redirected/v1/logs/kiroscribe"),
+            Some(status) => ResponseTemplate::new(status),
+        }
+    }
+}
+
 /// 模擬の配布元が配る更新のファイル。
 fn update_package() -> Vec<u8> {
     vec![7u8; 4096]
@@ -186,7 +207,7 @@ async fn start_server(api: Arc<Api>) -> MockServer {
         .await;
     Mock::given(method("POST"))
         .and(path("/anthropic/v1/messages"))
-        .respond_with(Claude(api))
+        .respond_with(Claude(api.clone()))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
@@ -207,21 +228,14 @@ async fn start_server(api: Arc<Api>) -> MockServer {
         }])))
         .mount(&server)
         .await;
-    // デバッグ用のログの回収の入口（共通の入口の契約どおりに振る舞う偽物）
-    //   /logs/       受け付けて、提出の番号を返す
-    //   /logs-busy/  回数の上限に当たったことにする（429）
     Mock::given(method("POST"))
         .and(path("/logs/v1/logs/kiroscribe"))
-        .respond_with(
-            ResponseTemplate::new(201).set_body_json(json!({ "id": LOG_SUBMISSION_ID, "receivedAt": "2026-11-27T12:50:30.217Z" })),
-        )
+        .respond_with(LogIntake(api.clone()))
         .mount(&server)
         .await;
     Mock::given(method("POST"))
-        .and(path("/logs-busy/v1/logs/kiroscribe"))
-        .respond_with(ResponseTemplate::new(429).set_body_json(
-            json!({ "error": "rate_limited", "message": "提出が多すぎます。1 時間ほど待ってから送ってください" }),
-        ))
+        .and(path("/redirected/v1/logs/kiroscribe"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": "KS-REDIRECTED", "receivedAt": "" })))
         .mount(&server)
         .await;
     // 更新の配布元。配るファイルは、インストーラではないただのバイト列（署名が正しくても、インストールの段階で止まる）
@@ -326,6 +340,7 @@ pub(super) fn fixture() -> &'static Fixture {
             github_raw_base_url: Some(format!("{server_uri}/raw")),
             github_api_base_url: Some(format!("{server_uri}/api")),
             update_endpoint: Some(format!("{server_uri}/update/latest.json")),
+            log_intake_url: Some(format!("{server_uri}/logs")),
             update_pubkey: None,
             main_visible_at_start: false,
             tray_unavailable: false,

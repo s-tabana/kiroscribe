@@ -24,13 +24,11 @@ pub struct LogSubmitProgress {
 }
 
 /// デバッグ用のログを zip にまとめて送り、入口が返した提出の番号を返す。
-/// 入口と提出用の値が決まっていなければ、まとめずに理由を返す。
+/// 送り先は本体に埋め込んだ入口だけで、画面からは変えられない。送り先を使えなければ、まとめずに理由を返す。
 #[tauri::command]
 pub async fn submit_debug_logs(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Submission> {
-    let (intake, client_id) = {
-        let db = state.db();
-        (log_submit::intake(&db.load_settings()?)?, log_submit::client_id(&db)?)
-    };
+    let intake = log_submit::intake()?;
+    let client_id = log_submit::client_id(&state.db())?;
 
     let bundler = app.clone();
     let (zip, _) = tauri::async_runtime::spawn_blocking(move || debug::build_bundle(&bundler))
@@ -46,7 +44,7 @@ pub async fn submit_debug_logs(app: AppHandle, state: State<'_, AppState>) -> Cm
     });
     let version = app.package_info().version.to_string();
     let result = log_submit::submit_logs(
-        &kiroscribe_core::http::client(),
+        &log_submit::client(),
         &intake,
         &version,
         &client_id,

@@ -67,6 +67,9 @@ pub struct Config {
     pub github_api_base_url: Option<String>,
     /// アプリ内更新の `latest.json` の URL
     pub update_endpoint: Option<String>,
+    /// デバッグ用のログの回収の入口。手元の模擬サーバー（`http://127.0.0.1:<ポート>/<パス>` など）だけを書ける。
+    /// 書かなければ、ログを送らない（本物の入口に送らない）
+    pub log_intake_url: Option<String>,
     /// アプリ内更新の署名を確かめる公開鍵（`tauri.conf.json` の `plugins.updater.pubkey` と同じ形式）
     pub update_pubkey: Option<String>,
     /// メインウィンドウを、起動時の処理を待たずに最初から表示する（製品では、起動時の処理が済んでから表示する）。
@@ -241,6 +244,19 @@ pub fn update_endpoint() -> Option<String> {
     Some(configured.map_or_else(|| format!("{BLOCKED_URL}/latest.json"), str::to_string))
 }
 
+/// 模擬の入口に添える提出用の値
+pub const LOG_INTAKE_TOKEN: &str = "kiroscribe-e2e-log-token";
+
+/// 差し替え後のログの回収の入口と提出用の値。作業フォルダを使っていなければ `None`（本番の入口を使う）。
+/// 作業フォルダを使っていて入口を書いていなければ `Some(None)`（送らない）
+pub fn log_intake() -> Option<Option<(String, String)>> {
+    resolve_log_intake(dir().ok().flatten().is_some(), &config().log_intake_url)
+}
+
+fn resolve_log_intake(in_work_dir: bool, configured: &Option<String>) -> Option<Option<(String, String)>> {
+    in_work_dir.then(|| trimmed(configured).map(|url| (url, LOG_INTAKE_TOKEN.to_string())))
+}
+
 fn shortened_retry(timing: &Timing, default: &RetryPolicy) -> Option<RetryPolicy> {
     let base = Duration::from_millis(timing.retry_base_delay_ms?);
     Some(RetryPolicy {
@@ -357,6 +373,21 @@ mod tests {
         // 作業フォルダがなければ差し替えない（feature を付けた単体テストなどは、製品と同じ接続先のまま）
         assert_eq!(resolve_endpoint(false, &configured), None);
         assert_eq!(resolve_endpoint(false, &None), None);
+    }
+
+    /// 作業フォルダを使っているあいだは、入口を書き忘れてもログを送らない。書いた入口も手元の模擬サーバーに限る。
+    // [SEC-012][SEC-015]
+    #[test]
+    fn log_intake_is_local_and_explicit_inside_a_work_directory() {
+        assert_eq!(resolve_log_intake(false, &Some("http://127.0.0.1:4010/logs".into())), None);
+        assert_eq!(resolve_log_intake(true, &None), Some(None));
+        assert_eq!(resolve_log_intake(true, &Some("  ".into())), Some(None));
+        assert_eq!(
+            resolve_log_intake(true, &Some("http://127.0.0.1:4010/logs/".into())),
+            Some(Some(("http://127.0.0.1:4010/logs".into(), LOG_INTAKE_TOKEN.into())))
+        );
+        let config = parse_config(r#"{"logIntakeUrl": "http://127.0.0.1:4010/logs"}"#).unwrap();
+        assert_eq!(config.log_intake_url.as_deref(), Some("http://127.0.0.1:4010/logs"));
     }
 
     #[test]
