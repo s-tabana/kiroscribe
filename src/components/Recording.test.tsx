@@ -4,10 +4,10 @@ import userEvent from "@testing-library/user-event";
 import { App } from "../App";
 import { BackendContext } from "../lib/backend";
 import { createMemoryBackend, type MemoryBackend } from "../lib/memoryBackend";
-import { groupSegments } from "./TranscriptPanel";
+import { groupSegments, roundLabel, splitRounds } from "./TranscriptPanel";
 import { levelToBars } from "./LevelMeter";
 import { elapsedMs, formatElapsed } from "../lib/elapsed";
-import type { Segment } from "../lib/types";
+import type { Segment, TranscriptBreak } from "../lib/types";
 
 async function setup(withKey = true) {
   const backend = createMemoryBackend({ seed: true, confirm: () => true });
@@ -153,7 +153,7 @@ describe("表示用の補助関数", () => {
 });
 
 describe("録音: 文字起こしのパネル", () => {
-  it("[REC-015] 文字起こしのあるノートで録音を再開すると、新しい発話は既存の文字起こしの後に加わる", async () => {
+  it("[REC-015][TRN-023][TRN-024] 文字起こしのあるノートで録音を再開すると、区切りの後に新しい発話が加わる", async () => {
     const user = userEvent.setup();
     const backend = await setup();
     const noteId = await currentNoteId(backend);
@@ -177,6 +177,24 @@ describe("録音: 文字起こしのパネル", () => {
     const texts = within(panel).getAllByText(/回目の録音の発話/).map((element) => element.textContent);
     expect(texts).toEqual(["一回目の録音の発話", "二回目の録音の発話"]);
     expect((await backend.listSegments(noteId)).map((segment) => segment.text)).toEqual(texts);
+    // 議事録のないノートでは聞かずに続きとして録音し、再開した位置に区切りを入れる
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    const [added] = await backend.listTranscriptBreaks(noteId);
+    expect(added.round).toBe(2);
+    const heading = within(panel).getByRole("heading", { name: roundLabel(2, added.startedAt) });
+    expect(heading).toHaveTextContent(/^2回目の録音（\d{1,2}:\d{2}〜）$/);
+    // 区切りは、1 回目の発話と 2 回目の発話の間にある
+    const order = [...panel.querySelectorAll(".utterance-bubble p, .transcript-break")].map((e) => e.textContent);
+    expect(order).toEqual(["一回目の録音の発話", heading.textContent, "二回目の録音の発話"]);
+
+    // 何も話さずに止めた回の区切りは残らない
+    await user.click(screen.getByRole("button", { name: "停止" }));
+    await user.click(await screen.findByRole("button", { name: "録音を再開" }));
+    expect(await within(panel).findByRole("heading", { name: /^3回目の録音/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "停止" }));
+    await screen.findByRole("button", { name: "録音を再開" });
+    await waitFor(() => expect(within(panel).queryByRole("heading", { name: /^3回目の録音/ })).toBeNull());
+    expect((await backend.listTranscriptBreaks(noteId)).map((b) => b.round)).toEqual([2]);
   });
 
   it("[REC-018] 相手の声を取り込んでいないときは、文字起こしのパネルにその旨を表示する", async () => {
@@ -264,5 +282,116 @@ describe("録音: 文字起こしのパネル", () => {
     await user.click(screen.getByRole("button", { name: "録音を開始" }));
     await screen.findByRole("timer");
     expect(within(panel).getByText("話し始めると、数秒後にここへ表示されます。")).toBeInTheDocument();
+  });
+});
+
+/** 文字起こしと議事録のあるノートを用意してから、画面を開く */
+async function setupWithMinutes() {
+  const backend = createMemoryBackend({ seed: true, confirm: () => true });
+  await backend.setApiKey("openai", "sk-test");
+  const noteId = await currentNoteId(backend);
+  await backend.startRecording(noteId);
+  backend.emitSegment(noteId, "them", "一回目の会議の発話");
+  await backend.stopRecording();
+  await backend.updateNote(noteId, { enhancedNotes: "## 決定事項\n- リリースは 12/5" });
+  render(
+    <BackendContext.Provider value={backend}>
+      <App />
+    </BackendContext.Provider>,
+  );
+  await screen.findByDisplayValue("プロダクト定例");
+  return { backend, noteId };
+}
+
+describe("録音: 議事録のあるノートでの再開", () => {
+  it("[REC-027][TRN-024] 「続きとして録音」を選ぶと、同じノートで区切りを付けて録音する", async () => {
+    const user = userEvent.setup();
+    const { backend, noteId } = await setupWithMinutes();
+
+    await user.click(screen.getByRole("button", { name: "録音を再開" }));
+    const dialog = screen.getByRole("dialog", { name: "録音の再開" });
+    expect(dialog).toHaveTextContent("このノートには議事録があります。同じ会議の続きとして録音しますか？");
+    // 聞いている間は、録音を始めない
+    expect((await backend.getRecordingStatus()).state).toBe("idle");
+    expect(within(dialog).getByRole("button", { name: "続きとして録音" })).toHaveFocus();
+
+    await user.click(within(dialog).getByRole("button", { name: "続きとして録音" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(await screen.findByRole("timer")).toHaveTextContent("録音中");
+    expect((await backend.getRecordingStatus()).noteId).toBe(noteId);
+    const panel = screen.getByRole("complementary", { name: "文字起こし" });
+    expect(await within(panel).findByRole("heading", { name: /^2回目の録音（/ })).toBeInTheDocument();
+    act(() => {
+      backend.emitSegment(noteId, "me", "二回目の会議の発話");
+    });
+    expect(within(panel).getByText("二回目の会議の発話")).toBeInTheDocument();
+    expect((await backend.listTranscriptBreaks(noteId)).map((b) => b.round)).toEqual([2]);
+  });
+
+  it("[REC-027] 「新しいノートで録音」を選ぶと、新しいノートを作って開き、そこで録音する", async () => {
+    const user = userEvent.setup();
+    const { backend, noteId } = await setupWithMinutes();
+    const before = (await backend.listNotes()).length;
+
+    await user.click(screen.getByRole("button", { name: "録音を再開" }));
+    await user.click(screen.getByRole("button", { name: "新しいノートで録音" }));
+    expect(await screen.findByRole("timer")).toHaveTextContent("録音中");
+    const notes = await backend.listNotes();
+    expect(notes).toHaveLength(before + 1);
+    const status = await backend.getRecordingStatus();
+    expect(status.noteId).toBe(notes[0].id);
+    expect(status.noteId).not.toBe(noteId);
+    // 開いているのは新しいノート（空のタイトル）。元のノートには区切りも発話も足さない
+    expect(screen.getByLabelText("タイトル")).toHaveValue("");
+    expect(await backend.listTranscriptBreaks(noteId)).toEqual([]);
+    expect(await backend.listSegments(noteId)).toHaveLength(1);
+  });
+
+  it("[REC-027] 取り消す・閉じると、録音を始めない", async () => {
+    const user = userEvent.setup();
+    const { backend, noteId } = await setupWithMinutes();
+
+    await user.click(screen.getByRole("button", { name: "録音を再開" }));
+    await user.click(screen.getByRole("button", { name: "取り消す" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "録音を再開" }));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    expect((await backend.getRecordingStatus()).state).toBe("idle");
+    expect(await backend.listTranscriptBreaks(noteId)).toEqual([]);
+    expect((await backend.listNotes()).length).toBe(3);
+    expect(screen.getByRole("button", { name: "録音を再開" })).toBeEnabled();
+  });
+});
+
+describe("録音: 文字起こしの区切り", () => {
+  const segment = (id: number, startedAt: number): Segment => ({
+    id,
+    noteId: "n",
+    speaker: "me",
+    startedAt,
+    endedAt: startedAt + 500,
+    text: `発話${id}`,
+  });
+  const brk = (id: number, round: number, startedAt: number): TranscriptBreak => ({
+    id,
+    noteId: "n",
+    round,
+    startedAt,
+  });
+
+  it("[TRN-024] 発話を区切りで回ごとに分け、見出しは「2回目の録音（14:30〜）」の形にする", () => {
+    const segments = [segment(1, 1_000), segment(2, 2_000), segment(3, 10_000)];
+    expect(splitRounds(segments, []).map((r) => r.segments.length)).toEqual([3]);
+    const rounds = splitRounds(segments, [brk(2, 3, 20_000), brk(1, 2, 9_000)]);
+    expect(rounds.map((r) => [r.start?.round ?? 1, r.segments.map((s) => s.id)])).toEqual([
+      [1, [1, 2]],
+      [2, [3]],
+      [3, []],
+    ]);
+    const at = new Date(2026, 10, 27, 14, 30).getTime();
+    expect(roundLabel(2, at)).toBe("2回目の録音（14:30〜）");
   });
 });

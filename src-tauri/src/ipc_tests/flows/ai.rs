@@ -235,3 +235,36 @@ fn a_question_without_an_answer_is_not_kept_in_the_history() {
     assert_eq!(running.join().unwrap().unwrap_err(), "中止しました");
     assert_eq!(history(&h), answered, "中止した質問が履歴に残っている");
 }
+
+/// 区切りのあるノートでは、回ごとの節に分けるよう AI に頼む（作成も、作り直しも）。区切りのないノートは今までどおり。
+// [MIN-021][MIN-009]
+#[test]
+fn minutes_of_a_resumed_note_are_split_by_round() {
+    let h = Harness::new();
+    let note = h.note("", "");
+    let plain = h.note("", "");
+    {
+        let state = h.state();
+        let db = state.db();
+        db.add_segment(&note, Speaker::Them, 1_000, 2_000, "予算の話です").unwrap();
+        db.add_break_if_resumed(&note, 600_000).unwrap().unwrap();
+        db.add_segment(&note, Speaker::Them, 601_000, 602_000, "別件の採用の話です").unwrap();
+        db.add_segment(&plain, Speaker::Them, 1_000, 2_000, "予算の話です").unwrap();
+    }
+    set_reply(&h, ClaudeReply::text(&["# 定例\n\n", "## 1回目の録音（0:00〜）\n- 予算\n"]));
+    let message = |body: &Value| body["messages"][0]["content"].as_str().unwrap().to_string();
+
+    h.ok("enhance_note", json!({ "noteId": note }));
+    let first = message(&h.claude_requests().pop().unwrap());
+    assert!(first.contains("2 回に分けて録音しています"), "{first}");
+    assert!(first.contains("内容を混ぜないでください"), "{first}");
+    assert!(first.contains("--- 2回目の録音（"), "文字起こしに回の区切りがない: {first}");
+    // 作り直しでも、同じく回ごとに分ける（1 回目の作成で、タイトルだけが付いている）
+    h.ok("enhance_note", json!({ "noteId": note }));
+    let again = message(&h.claude_requests().pop().unwrap());
+    assert_eq!(again, first.replace("タイトル: （未設定）", "タイトル: 定例"));
+
+    h.ok("enhance_note", json!({ "noteId": plain }));
+    let single = message(&h.claude_requests().pop().unwrap());
+    assert!(!single.contains("回に分けて録音") && !single.contains("回目の録音"), "{single}");
+}
