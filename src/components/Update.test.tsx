@@ -10,9 +10,8 @@ import { createMemoryBackend } from "../lib/memoryBackend";
 const NOTES = "### 新しい機能\n\n- 話者ごとに名前を付けられます";
 
 /** 自動更新がオフ（既定。新しいバージョンがあることを知らせるだけ）のバックエンド */
-function updateBackend(confirm: (message: string) => boolean = () => true) {
-  // インストールの段階は、遅い環境でも画面に出たことを確かめられるよう、長めに続ける
-  return createMemoryBackend({ seed: true, version: "0.2.0", confirm, updateStepDelayMs: 15, installStepDelayMs: 300 });
+function updateBackend(confirm: (message: string) => boolean = () => true, installGate?: () => Promise<void>) {
+  return createMemoryBackend({ seed: true, version: "0.2.0", confirm, updateStepDelayMs: 15, installGate });
 }
 
 /** 設定で自動更新をオンにしたバックエンド */
@@ -65,7 +64,10 @@ describe("設定画面の「このアプリについて」", () => {
   it("[UPD-004][UPD-007][UPD-009][UPD-012] 新しいバージョンがあれば知らせ、確認のうえダウンロードの進み具合を表示して更新する", async () => {
     const user = userEvent.setup();
     const confirm = vi.fn(() => true);
-    const backend = updateBackend(confirm);
+    // インストール中の表示を確かめ終えるまで、インストールを終えない
+    let finishInstall = () => undefined as void;
+    const installGate = () => new Promise<void>((resolve) => (finishInstall = resolve));
+    const backend = updateBackend(confirm, installGate);
     backend.simulateUpdate("0.3.0", { notes: NOTES });
     const install = vi.spyOn(backend, "installUpdate");
     renderWith(backend, <SettingsDialog onClose={() => undefined} />);
@@ -88,6 +90,7 @@ describe("設定画面の「このアプリについて」", () => {
     expect(within(section).getByText(/更新をダウンロードしています/)).toHaveTextContent(/\d+%/);
     expect(within(section).getByRole("button", { name: "更新を確認" })).toBeDisabled();
     expect(await within(section).findByText(/更新をインストールしています/)).toBeInTheDocument();
+    finishInstall();
 
     // 実物ではここでアプリが再起動する。プレビュー実装は新しいバージョンになった状態を再現する
     expect(await within(section).findByText("Kiroscribe 0.3.0")).toBeInTheDocument();

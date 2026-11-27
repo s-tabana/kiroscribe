@@ -4,7 +4,9 @@
 //! シンボリックリンク・ジャンクション・ショートカット（.lnk）はたどらない。
 //! OneDrive の同期したファイルのような、別の場所を指さない再解析ポイントは、ふつうのファイルとして扱う。
 
-use std::fs::Metadata;
+use std::ffi::OsString;
+use std::fs::{File, Metadata};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use super::extract::{kind_of, Kind};
@@ -109,50 +111,18 @@ fn modified_ms(meta: &Metadata) -> i64 {
         .unwrap_or(0)
 }
 
-/// 1 つのファイルを、索引に入れるものとして調べる（入れないなら None）。見張りで届いた変更にも使う。
-pub fn inspect_file(path: &Path, limits: Limits) -> Option<FileEntry> {
+/// 索引に入れるファイルか（名前・種類・属性・大きさで決める）。入れないなら None。
+fn entry_of(path: &Path, meta: &Metadata, limits: Limits) -> Option<FileEntry> {
     let name = path.file_name()?.to_str()?;
     if is_skipped_file_name(name) {
         return None;
     }
     let kind = kind_of(path)?;
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    let traits = traits_of(&meta);
+    let traits = traits_of(meta);
     if !meta.is_file() || traits.link || traits.hidden_or_system || meta.len() > limits.max_bytes {
         return None;
     }
-    Some(FileEntry { path: path.to_path_buf(), kind, modified: modified_ms(&meta), size: meta.len(), online_only: traits.online_only })
-}
-
-/// `path` が `root` の中にあり、途中のフォルダを含めて、リンクをたどらずに届き、除くフォルダを通らないか。
-/// 足したあとでフォルダそのものがリンクに替わったときも、リンクの先を範囲に入れない。
-pub fn reachable_without_links(root: &Path, path: &Path) -> bool {
-    let Ok(rest) = path.strip_prefix(root) else {
-        return false;
-    };
-    if !is_plain_dir(root) {
-        return false;
-    }
-    let mut current = root.to_path_buf();
-    let parts: Vec<_> = rest.components().collect();
-    for (index, part) in parts.iter().enumerate() {
-        let std::path::Component::Normal(name) = part else {
-            return false;
-        };
-        current.push(name);
-        let Ok(meta) = std::fs::symlink_metadata(&current) else {
-            return false;
-        };
-        let traits = traits_of(&meta);
-        if traits.link {
-            return false;
-        }
-        let last = index + 1 == parts.len();
-        if !last && (traits.hidden_or_system || name.to_str().is_none_or(is_skipped_dir_name)) {
-            return false;
-        }
-    }
-    true
+    Some(FileEntry { path: path.to_path_buf(), kind, modified: modified_ms(meta), size: meta.len(), online_only: traits.online_only })
 }
 
 /// クラウドにだけあるファイルか（読む直前に確かめる。読むとダウンロードが始まるため）。
@@ -160,106 +130,434 @@ pub fn is_online_only(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| traits_of(&meta).online_only)
 }
 
-/// そのパスそのものが、リンクでないフォルダか（リンクをたどらずに確かめる）。
-pub fn is_plain_dir(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && !traits_of(&meta).link)
-}
-
-/// フォルダの中のファイルを、リンクをたどらずに届くときだけ読む（範囲の外なら None）。
-/// 調べてから開くまでのあいだに途中のフォルダがリンクに替わっても、範囲の外の中身を返さないよう、
-/// 開いたファイルが調べたファイルと同じかと、読み終えたあとにも範囲の中にあるかを確かめる。
-pub fn read_within(root: &Path, path: &Path) -> Option<std::io::Result<Vec<u8>>> {
-    use std::io::Read;
-    if !reachable_without_links(root, path) {
-        return None;
-    }
-    let before = std::fs::symlink_metadata(path).ok()?;
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(err) => return Some(Err(err)),
-    };
-    let opened = file.metadata().ok()?;
-    if !same_file(&before, &opened) {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    if let Err(err) = file.read_to_end(&mut bytes) {
-        return Some(Err(err));
-    }
-    reachable_without_links(root, path).then_some(Ok(bytes))
-}
-
-/// リンクをたどらずに調べたファイルと、開いたファイルが同じか。
-fn same_file(before: &Metadata, opened: &Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        before.is_file() && before.dev() == opened.dev() && before.ino() == opened.ino()
-    }
-    #[cfg(not(unix))]
-    {
-        before.is_file() && !traits_of(before).link && opened.is_file()
-    }
-}
-
 /// そのパスそのものが、たどらないリンク（シンボリックリンク・ジャンクション）か。
 pub fn is_link(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| traits_of(&meta).link)
 }
 
+/// ファイル・フォルダの識別子（Unix はデバイスと i ノードの番号、Windows はボリュームのシリアル番号とファイル ID）。
+/// 移したフォルダの代わりに、同じ名前のフォルダが作られたら変わる。
+pub type FileId = (u64, u64);
+
+/// 2 つの実際の場所が同じか（Windows では大文字と小文字を区別しない）。
+pub fn same_place(a: &Path, b: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        a.as_os_str().to_string_lossy().to_lowercase() == b.as_os_str().to_string_lossy().to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
+}
+
+/// 探すフォルダの範囲の外（リンクをたどらないと届かない・除くフォルダを通る・開いたものが別の場所にある）。
+#[derive(Debug)]
+struct Outside;
+
+impl std::fmt::Display for Outside {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("探すフォルダの範囲の外です（リンクの先はたどりません）")
+    }
+}
+
+impl std::error::Error for Outside {}
+
+fn outside() -> io::Error {
+    io::Error::other(Outside)
+}
+
+/// 範囲の外だったためのエラーか。
+pub fn is_outside(err: &io::Error) -> bool {
+    err.get_ref().is_some_and(|inner| inner.is::<Outside>())
+}
+
+/// ファイルを読んだ結果。
+#[derive(Debug)]
+pub enum Content {
+    Bytes(Vec<u8>),
+    /// クラウドにだけある（開いたあとで分かった。読むとダウンロードが始まるので読まない）
+    OnlineOnly,
+    /// 範囲の外にある・ふつうのファイルでない（中身も名前も索引に入れない）
+    Outside,
+    /// 読めなかった（権限がない・大きくなりすぎたなど）
+    Failed(io::Error),
+}
+
+/// 開いた探すフォルダ。中のフォルダとファイルは、このフォルダのハンドルを基準にたどる。
+/// 実際に開いたものがこのフォルダの中にあると確かめてから、列挙したり読んだりする（確かめられなければ読まない）。
+pub struct Root {
+    path: PathBuf,
+    dir: File,
+    id: FileId,
+    real: PathBuf,
+}
+
+impl Root {
+    /// 探すフォルダを開く。フォルダがない・フォルダそのものがリンク・フォルダでないときはエラー。
+    pub fn open(path: &Path) -> io::Result<Root> {
+        let (dir, id, real) = sys::open_root(path)?;
+        Ok(Root { path: path.to_path_buf(), dir, id, real })
+    }
+
+    /// 足したときのパス（索引の行のパスは、これを基準にする）。
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn id(&self) -> FileId {
+        self.id
+    }
+
+    /// 開いたときの実際の場所（上のフォルダのリンクをたどった先も含めた、本当の場所）。
+    pub fn real(&self) -> &Path {
+        &self.real
+    }
+
+    /// `path` の、このフォルダからの名前の並び。中を指さない・除くフォルダを通るときは None。
+    fn parts(&self, path: &Path) -> Option<Vec<OsString>> {
+        let rest = path.strip_prefix(&self.path).ok()?;
+        let mut parts = Vec::new();
+        for part in rest.components() {
+            let std::path::Component::Normal(name) = part else { return None };
+            parts.push(name.to_os_string());
+        }
+        let (_, dirs) = parts.split_last()?;
+        dirs.iter().all(|dir| dir.to_str().is_some_and(|name| !is_skipped_dir_name(name))).then_some(parts)
+    }
+
+    /// `path` が、途中に除くフォルダ（隠し・システム・「.」で始まるなど）を通らずに届く、このフォルダの中のパスか。
+    /// 名前と属性で決める（リンクかどうかと、実際にどこにあるかは、開くときに確かめる）。
+    pub fn allows(&self, path: &Path) -> bool {
+        let Some(parts) = self.parts(path) else { return false };
+        let mut current = self.path.clone();
+        parts[..parts.len() - 1].iter().all(|part| {
+            current.push(part);
+            std::fs::symlink_metadata(&current).is_ok_and(|meta| !traits_of(&meta).hidden_or_system)
+        })
+    }
+
+    /// このフォルダの中のファイル・フォルダの属性を、リンクをたどらずに調べる。範囲の外なら [`is_outside`] のエラー。
+    pub fn stat(&self, path: &Path) -> io::Result<Metadata> {
+        let parts = self.parts(path).ok_or_else(outside)?;
+        let (name, dirs) = parts.split_last().ok_or_else(outside)?;
+        sys::stat_child(self, dirs, name)
+    }
+
+    /// 1 つのファイルを、索引に入れるものとして調べる（入れないなら None）。見張りで届いた変更に使う。
+    pub fn inspect(&self, path: &Path, limits: Limits) -> Option<FileEntry> {
+        if !self.allows(path) {
+            return None;
+        }
+        entry_of(path, &self.stat(path).ok()?, limits)
+    }
+
+    /// このフォルダの中にある、ふつうのファイルか（中身は読まない。名前だけで索引に入れるときに使う）。
+    pub fn contains_file(&self, path: &Path) -> bool {
+        self.stat(path).is_ok_and(|meta| meta.is_file() && !traits_of(&meta).link)
+    }
+
+    /// このフォルダの中のファイルの中身を、`max_bytes` まで読む。
+    /// 開いたファイルが、このフォルダの中にリンクをたどらずに届く、ふつうのファイルだと確かめてから読む。
+    pub fn read(&self, path: &Path, max_bytes: u64) -> Content {
+        use std::io::Read;
+        let Some(parts) = self.parts(path) else { return Content::Outside };
+        let file = match sys::open_file(self, &parts) {
+            Ok(file) => file,
+            Err(err) if is_outside(&err) => return Content::Outside,
+            Err(err) => return Content::Failed(err),
+        };
+        let meta = match file.metadata() {
+            Ok(meta) => meta,
+            Err(err) => return Content::Failed(err),
+        };
+        if !meta.is_file() {
+            return Content::Outside;
+        }
+        if traits_of(&meta).online_only {
+            return Content::OnlineOnly;
+        }
+        let mut bytes = Vec::new();
+        if let Err(err) = file.take(max_bytes.saturating_add(1)).read_to_end(&mut bytes) {
+            return Content::Failed(err);
+        }
+        if bytes.len() as u64 > max_bytes {
+            return Content::Failed(io::Error::new(io::ErrorKind::FileTooLarge, "ファイルが大きすぎます"));
+        }
+        Content::Bytes(bytes)
+    }
+
+    /// フォルダの中（下のフォルダを含む）の、索引に入れるファイルを集める。
+    pub fn walk(&self, limits: Limits) -> Walked {
+        let mut walked = Walked::default();
+        let mut stack: Vec<Vec<OsString>> = vec![Vec::new()];
+        while let Some(parts) = stack.pop() {
+            let dir_path = parts.iter().fold(self.path.clone(), |path, part| path.join(part));
+            let Ok(mut entries) = sys::list(self, &parts) else {
+                walked.unreadable.push(dir_path);
+                continue;
+            };
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut subdirs = Vec::new();
+            for (name, meta) in entries {
+                let traits = traits_of(&meta);
+                if traits.link || traits.hidden_or_system {
+                    continue;
+                }
+                let Some(text) = name.to_str() else {
+                    continue;
+                };
+                if meta.is_dir() {
+                    if !is_skipped_dir_name(text) {
+                        let mut sub = parts.clone();
+                        sub.push(name.clone());
+                        subdirs.push(sub);
+                    }
+                    continue;
+                }
+                if let Some(file) = entry_of(&dir_path.join(&name), &meta, limits) {
+                    if walked.files.len() >= limits.max_files {
+                        walked.truncated = true;
+                        return walked;
+                    }
+                    walked.files.push(file);
+                }
+            }
+            // 名前の順にたどる（スタックなので逆に積む）
+            stack.extend(subdirs.into_iter().rev());
+        }
+        walked
+    }
+}
+
+/// 列挙した 1 つの項目の属性。消えたものは除き、調べられないものがあればフォルダごと読めなかったことにする
+/// （中のファイルを、消えたとみなさない）。
+fn listed(name: OsString, meta: io::Result<Metadata>) -> io::Result<Option<(OsString, Metadata)>> {
+    match meta {
+        Ok(meta) => Ok(Some((name, meta))),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// Linux: 開いたフォルダのハンドル（`/proc/self/fd/<番号>`）を基準に、名前を 1 つずつ、リンクをたどらずに開く。
+#[cfg(target_os = "linux")]
+mod sys {
+    use super::*;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    fn handle_path(file: &File) -> PathBuf {
+        PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
+    }
+
+    /// リンクを開こうとした（ELOOP）・フォルダでなかった（ENOTDIR）ときは、範囲の外にする。
+    fn link_as_outside(err: io::Error) -> io::Error {
+        match err.raw_os_error() {
+            Some(libc::ELOOP) | Some(libc::ENOTDIR) => outside(),
+            _ => err,
+        }
+    }
+
+    fn open_dir(path: &Path) -> io::Result<File> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+            .map_err(link_as_outside)
+    }
+
+    pub(super) fn open_root(path: &Path) -> io::Result<(File, FileId, PathBuf)> {
+        let dir = open_dir(path).map_err(|err| {
+            if is_outside(&err) {
+                io::Error::new(io::ErrorKind::InvalidInput, "リンクのフォルダはたどりません")
+            } else {
+                err
+            }
+        })?;
+        let meta = dir.metadata()?;
+        let real = std::fs::read_link(handle_path(&dir))?;
+        Ok((dir, (meta.dev(), meta.ino()), real))
+    }
+
+    fn open_dirs(root: &Root, dirs: &[OsString]) -> io::Result<File> {
+        let mut dir = root.dir.try_clone()?;
+        for name in dirs {
+            dir = open_dir(&handle_path(&dir).join(name))?;
+        }
+        Ok(dir)
+    }
+
+    pub(super) fn stat_child(root: &Root, dirs: &[OsString], name: &OsString) -> io::Result<Metadata> {
+        let dir = open_dirs(root, dirs)?;
+        std::fs::symlink_metadata(handle_path(&dir).join(name))
+    }
+
+    pub(super) fn open_file(root: &Root, parts: &[OsString]) -> io::Result<File> {
+        let (name, dirs) = parts.split_last().ok_or_else(outside)?;
+        let dir = open_dirs(root, dirs)?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+            .open(handle_path(&dir).join(name))
+            .map_err(link_as_outside)
+    }
+
+    pub(super) fn list(root: &Root, dirs: &[OsString]) -> io::Result<Vec<(OsString, Metadata)>> {
+        let dir = open_dirs(root, dirs)?;
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(handle_path(&dir))? {
+            let entry = entry?;
+            // 列挙したハンドルを基準に、リンクをたどらずに調べる
+            entries.extend(listed(entry.file_name(), entry.metadata())?);
+        }
+        Ok(entries)
+    }
+}
+
+/// Windows: 開いたファイル・フォルダの実際の場所（`GetFinalPathNameByHandleW`）が、
+/// 探すフォルダのいまの実際の場所の下の、同じ名前の並びと一致するかを確かめる（途中にリンクがあると一致しない）。
+#[cfg(windows)]
+mod sys {
+    use super::*;
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, GetFinalPathNameByHandleW, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, VOLUME_NAME_DOS,
+    };
+
+    /// フォルダそのものを開く（リンクなら、リンクの先ではなくリンクそのものを開く）。
+    fn open_dir(path: &Path) -> io::Result<File> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    }
+
+    fn file_id(file: &File) -> io::Result<FileId> {
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((u64::from(info.dwVolumeSerialNumber), (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)))
+    }
+
+    fn final_path(file: &File) -> io::Result<PathBuf> {
+        let mut buf = vec![0u16; 512];
+        loop {
+            let len = unsafe {
+                GetFinalPathNameByHandleW(file.as_raw_handle(), buf.as_mut_ptr(), buf.len() as u32, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS)
+            } as usize;
+            if len == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if len < buf.len() {
+                buf.truncate(len);
+                return Ok(PathBuf::from(OsString::from_wide(&buf)));
+            }
+            buf.resize(len + 1, 0);
+        }
+    }
+
+    /// 開いたものが、探すフォルダのいまの実際の場所から、名前の並び `parts` で届く場所にあるか。
+    fn located(root: &Root, opened: &File, parts: &[OsString]) -> io::Result<()> {
+        let expected = parts.iter().fold(final_path(&root.dir)?, |path, part| path.join(part));
+        if same_place(&final_path(opened)?, &expected) {
+            Ok(())
+        } else {
+            Err(outside())
+        }
+    }
+
+    fn join(root: &Root, parts: &[OsString]) -> PathBuf {
+        parts.iter().fold(root.path.clone(), |path, part| path.join(part))
+    }
+
+    pub(super) fn open_root(path: &Path) -> io::Result<(File, FileId, PathBuf)> {
+        let dir = open_dir(path)?;
+        let meta = dir.metadata()?;
+        if traits_of(&meta).link {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "リンクのフォルダはたどりません"));
+        }
+        if !meta.is_dir() {
+            return Err(io::Error::new(io::ErrorKind::NotADirectory, "フォルダではありません"));
+        }
+        let id = file_id(&dir)?;
+        let real = final_path(&dir)?;
+        Ok((dir, id, real))
+    }
+
+    /// 中のフォルダを開き、リンクでないフォルダで、探すフォルダの中にあると確かめる。
+    fn open_dirs(root: &Root, dirs: &[OsString]) -> io::Result<File> {
+        let dir = open_dir(&join(root, dirs))?;
+        let meta = dir.metadata()?;
+        if traits_of(&meta).link || !meta.is_dir() {
+            return Err(outside());
+        }
+        located(root, &dir, dirs)?;
+        Ok(dir)
+    }
+
+    pub(super) fn stat_child(root: &Root, dirs: &[OsString], name: &OsString) -> io::Result<Metadata> {
+        let path = join(root, dirs).join(name);
+        open_dirs(root, dirs)?;
+        std::fs::symlink_metadata(path)
+    }
+
+    pub(super) fn open_file(root: &Root, parts: &[OsString]) -> io::Result<File> {
+        let file = File::open(join(root, parts))?;
+        located(root, &file, parts)?;
+        Ok(file)
+    }
+
+    pub(super) fn list(root: &Root, dirs: &[OsString]) -> io::Result<Vec<(OsString, Metadata)>> {
+        let dir = open_dirs(root, dirs)?;
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(join(root, dirs))? {
+            let entry = entry?;
+            entries.extend(listed(entry.file_name(), entry.metadata())?);
+        }
+        // 列挙したあとも、同じフォルダが同じ場所にある（列挙のあいだに、別のフォルダに替わっていない）
+        located(root, &dir, dirs)?;
+        if file_id(&open_dir(&join(root, dirs))?)? != file_id(&dir)? {
+            return Err(outside());
+        }
+        Ok(entries)
+    }
+}
+
+/// ほかの OS: 開いたものの場所を確かめられないので、読まない。
+#[cfg(not(any(target_os = "linux", windows)))]
+mod sys {
+    use super::*;
+
+    fn unsupported() -> io::Error {
+        io::Error::new(io::ErrorKind::Unsupported, "この OS では資料の索引を作れません")
+    }
+
+    pub(super) fn open_root(_: &Path) -> io::Result<(File, FileId, PathBuf)> {
+        Err(unsupported())
+    }
+
+    pub(super) fn stat_child(_: &Root, _: &[OsString], _: &OsString) -> io::Result<Metadata> {
+        Err(unsupported())
+    }
+
+    pub(super) fn open_file(_: &Root, _: &[OsString]) -> io::Result<File> {
+        Err(unsupported())
+    }
+
+    pub(super) fn list(_: &Root, _: &[OsString]) -> io::Result<Vec<(OsString, Metadata)>> {
+        Err(unsupported())
+    }
+}
+
 /// フォルダの中（下のフォルダを含む）の、索引に入れるファイルを集める。
 /// フォルダがないとき・フォルダそのものがリンクのとき（リンクの先はたどらない）はエラー。
-pub fn walk(root: &Path, limits: Limits) -> std::io::Result<Walked> {
-    let meta = std::fs::symlink_metadata(root)?;
-    if traits_of(&meta).link {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "リンクのフォルダはたどりません"));
-    }
-    if !meta.is_dir() {
-        return Err(std::io::Error::new(std::io::ErrorKind::NotADirectory, "フォルダではありません"));
-    }
-    let mut walked = Walked::default();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            walked.unreadable.push(dir);
-            continue;
-        };
-        let Ok(mut entries) = entries.collect::<std::io::Result<Vec<_>>>() else {
-            walked.unreadable.push(dir);
-            continue;
-        };
-        entries.sort_by_key(|entry| entry.file_name());
-        let mut subdirs = Vec::new();
-        for entry in entries {
-            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
-                continue;
-            };
-            let traits = traits_of(&meta);
-            if traits.link || traits.hidden_or_system {
-                continue;
-            }
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            if meta.is_dir() {
-                if !is_skipped_dir_name(name) {
-                    subdirs.push(entry.path());
-                }
-                continue;
-            }
-            if let Some(file) = inspect_file(&entry.path(), limits) {
-                if walked.files.len() >= limits.max_files {
-                    walked.truncated = true;
-                    return Ok(walked);
-                }
-                walked.files.push(file);
-            }
-        }
-        // 名前の順にたどる（スタックなので逆に積む）
-        stack.extend(subdirs.into_iter().rev());
-    }
-    Ok(walked)
+pub fn walk(root: &Path, limits: Limits) -> io::Result<Walked> {
+    Ok(Root::open(root)?.walk(limits))
 }
 
 #[cfg(test)]
@@ -327,6 +625,13 @@ mod tests {
         assert_eq!(names(&walked, root), ["見える.txt"]);
     }
 
+    fn bytes(content: Content) -> Option<Vec<u8>> {
+        match content {
+            Content::Bytes(bytes) => Some(bytes),
+            _ => None,
+        }
+    }
+
     // [IDX-027]
     #[cfg(unix)]
     #[test]
@@ -340,23 +645,92 @@ mod tests {
         std::os::unix::fs::symlink(outside.path().join("外.txt"), root.join("外へ.txt")).unwrap();
         let walked = walk(root, Limits::default()).unwrap();
         assert_eq!(names(&walked, root), ["中.txt"]);
-        assert!(!reachable_without_links(root, &root.join("リンク").join("外.txt")));
-        assert!(!reachable_without_links(root, &root.join("外へ.txt")));
-        assert!(reachable_without_links(root, &root.join("中.txt")));
-        assert!(!reachable_without_links(root, &outside.path().join("外.txt")), "フォルダの外");
+        let opened = Root::open(root).unwrap();
+        assert!(!opened.contains_file(&root.join("リンク").join("外.txt")));
+        assert!(!opened.contains_file(&root.join("外へ.txt")));
+        assert!(opened.contains_file(&root.join("中.txt")));
+        assert!(!opened.contains_file(&outside.path().join("外.txt")), "フォルダの外");
+        assert!(opened.inspect(&root.join("リンク").join("外.txt"), Limits::default()).is_none());
+        assert!(is_outside(&opened.stat(&root.join("リンク").join("外.txt")).unwrap_err()));
 
-        // 追加したフォルダそのものがリンクでも、リンクの先はたどらない
+        // 追加したフォルダそのものがリンクなら、開かない（リンクの先はたどらない）
         let linked = dir.path().join("リンクのフォルダ");
         std::os::unix::fs::symlink(outside.path(), &linked).unwrap();
         assert!(is_link(&linked));
         assert!(!is_link(root));
         assert!(walk(&linked, Limits::default()).is_err());
-        assert!(!is_plain_dir(&linked) && is_plain_dir(root));
-        // フォルダそのものがリンクなら、リンクの先のファイルは範囲の外（読まない）
-        assert!(!reachable_without_links(&linked, &linked.join("外.txt")));
-        assert!(read_within(&linked, &linked.join("外.txt")).is_none());
-        assert_eq!(read_within(root, &root.join("中.txt")).unwrap().unwrap(), "経費".as_bytes());
-        assert!(read_within(root, &root.join("外へ.txt")).is_none());
+        assert!(Root::open(&linked).is_err());
+        assert_eq!(bytes(opened.read(&root.join("中.txt"), MAX_FILE_BYTES)).unwrap(), "経費".as_bytes());
+        assert!(matches!(opened.read(&root.join("外へ.txt"), MAX_FILE_BYTES), Content::Outside));
+        assert!(matches!(opened.read(&root.join("リンク").join("外.txt"), MAX_FILE_BYTES), Content::Outside));
+    }
+
+    /// 開いたあとで、ファイルや途中のフォルダがリンクに替わっても、リンクの先を読まない（読む直前の差し替え）。
+    // [IDX-027]
+    #[cfg(unix)]
+    #[test]
+    fn files_and_folders_replaced_by_links_before_reading_are_not_read() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("a.txt"), "社外秘").unwrap();
+        std::fs::write(outside.path().join("b.txt"), "社外秘").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("資料");
+        touch(&root.join("a.txt"));
+        touch(&root.join("下").join("b.txt"));
+        let opened = Root::open(&root).unwrap();
+        let walked = opened.walk(Limits::default());
+        assert_eq!(names(&walked, &root), ["a.txt", "下/b.txt"]);
+
+        // 調べたあと、読む前に差し替える
+        std::fs::remove_file(root.join("a.txt")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("a.txt"), root.join("a.txt")).unwrap();
+        std::fs::rename(root.join("下"), dir.path().join("退避")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("下")).unwrap();
+        for file in &walked.files {
+            let content = opened.read(&file.path, MAX_FILE_BYTES);
+            assert!(matches!(content, Content::Outside), "{}: {content:?}", file.path.display());
+            assert!(!opened.contains_file(&file.path));
+        }
+    }
+
+    /// 開いたあとで、上のフォルダがリンクに替わり、別の場所の同じ名前のフォルダを指すようになっても、
+    /// 開いたフォルダのハンドルを基準に読むので、別の場所の中身を読まない。開き直すと、実際の場所が変わったと分かる。
+    // [IDX-027]
+    #[cfg(unix)]
+    #[test]
+    fn a_parent_replaced_by_a_link_does_not_redirect_reading() {
+        let outside = tempfile::tempdir().unwrap();
+        touch(&outside.path().join("共有資料").join("外.txt"));
+        std::fs::write(outside.path().join("共有資料").join("a.txt"), "社外秘").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("上").join("共有資料");
+        touch(&root.join("a.txt"));
+        let opened = Root::open(&root).unwrap();
+        let real = opened.real().to_path_buf();
+
+        std::fs::rename(dir.path().join("上"), dir.path().join("退避")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("上")).unwrap();
+        assert_eq!(bytes(opened.read(&root.join("a.txt"), MAX_FILE_BYTES)).unwrap(), "経費".as_bytes(), "開いたフォルダの中身");
+        assert!(!opened.contains_file(&root.join("外.txt")), "別の場所のファイルは、開いたフォルダの中にない");
+        assert!(bytes(opened.read(&root.join("外.txt"), MAX_FILE_BYTES)).is_none());
+        let names: Vec<_> = opened.walk(Limits::default()).files.iter().map(|f| f.path.file_name().unwrap().to_owned()).collect();
+        assert_eq!(names, ["a.txt"]);
+
+        let reopened = Root::open(&root).unwrap();
+        assert!(!same_place(reopened.real(), &real), "開き直すと、別の場所にあると分かる");
+        assert_ne!(reopened.id(), opened.id());
+    }
+
+    /// 読み始めたあとで大きくなったファイルは、上限を超えて読まない。
+    // [IDX-003]
+    #[test]
+    fn reading_stops_at_the_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.txt"), "12345").unwrap();
+        let opened = Root::open(root).unwrap();
+        assert_eq!(bytes(opened.read(&root.join("a.txt"), 5)).unwrap(), b"12345");
+        assert!(matches!(opened.read(&root.join("a.txt"), 4), Content::Failed(_)));
     }
 
     // [IDX-010]
@@ -400,7 +774,45 @@ mod tests {
         let _ = std::os::windows::fs::symlink_dir(outside.path(), root.join("リンク"));
         let walked = walk(root, Limits::default()).unwrap();
         assert_eq!(names(&walked, root), ["中.txt"]);
-        assert!(!reachable_without_links(root, &root.join("ジャンクション").join("外.txt")));
+        let opened = Root::open(root).unwrap();
+        let through = root.join("ジャンクション").join("外.txt");
+        assert!(!opened.contains_file(&through));
+        assert!(matches!(opened.read(&through, MAX_FILE_BYTES), Content::Outside));
+        assert_eq!(bytes(opened.read(&root.join("中.txt"), MAX_FILE_BYTES)).unwrap(), "経費".as_bytes());
+        // 追加したフォルダそのものがジャンクションなら、開かない
+        assert!(Root::open(&root.join("ジャンクション")).is_err());
+    }
+
+    /// 開いたあとで、上のフォルダがジャンクションに替わり、別の場所の同じ名前のフォルダを指すようになっても、
+    /// 別の場所の中身を読まない。開き直すと、実際の場所が変わったと分かる。
+    // [IDX-027]
+    #[cfg(windows)]
+    #[test]
+    fn a_parent_replaced_by_a_junction_does_not_redirect_reading() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(outside.path().join("共有資料")).unwrap();
+        std::fs::write(outside.path().join("共有資料").join("a.txt"), "社外秘").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("上").join("共有資料");
+        touch(&root.join("a.txt"));
+        let opened = Root::open(&root).unwrap();
+        let real = opened.real().to_path_buf();
+        assert_eq!(bytes(opened.read(&root.join("a.txt"), MAX_FILE_BYTES)).unwrap(), "経費".as_bytes());
+
+        std::fs::rename(dir.path().join("上"), dir.path().join("退避")).unwrap();
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(dir.path().join("上"))
+            .arg(outside.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "ジャンクションを作れません");
+        let content = opened.read(&root.join("a.txt"), MAX_FILE_BYTES);
+        assert!(matches!(content, Content::Outside), "{content:?}");
+        assert!(!opened.contains_file(&root.join("a.txt")));
+        assert!(opened.walk(Limits::default()).files.is_empty());
+        let reopened = Root::open(&root).unwrap();
+        assert!(!same_place(reopened.real(), &real), "開き直すと、別の場所にあると分かる");
     }
 
     // [IDX-027]

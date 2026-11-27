@@ -6,6 +6,8 @@ use std::path::Path;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
+use super::walk::{Content, Root};
+
 /// 1 ファイルから読む文字の上限。
 pub const MAX_CHARS: usize = 200_000;
 /// 文書の中の題名として使う長さの上限（これより長ければ、ファイル名を題名にする）。
@@ -57,13 +59,14 @@ impl Extracted {
 
 /// 探すフォルダ `root` の中のファイルの中身を取り出す。読めないとき（壊れている・パスワード付き・文字がない）は、名前だけで探す。
 /// リンクをたどらないと届かない（フォルダの範囲の外にある）ときは None（中身も名前も索引に入れない）。
-pub fn extract_within(root: &Path, path: &Path, kind: Kind) -> Option<Extracted> {
+pub fn extract_within(root: &Root, path: &Path, kind: Kind, max_bytes: u64) -> Option<Extracted> {
     if kind == Kind::NameOnly {
-        return super::walk::reachable_without_links(root, path).then(Extracted::name_only);
+        return root.contains_file(path).then(Extracted::name_only);
     }
-    match super::walk::read_within(root, path)? {
-        Ok(bytes) => Some(extract_bytes(&bytes, kind)),
-        Err(_) => Some(Extracted::name_only()),
+    match root.read(path, max_bytes) {
+        Content::Bytes(bytes) => Some(extract_bytes(&bytes, kind)),
+        Content::Outside => None,
+        Content::OnlineOnly | Content::Failed(_) => Some(Extracted::name_only()),
     }
 }
 

@@ -29,6 +29,10 @@ quick-xml = "0.42"
 pdf-extract = "0.12"
 notify = "9"
 
+# 資料の索引で、開いたフォルダを基準にリンクをたどらずにファイルを開く（O_NOFOLLOW など）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-native-keyring-store = "1"
 winreg = "0.56"

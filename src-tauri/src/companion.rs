@@ -58,7 +58,10 @@ pub fn settings_changed(app: &AppHandle, before: Option<&Settings>, saved: &Sett
         let folders = app.state::<AppState>().db().load_search_folders().unwrap_or_default();
         companion.indexer.enable(folders);
     } else {
-        companion.indexer.disable();
+        // 設定の画面は開いたままなので、消し始めたこと（「消している」）をすぐ知らせる。
+        // 消し終えた知らせが先に届いていても、画面は番号の小さい古い状態で上書きしない
+        let status = companion.indexer.disable();
+        let _ = app.emit(EVENT_SEARCH_INDEX_STATUS, &status);
     }
 }
 

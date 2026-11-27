@@ -323,9 +323,11 @@ export const emitted = {
   onSearchIndexStatus: [
     {"done":0,"files":0,"folders":[],"revision":0,"state":"building","total":0,"updatedAt":0},
     {"done":0,"files":0,"folders":[],"revision":0,"state":"building","total":0,"updatedAt":null},
+    {"done":0,"files":0,"folders":[],"revision":0,"state":"erasing","total":0,"updatedAt":null},
     {"done":0,"files":0,"folders":[],"revision":0,"state":"off","total":0,"updatedAt":null},
     {"done":0,"files":0,"folders":[],"revision":0,"state":"ready","total":0,"updatedAt":0},
     {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"revision":0,"state":"building","total":0,"updatedAt":null},
+    {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"revision":0,"state":"erasing","total":0,"updatedAt":null},
     {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"revision":0,"state":"off","total":0,"updatedAt":null},
     {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":false,"path":"…","truncated":false}],"revision":0,"state":"ready","total":0,"updatedAt":0},
     {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":true,"path":"…","truncated":false}],"revision":0,"state":"building","total":0,"updatedAt":0},

@@ -532,6 +532,70 @@ fn a_folder_replaced_by_a_link_does_not_bring_in_files_outside_it() {
     assert!(search(&f, "社外秘").is_empty());
 }
 
+/// 足したあとで、探すフォルダより上のフォルダがリンクに替わり、別の場所の同じ名前のフォルダを指すようになっても、
+/// その中身を索引に入れない。見張りの知らせ・すべてを調べ直す経路・作り直しのどれでも入れず、それまでの索引は残す。
+/// 上のフォルダが戻ったら、もとのフォルダとして調べ直す。
+// [IDX-027][IDX-010]
+#[cfg(unix)]
+#[test]
+fn a_parent_folder_replaced_by_a_link_does_not_bring_in_files_elsewhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("上");
+    let root = parent.join("共有資料");
+    write(&root.join("a.txt"), "経費");
+    let index_path = dir.path().join("data").join(INDEX_FILE);
+    let intervals = Intervals { poll: Duration::from_secs(3600), root_check: Duration::from_millis(200), ..Intervals::default() };
+    let indexer = Indexer::spawn_with_intervals(index_path.clone(), Limits::default(), intervals, |_| {});
+    indexer.enable(vec![folder(&root)]);
+    wait_until("索引", Duration::from_secs(20), || {
+        let status = indexer.status();
+        status.state == IndexState::Ready && status.files == 1
+    });
+    let search = |term: &str| -> Vec<String> {
+        let index = SearchIndex::open(&index_path).unwrap();
+        index.search(&[term.to_string()], 10).unwrap().into_iter().map(|hit| hit.file_name).collect()
+    };
+
+    // 範囲の外の、同じ名前のフォルダ
+    let outside = tempfile::tempdir().unwrap();
+    write(&outside.path().join("共有資料").join("leak.txt"), "社外秘");
+    write(&outside.path().join("共有資料").join("a.txt"), "社外秘");
+    let moved = dir.path().join("退避");
+    std::fs::rename(&parent, &moved).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &parent).unwrap();
+    // もとのフォルダへの書き込みと、もとのパスの下の変更の知らせ
+    write(&moved.join("共有資料").join("b.txt"), "経費");
+    write(&outside.path().join("共有資料").join("leak2.txt"), "社外秘");
+    wait_until("見つからない表示", Duration::from_secs(30), || indexer.status().folders[0].missing);
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(search("社外秘").is_empty(), "別の場所の中身を入れない");
+    assert_eq!(search("経費"), ["a.txt"], "それまでの索引は残す");
+
+    // 一覧を変えて調べ直しても、作り直しても、別の場所の中身を入れない
+    let returned = indexer.set_folders(vec![folder(&root)]);
+    wait_until("調べ直し", Duration::from_secs(20), || {
+        let status = indexer.status();
+        status.state == IndexState::Ready && status.revision > returned.revision && status.folders[0].missing
+    });
+    assert!(search("社外秘").is_empty());
+    let returned = indexer.rebuild().unwrap();
+    wait_until("作り直し", Duration::from_secs(20), || {
+        let status = indexer.status();
+        status.state == IndexState::Ready && status.revision > returned.revision && status.folders[0].missing
+    });
+    assert!(search("社外秘").is_empty());
+
+    // 上のフォルダが戻ったら、もとのフォルダとして調べ直す
+    std::fs::remove_file(&parent).unwrap();
+    std::fs::rename(&moved, &parent).unwrap();
+    wait_until("戻ったフォルダの索引", Duration::from_secs(30), || {
+        let status = indexer.status();
+        status.state == IndexState::Ready && !status.folders[0].missing && status.files == 2
+    });
+    assert!(search("社外秘").is_empty());
+    assert!(indexer.shutdown_and_wait(Duration::from_secs(5)));
+}
+
 /// 前回の索引が残ったまま、相棒がオフで起動し、索引のファイルを消すことも、中身を空にすることもできないとき:
 /// 「消している」のままにして、消し直す。消し直せたら、消し終えてから「オフ」を知らせる。
 // [IDX-028]
@@ -596,7 +660,10 @@ fn erasing_is_reported_until_a_retry_erases_the_index() {
 
     // 書き込めるようになったら、消し直して「オフ」にする
     restore();
-    wait_until("オフ", Duration::from_secs(10), || indexer.status().state == IndexState::Off);
+    // 状態を更新してから知らせるので、知らせが届くまで待つ
+    wait_until("オフ", Duration::from_secs(10), || {
+        indexer.status().state == IndexState::Off && events.lock().unwrap().iter().any(|(state, ..)| *state == IndexState::Off)
+    });
     let events = events.lock().unwrap().clone();
     let first_off = events.iter().position(|(state, ..)| *state == IndexState::Off).expect("「オフ」の知らせ");
     assert!(events[..first_off].iter().all(|(state, ..)| *state == IndexState::Erasing), "{events:?}");
