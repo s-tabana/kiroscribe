@@ -783,8 +783,9 @@ mod tests {
         assert!(Root::open(&root.join("ジャンクション")).is_err());
     }
 
-    /// 開いたあとで、上のフォルダがジャンクションに替わり、別の場所の同じ名前のフォルダを指すようになっても、
-    /// 別の場所の中身を読まない。開き直すと、実際の場所が変わったと分かる。
+    /// 上のフォルダがジャンクションに替わり、別の場所の同じ名前のフォルダを指すようになっても、別の場所の中身を読まない。
+    /// Windows は、中のフォルダを開いているあいだ上のフォルダの名前を変えさせないので、変えられたときだけ読み取りを確かめる。
+    /// 開き直すと、実際の場所が変わったと分かる。
     // [IDX-027]
     #[cfg(windows)]
     #[test]
@@ -799,7 +800,14 @@ mod tests {
         let real = opened.real().to_path_buf();
         assert_eq!(bytes(opened.read(&root.join("a.txt"), MAX_FILE_BYTES)).unwrap(), "経費".as_bytes());
 
-        std::fs::rename(dir.path().join("上"), dir.path().join("退避")).unwrap();
+        let renamed = std::fs::rename(dir.path().join("上"), dir.path().join("退避")).is_ok();
+        let opened = if renamed {
+            Some(opened)
+        } else {
+            drop(opened);
+            std::fs::rename(dir.path().join("上"), dir.path().join("退避")).unwrap();
+            None
+        };
         let status = std::process::Command::new("cmd")
             .args(["/C", "mklink", "/J"])
             .arg(dir.path().join("上"))
@@ -807,10 +815,12 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "ジャンクションを作れません");
-        let content = opened.read(&root.join("a.txt"), MAX_FILE_BYTES);
-        assert!(matches!(content, Content::Outside), "{content:?}");
-        assert!(!opened.contains_file(&root.join("a.txt")));
-        assert!(opened.walk(Limits::default()).files.is_empty());
+        if let Some(opened) = &opened {
+            let content = opened.read(&root.join("a.txt"), MAX_FILE_BYTES);
+            assert!(matches!(content, Content::Outside), "{content:?}");
+            assert!(!opened.contains_file(&root.join("a.txt")));
+            assert!(opened.walk(Limits::default()).files.is_empty());
+        }
         let reopened = Root::open(&root).unwrap();
         assert!(!same_place(reopened.real(), &real), "開き直すと、別の場所にあると分かる");
     }
