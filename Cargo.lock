@@ -2500,7 +2500,7 @@ dependencies = [
 
 [[package]]
 name = "kiroscribe"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "chrono",
  "kiroscribe-core",
@@ -2524,7 +2524,7 @@ dependencies = [
 
 [[package]]
 name = "kiroscribe-core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "chrono",
  "cpal",
