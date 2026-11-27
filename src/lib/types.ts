@@ -244,3 +244,9 @@ export const NO_UPDATE: UpdateStatus = {
   totalBytes: null,
   ready: false,
 };
+
+/** デバッグ用のログの状態 */
+export interface DebugLogStatus {
+  /** 「詳しい記録」の期限（UNIX ミリ秒）。オフなら null */
+  verboseUntil: number | null;
+}

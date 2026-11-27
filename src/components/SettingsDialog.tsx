@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { errorMessage, useBackend } from "../lib/backend";
 import { useUpdater } from "../hooks/useUpdater";
+import { shortDateTimeLabel } from "../lib/dates";
 import type { ApiKeyStatus, AudioDevice, HelpTab, Provider, Settings } from "../lib/types";
 import { HelpDialog } from "./HelpDialog";
 import { Markdown } from "./Markdown";
@@ -426,30 +427,56 @@ function AboutSection({ autoUpdate, onAutoUpdateChange, onOpenHelp }: AboutSecti
         </button>
       </p>
 
-      <MeetingRecordSave />
+      <DebugLogSave />
     </section>
   );
 }
 
-/** 会議の検出の記録のファイル名（例: kiroscribe-meeting-record-20261123-1904.json） */
-export function meetingRecordFileName(now: Date): string {
+/** デバッグ用のログのファイル名（例: kiroscribe-debug-20261127-1904.zip） */
+export function debugBundleFileName(now: Date): string {
   const two = (n: number) => String(n).padStart(2, "0");
   const date = `${now.getFullYear()}${two(now.getMonth() + 1)}${two(now.getDate())}`;
-  return `kiroscribe-meeting-record-${date}-${two(now.getHours())}${two(now.getMinutes())}.json`;
+  return `kiroscribe-debug-${date}-${two(now.getHours())}${two(now.getMinutes())}.zip`;
 }
 
-/** 会議の検出の記録を保存する（会議を自動で検出できなかったときに、原因を調べるため） */
-function MeetingRecordSave() {
+/**
+ * デバッグ用のログ: 「詳しい記録」の切り替えと、ログをまとめた zip の保存
+ * （会議を自動で検出できなかった・録音が止まった などのときに、原因を調べるため）
+ */
+function DebugLogSave() {
   const backend = useBackend();
   const [busy, setBusy] = useState(false);
+  const [verboseUntil, setVerboseUntil] = useState<number | null | undefined>(undefined);
+  // 切り替えの途中は、次の切り替えを受け付けない（続けて押すと、答えの順番が入れ替わり、表示と本体が食い違うため）
+  const [switching, setSwitching] = useState(false);
   const [message, setMessage] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+
+  useEffect(() => {
+    backend
+      .getDebugLogStatus()
+      .then((status) => setVerboseUntil(status.verboseUntil))
+      .catch(() => setVerboseUntil(null));
+  }, [backend]);
+
+  const toggleVerbose = async (enabled: boolean) => {
+    setMessage(null);
+    setSwitching(true);
+    try {
+      const status = await backend.setDebugVerbose(enabled);
+      setVerboseUntil(status.verboseUntil);
+    } catch (err) {
+      setMessage({ kind: "error", text: errorMessage(err) });
+    } finally {
+      setSwitching(false);
+    }
+  };
 
   const save = async () => {
     setBusy(true);
     setMessage(null);
     try {
-      const saved = await backend.saveMeetingRecord(meetingRecordFileName(new Date()));
-      if (saved) setMessage({ kind: "ok", text: `会議の検出の記録を保存しました（${saved.entries} 件）: ${saved.path}` });
+      const path = await backend.saveDebugBundle(debugBundleFileName(new Date()));
+      if (path) setMessage({ kind: "ok", text: `デバッグ用のログを保存しました: ${path}` });
     } catch (err) {
       setMessage({ kind: "error", text: errorMessage(err) });
     } finally {
@@ -459,13 +486,34 @@ function MeetingRecordSave() {
 
   return (
     <div className="about-record">
+      {verboseUntil !== undefined && (
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={verboseUntil !== null}
+            disabled={switching}
+            onChange={(e) => void toggleVerbose(e.target.checked)}
+          />
+          <span>
+            詳しい記録を残す（24 時間）
+            <small>
+              {verboseUntil !== null
+                ? `${shortDateTimeLabel(verboseUntil)} まで、細かい出来事も記録します。時間が過ぎると、自動でオフに戻ります。`
+                : "オンにすると、24 時間だけ、細かい出来事（会議の検出で見たブラウザのタブの名前、文字起こしの 1 回ごとの結果など）も記録します。"}
+            </small>
+          </span>
+        </label>
+      )}
       <button type="button" className="link-button" onClick={() => void save()} disabled={busy}>
-        会議の検出の記録を保存…
+        デバッグ用のログを保存…
       </button>
       <small className="hint">
-        {"会議を自動で検出できなかったときに、原因を調べるための記録です。" +
-          "マイクを使ったアプリの名前と、マイクを使っているブラウザのタブの名前だけが入ります（録音やノートの内容は入りません）。" +
-          "タブの名前には、会議でないページやメールの件名も入ることがあります。人に送る前に、見せたくない内容がないか確かめてください。"}
+        {"不具合の原因を調べるための記録を、1 つの zip にまとめて保存します。" +
+          "入るのは、アプリの動きの記録（起動と終了、更新の確認、会議の検出の判断、録音、文字起こしと AI の処理の成否と時間、エラー）、" +
+          "会議の検出の記録（マイクを使ったアプリの名前と、マイクを使っているブラウザのタブの名前）、" +
+          "アプリと OS のバージョン、設定（API キーは設定済みかどうかだけ）です。" +
+          "録音・ノート・文字起こし・議事録・AI チャットの内容と API キーは入りません。" +
+          "タブの名前には、会議でないページやメールの件名も入ることがあります。人に渡す前に、zip を開いて、見せたくない内容がないか確かめてください。"}
       </small>
       {message && (
         <p className={message.kind === "ok" ? "ok-text" : "error-text"} role="status">

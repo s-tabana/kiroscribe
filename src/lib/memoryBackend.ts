@@ -48,6 +48,9 @@ interface MemoryOptions {
 }
 
 /** テストから文字起こしやエラーを発生させるための追加機能 */
+/** 「詳しい記録」を続ける時間（本体の debug_log::VERBOSE_MS と同じ 24 時間） */
+const DEBUG_VERBOSE_MS = 24 * 60 * 60 * 1000;
+
 export interface MemoryBackend extends Backend {
   emitSegment(noteId: string, speaker: Speaker, text: string): Segment;
   emitError(noteId: string, message: string): void;
@@ -63,6 +66,8 @@ export interface MemoryBackend extends Backend {
   /** 最後にコピー・保存した内容（テスト用） */
   readonly lastCopied: string | null;
   readonly lastSaved: { fileName: string; markdown: string } | null;
+  /** writeDebugLog で書いた出来事（テスト用） */
+  readonly debugLog: { level: "info" | "error"; event: string; fields?: Record<string, unknown> }[];
 
   /** ヘルプの内容を差し替える（既定はリポジトリの docs/guide.md と CHANGELOG.md） */
   setHelpContent(content: { guide?: string; releases?: ReleaseNote[] }): void;
@@ -232,6 +237,8 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
   let popupClosed = false;
   const recordingCheckAnswers: { noteId: string; deadline: number; keep: boolean }[] = [];
   let lastSaved: { fileName: string; markdown: string } | null = null;
+  let verboseUntil: number | null = null;
+  const debugLog: { level: "info" | "error"; event: string; fields?: Record<string, unknown> }[] = [];
 
   let appVersion = options.version ?? packageVersion;
   let helpGuide: string = bundledGuide;
@@ -732,9 +739,24 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       lastSaved = { fileName, markdown: toMarkdown(noteId, options).markdown };
       return fileName;
     },
-    async saveMeetingRecord(fileName) {
-      // プレビューには会議の検出がないので、記録は空
-      return { path: fileName, entries: 0 };
+    async getDebugLogStatus() {
+      // 本体と同じく、期限が過ぎたらオフに戻す
+      if (verboseUntil !== null && verboseUntil <= now()) verboseUntil = null;
+      return { verboseUntil };
+    },
+    async setDebugVerbose(enabled) {
+      verboseUntil = enabled ? now() + DEBUG_VERBOSE_MS : null;
+      return { verboseUntil };
+    },
+    async writeDebugLog(level, event, fields) {
+      debugLog.push({ level, event, fields });
+    },
+    async saveDebugBundle(fileName) {
+      // プレビューにはログのファイルがないので、名前だけ返す
+      return fileName;
+    },
+    get debugLog() {
+      return debugLog;
     },
     get lastCopied() {
       return lastCopied;

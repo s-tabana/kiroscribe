@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { SettingsDialog, meetingRecordFileName } from "./SettingsDialog";
+import { SettingsDialog, debugBundleFileName } from "./SettingsDialog";
 import { BackendContext } from "../lib/backend";
 import { createMemoryBackend, type MemoryBackend } from "../lib/memoryBackend";
 import { DEFAULT_SETTINGS } from "../lib/types";
@@ -360,40 +360,94 @@ describe("SettingsDialog: API キーの欄", () => {
   });
 });
 
-describe("SettingsDialog: 会議の検出の記録", () => {
-  it("[MTG-026] ［会議の検出の記録を保存…］で、保存ダイアログから記録を保存し、件数と保存した場所を表示する", async () => {
+describe("SettingsDialog: デバッグ用のログ", () => {
+  it("[LOG-011][MTG-026] ［デバッグ用のログを保存…］で、保存ダイアログから zip を保存し、保存した場所を表示する", async () => {
     const user = userEvent.setup();
     const { backend } = setup();
-    const saveRecord = vi
-      .spyOn(backend, "saveMeetingRecord")
-      .mockResolvedValue({ path: "C:\\Users\\me\\record.json", entries: 12 });
+    const saveBundle = vi.spyOn(backend, "saveDebugBundle").mockResolvedValue("C:\\Users\\me\\debug.zip");
 
-    await user.click(await screen.findByRole("button", { name: "会議の検出の記録を保存…" }));
+    await user.click(await screen.findByRole("button", { name: "デバッグ用のログを保存…" }));
 
-    expect(saveRecord).toHaveBeenCalledWith(expect.stringMatching(/^kiroscribe-meeting-record-\d{8}-\d{4}\.json$/));
-    expect(await screen.findByText("会議の検出の記録を保存しました（12 件）: C:\\Users\\me\\record.json")).toBeInTheDocument();
-    // 何が入るかを、押す前に読める
-    expect(screen.getByText(/マイクを使ったアプリの名前と、マイクを使っているブラウザのタブの名前だけ/)).toBeInTheDocument();
-    // タブの名前に、会議でないページやメールの件名が入りうることと、送る前に確かめることを添える
-    expect(screen.getByText(/会議でないページやメールの件名も入ることがあります。人に送る前に、見せたくない内容がないか確かめてください。/)).toBeInTheDocument();
+    expect(saveBundle).toHaveBeenCalledWith(expect.stringMatching(/^kiroscribe-debug-\d{8}-\d{4}\.zip$/));
+    expect(await screen.findByText("デバッグ用のログを保存しました: C:\\Users\\me\\debug.zip")).toBeInTheDocument();
+    // 何が入るか（会議の検出の記録を含む）と、何が入らないかを、押す前に読める
+    expect(screen.getByText(/会議の検出の記録（マイクを使ったアプリの名前と、マイクを使っているブラウザのタブの名前）/)).toBeInTheDocument();
+    expect(screen.getByText(/録音・ノート・文字起こし・議事録・AI チャットの内容と API キーは入りません。/)).toBeInTheDocument();
+    // タブの名前に、会議でないページやメールの件名が入りうることと、人に渡す前に確かめることを添える
+    expect(
+      screen.getByText(/会議でないページやメールの件名も入ることがあります。人に渡す前に、zip を開いて、見せたくない内容がないか確かめてください。/),
+    ).toBeInTheDocument();
   });
 
-  it("[MTG-026] 保存ダイアログを取り消したら何も表示せず、保存できなかったら理由を表示する", async () => {
+  it("[LOG-011] 保存ダイアログを取り消したら何も表示せず、保存できなかったら理由を表示する", async () => {
     const user = userEvent.setup();
     const { backend } = setup();
-    const saveRecord = vi.spyOn(backend, "saveMeetingRecord").mockResolvedValue(null);
-    const button = await screen.findByRole("button", { name: "会議の検出の記録を保存…" });
+    const saveBundle = vi.spyOn(backend, "saveDebugBundle").mockResolvedValue(null);
+    const button = await screen.findByRole("button", { name: "デバッグ用のログを保存…" });
 
     await user.click(button);
-    await waitFor(() => expect(saveRecord).toHaveBeenCalledOnce());
-    expect(screen.queryByText(/会議の検出の記録を保存しました/)).not.toBeInTheDocument();
+    await waitFor(() => expect(saveBundle).toHaveBeenCalledOnce());
+    expect(screen.queryByText(/デバッグ用のログを保存しました/)).not.toBeInTheDocument();
 
-    saveRecord.mockRejectedValue("ファイルを保存できませんでした: アクセスが拒否されました。 (os error 5)");
+    saveBundle.mockRejectedValue("ファイルを保存できませんでした: アクセスが拒否されました。 (os error 5)");
     await user.click(button);
     expect(await screen.findByText("ファイルを保存できませんでした: アクセスが拒否されました。 (os error 5)")).toBeInTheDocument();
   });
 
-  it("[MTG-026] 記録のファイル名には、保存した日付と時刻を付ける", () => {
-    expect(meetingRecordFileName(new Date(2026, 10, 23, 9, 4))).toBe("kiroscribe-meeting-record-20261123-0904.json");
+  it("[LOG-011] zip のファイル名には、保存した日付と時刻を付ける", () => {
+    expect(debugBundleFileName(new Date(2026, 10, 23, 9, 4))).toBe("kiroscribe-debug-20261123-0904.zip");
+  });
+
+  it("[LOG-010] 「詳しい記録を残す（24 時間）」をオンにすると期限を表示し、オフに戻せる", async () => {
+    const user = userEvent.setup();
+    const { backend } = setup();
+    const setVerbose = vi.spyOn(backend, "setDebugVerbose");
+    const check = await screen.findByRole("checkbox", { name: /詳しい記録を残す（24 時間）/ });
+    expect(check).not.toBeChecked();
+    expect(screen.getByText(/オンにすると、24 時間だけ、細かい出来事/)).toBeInTheDocument();
+
+    await user.click(check);
+    expect(setVerbose).toHaveBeenLastCalledWith(true);
+    expect(check).toBeChecked();
+    expect(await screen.findByText(/^\d{1,2}\/\d{1,2} \d{1,2}:\d{2} まで、細かい出来事も記録します。時間が過ぎると、自動でオフに戻ります。$/)).toBeInTheDocument();
+
+    await user.click(check);
+    expect(setVerbose).toHaveBeenLastCalledWith(false);
+    expect(check).not.toBeChecked();
+  });
+
+  it("[LOG-010] 期限が過ぎて本体がオフに戻していたら、開いたときにオフで表示する", async () => {
+    let now = new Date(2026, 10, 27, 10, 0).getTime();
+    const backend = createMemoryBackend({ now: () => now });
+    expect((await backend.setDebugVerbose(true)).verboseUntil).toBe(now + 24 * 60 * 60 * 1000);
+    now += 24 * 60 * 60 * 1000;
+    render(
+      <BackendContext.Provider value={backend}>
+        <SettingsDialog onClose={vi.fn()} />
+      </BackendContext.Provider>,
+    );
+    expect(await screen.findByRole("checkbox", { name: /詳しい記録を残す（24 時間）/ })).not.toBeChecked();
+  });
+
+  it("[LOG-010] 切り替えの途中は、次の切り替えを受け付けない", async () => {
+    const user = userEvent.setup();
+    const { backend } = setup();
+    let finish: () => void = () => undefined;
+    const setVerbose = vi.spyOn(backend, "setDebugVerbose").mockImplementation(
+      (enabled) =>
+        new Promise((resolve) => {
+          finish = () => resolve({ verboseUntil: enabled ? Date.now() + 1000 : null });
+        }),
+    );
+    const check = await screen.findByRole("checkbox", { name: /詳しい記録を残す（24 時間）/ });
+
+    await user.click(check);
+    expect(check).toBeDisabled();
+    await user.click(check);
+    expect(setVerbose).toHaveBeenCalledOnce();
+
+    finish();
+    await waitFor(() => expect(check).toBeEnabled());
+    expect(check).toBeChecked();
   });
 });

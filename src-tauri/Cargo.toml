@@ -39,3 +39,7 @@ tauri-plugin-autostart = "2"
 # コマンドを模擬のランタイムで呼ぶテスト（src/ipc_tests.rs）用: tauri::test と、外部の API の模擬サーバー
 tauri = { version = "2", features = ["test"] }
 wiremock = "0.6"
+# 模擬のアプリごとの、デバッグ用のログのフォルダ（src/ipc_tests.rs）
+tempfile = "3"
+# 書き出した zip を読んで確かめる（src/ipc_tests/flows/debug_log.rs）
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }

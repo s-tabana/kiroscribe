@@ -554,6 +554,29 @@ impl Harness {
 }
 
 impl Harness {
+    /// settings テーブルの、設定以外の値。
+    pub fn settings_value(&self, key: &str) -> Option<String> {
+        self.state().db().get_value(key).unwrap()
+    }
+
+    /// これまでに書いたデバッグ用のログ（すべてのファイルをつなげたもの）。
+    pub fn debug_log_text(&self) -> String {
+        let log = self.app.state::<kiroscribe_core::debug_log::DebugLog>();
+        log.files()
+            .iter()
+            .map(|path| std::fs::read_to_string(path).unwrap())
+            .collect()
+    }
+
+    /// これまでに書いたデバッグ用のログの行のうち、出来事の名前が `event` のもの。
+    pub fn debug_log_events(&self, event: &str) -> Vec<Value> {
+        self.debug_log_text()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("ログの行が JSON ではありません"))
+            .filter(|line| line["event"] == event)
+            .collect()
+    }
+
     /// 会議の検出の結果を、検出のスレッドと同じように、順番待ちの列へ入れる（処理が終わるのは待たない）。
     pub fn submit_meeting(&self, event: MeetingEvent) {
         crate::meeting_watch::submit(self.app.handle(), event);

@@ -438,7 +438,23 @@ async fn check(app: &AppHandle) -> tauri_plugin_updater::Result<UpdateStatus> {
             return Ok(tracker.status());
         }
     }
-    let found = build_updater(app)?.check().await?;
+    let current = app.package_info().version.to_string();
+    let found = match build_updater(app) {
+        Ok(updater) => updater.check().await,
+        Err(err) => Err(err),
+    };
+    let found = match found {
+        Ok(found) => found,
+        Err(err) => {
+            log_failure(app, "update.check_failed", None, &err);
+            return Err(err);
+        }
+    };
+    crate::debug::info(
+        app,
+        "update.checked",
+        serde_json::json!({ "current": current, "available": found.as_ref().map(|update| update.version.clone()) }),
+    );
     let status = state
         .lock()
         .record_check(found.map(|update| (describe(&update), update)), now_ms());
@@ -501,6 +517,7 @@ async fn auto_update_step(app: &AppHandle) {
             Ok(package) => state.lock().finish_background_download(package),
             Err(err) => {
                 eprintln!("更新をダウンロードできませんでした: {err}");
+                log_failure(app, "update.download_failed", Some(true), &err);
                 state.lock().fail_auto()
             }
         };
@@ -516,11 +533,17 @@ async fn auto_update_step(app: &AppHandle) {
     };
     emit_status(app, &state.lock().status());
     let current_version = app.package_info().version.to_string();
+    crate::debug::info(
+        app,
+        "update.installing",
+        serde_json::json!({ "auto": true, "from": current_version, "to": update.version }),
+    );
     mark_auto_restart(&app.state::<AppState>().db(), &current_version, &update.version, now_ms());
     // `install` は、渡したファイルの署名をもう一度確かめてからインストーラを起動する
     if let Err(err) = update.install(package.as_slice()) {
         clear_restart_markers(&app.state::<AppState>().db());
         eprintln!("更新を自動でインストールできませんでした: {err}");
+        log_failure(app, "update.install_failed", Some(true), &err);
         let status = state.lock().fail_auto();
         emit_status(app, &status);
         return;
@@ -697,13 +720,18 @@ async fn download_and_install(app: &AppHandle, update: &Update, package: Option<
     let state = app.state::<UpdateState>();
     let package = match package {
         Some(package) => package,
-        None => download(app, update)
-            .await
-            .map_err(|err| CommandError(install_error_message(&err)))?,
+        None => download(app, update).await.map_err(|err| {
+            log_failure(app, "update.download_failed", Some(false), &err);
+            CommandError(install_error_message(&err))
+        })?,
     };
 
     // ダウンロード中に会議を検出して録音が始まっていたら、その録音を止めない
-    ensure_can_update(app).await?;
+    if let Err(err) = ensure_can_update(app).await {
+        // 理由は、決まった文（録音中・AI の処理中）
+        crate::debug::info(app, "update.install_postponed", serde_json::json!({ "auto": false, "reason": err.0 }));
+        return Err(err);
+    }
 
     let status = state.lock().begin_installing();
     emit_status(app, &status);
@@ -712,8 +740,42 @@ async fn download_and_install(app: &AppHandle, update: &Update, package: Option<
     update.install(package.as_slice()).map_err(|err| {
         clear_restart_markers(&app.state::<AppState>().db());
         state.lock().discard_package();
+        log_failure(app, "update.install_failed", Some(false), &err);
         CommandError(install_error_message(&err))
     })
+}
+
+/// 失敗の種類（ログで、画面に出した文とは別に、どの種類の失敗かを見分けるため）。
+fn failure_kind(err: &tauri_plugin_updater::Error) -> &'static str {
+    use tauri_plugin_updater::Error;
+    match err {
+        Error::Reqwest(_) | Error::Network(_) => "network",
+        Error::Minisign(_)
+        | Error::Base64(_)
+        | Error::SignatureUtf8(_)
+        | Error::SignedVersionMismatch { .. }
+        | Error::MissingSignedVersion => "signature",
+        Error::ReleaseNotFound => "releaseNotFound",
+        Error::TargetNotFound(_) | Error::TargetsNotFound(_) | Error::UnsupportedOs | Error::UnsupportedArch => {
+            "unsupportedTarget"
+        }
+        _ => "other",
+    }
+}
+
+/// 更新の確認・ダウンロード・インストールの失敗を、段階（出来事の名前）・種類・理由と一緒に書く。
+/// 理由はプラグインのエラーの文。ダウンロードの URL のクエリ（署名つきの URL の鍵）は、ログに書くときに伏せる。
+/// `auto` は、自動の更新か（確認の失敗では `None`）。
+fn log_failure(app: &AppHandle, event: &str, auto: Option<bool>, err: &tauri_plugin_updater::Error) {
+    let mut fields = serde_json::json!({
+        "current": app.package_info().version.to_string(),
+        "kind": failure_kind(err),
+        "reason": err.to_string(),
+    });
+    if let Some(auto) = auto {
+        fields["auto"] = auto.into();
+    }
+    crate::debug::error(app, event, fields);
 }
 
 #[tauri::command]
@@ -757,6 +819,12 @@ pub async fn install_update(app: AppHandle) -> CmdResult<()> {
     update.timeout = Some(DOWNLOAD_TIMEOUT);
     emit_status(&app, &updates.lock().status());
 
+    crate::debug::info(
+        &app,
+        "update.installing",
+        serde_json::json!({ "auto": false, "from": app.package_info().version.to_string(), "to": update.version }),
+    );
+    // 失敗は、段階ごとに download_and_install の中で書く
     if let Err(err) = download_and_install(&app, &update, package).await {
         let status = updates.lock().abort_install();
         emit_status(&app, &status);
