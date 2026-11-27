@@ -23,6 +23,7 @@ futures-util = "0.3"
 cpal = "0.18"
 keyring-core = "1"
 # 会議の相棒の資料の索引（search/）: 文字コード、Office の文書（zip と XML）、PDF、フォルダの見張り
+# zip は、デバッグ用のログの書き出し（debug_bundle.rs）にも使う
 encoding_rs = "0.8"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 quick-xml = "0.42"

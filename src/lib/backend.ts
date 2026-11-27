@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ask, save } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -8,6 +8,7 @@ import type {
   ApiKeyStatus,
   AudioDevice,
   ChatMessage,
+  DebugLogStatus,
   DeltaEvent,
   ExportOptions,
   ExportResult,
@@ -123,11 +124,23 @@ export interface Backend {
    * deadline は、答える確認の止める時刻（どの確認への答えかを表す。もう出していない確認への答えは、録音に触れない）
    */
   answerRecordingCheck(noteId: string, deadline: number, keep: boolean): Promise<void>;
+
+  // ---- デバッグ用のログ ----
+  /** 「詳しい記録」の期限（オフなら verboseUntil が null） */
+  getDebugLogStatus(): Promise<DebugLogStatus>;
+  /** 「詳しい記録」を切り替える（オンにすると 24 時間） */
+  setDebugVerbose(enabled: boolean): Promise<DebugLogStatus>;
   /**
-   * 保存ダイアログを出して、会議の検出の記録（JSON）を保存する。
-   * 保存したパスと記録の件数、取り消したら null
+   * 画面の出来事をデバッグ用のログに書く。event に「ui.」が付いていなければ、本体が付ける。
+   * fields には、本文（メモ・文字起こし・議事録・チャット）や API キーを入れない（本体でも、キーの形の文字列は伏せる）。
+   * 書けなくても reject しない
    */
-  saveMeetingRecord(fileName: string): Promise<{ path: string; entries: number } | null>;
+  writeDebugLog(level: "info" | "error", event: string, fields?: Record<string, unknown>): Promise<void>;
+  /**
+   * 保存ダイアログを出して、デバッグ用のログ（ログ・会議の検出の記録・環境の情報をまとめた zip）を保存する。
+   * 保存したパス、取り消したら null
+   */
+  saveDebugBundle(fileName: string): Promise<string | null>;
 
   // ---- バージョン・ヘルプ ----
   getAppVersion(): Promise<string>;
@@ -171,6 +184,25 @@ function subscribe<T>(event: string, cb: (payload: T) => void, onReady?: () => v
     unlisten?.();
   };
 }
+
+/**
+ * 本体のコマンドを呼ぶ。失敗したら、どのコマンドがなぜ失敗したかをデバッグ用のログに書いてから、失敗を返す
+ * （ログに書くのはコマンドの名前と、失敗の理由の文だけ。引数は書かない）。
+ */
+async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await tauriInvoke<T>(command, args);
+  } catch (err) {
+    if (command !== "write_debug_log") {
+      const fields = { command, message: errorMessage(err) };
+      void tauriInvoke("write_debug_log", { level: "error", event: "ui.command_failed", fields }).catch(() => undefined);
+    }
+    throw err;
+  }
+}
+
+/** 結果も失敗も使わない */
+const ignore = (): undefined => undefined;
 
 export function createTauriBackend(): Backend {
   return {
@@ -238,12 +270,16 @@ export function createTauriBackend(): Backend {
     openNoteFromPopup: (noteId, enhance) => invoke("open_note_from_popup", { noteId, enhance }),
     openSettingsFromPopup: () => invoke("open_settings_from_popup"),
     answerRecordingCheck: (noteId, deadline, keep) => invoke("answer_recording_check", { noteId, deadline, keep }),
-    async saveMeetingRecord(fileName) {
-      // 本体（save_meeting_record）が受け付ける拡張子は .json だけ
-      const path = await save({ defaultPath: fileName, filters: [{ name: "JSON", extensions: ["json"] }] });
+    getDebugLogStatus: () => invoke("get_debug_log_status"),
+    setDebugVerbose: (enabled) => invoke("set_debug_verbose", { enabled }),
+    // 書けなくても失敗にしない（画面の操作を、ログのために止めない）
+    writeDebugLog: (level, event, fields) => invoke("write_debug_log", { level, event, fields }).then(ignore, ignore),
+    async saveDebugBundle(fileName) {
+      // 本体（save_debug_bundle）が受け付ける拡張子は .zip だけ
+      const path = await save({ defaultPath: fileName, filters: [{ name: "ZIP", extensions: ["zip"] }] });
       if (!path) return null;
-      const entries = (await invoke("save_meeting_record", { path })) as number;
-      return { path, entries };
+      await invoke("save_debug_bundle", { path });
+      return path;
     },
 
     getAppVersion: () => invoke("get_app_version"),

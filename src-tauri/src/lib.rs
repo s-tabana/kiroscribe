@@ -2,6 +2,7 @@ mod ai;
 mod background;
 mod commands;
 mod companion;
+mod debug;
 #[cfg(feature = "e2e")]
 mod e2e;
 mod meeting_watch;
@@ -52,19 +53,32 @@ pub fn run() {
             // ウィンドウを閉じる操作の扱い（下の on_window_event）が使うので、最初に用意する
             app.manage(BackgroundState::default());
             let data_dir = app.path().app_data_dir()?;
+            // デバッグ用のログは、データを開く前に用意する（開けなかった理由も書けるように）
+            if let Some(log) = debug::open(&data_dir) {
+                app.manage(log);
+            }
+            let version = app.package_info().version.to_string();
+            let autostart = std::env::args().any(|a| a == AUTOSTART_ARG);
+            log_started(app.handle(), autostart);
             let startup::Opened { db, settings, secrets } = match startup::open_data(&data_dir) {
                 Ok(opened) => opened,
                 Err(reason) => {
+                    debug::error(app.handle(), "app.start_failed", serde_json::json!({ "reason": reason }));
                     // 空のデータベースでは始めない。理由を知らせて、ダイアログが閉じられたら終了する
                     // （メインウィンドウは出さない。トレイや会議の検出も始めない）
                     startup::report_failure(app.handle(), &reason);
                     return Ok(());
                 }
             };
+            if let Some(log) = app.try_state::<kiroscribe_core::debug_log::DebugLog>() {
+                debug::restore_verbose(&log, &db, now_ms());
+            }
             // アプリ内更新で再起動した直後か（下で、ウィンドウを出すかどうかを決める）
-            let version = app.package_info().version.to_string();
             let restart = update::take_restart(&db, &version, now_ms());
             let search_folders = db.load_search_folders().unwrap_or_default();
+            if let Some(restart) = restart {
+                debug::info(app.handle(), "app.restarted_after_update", serde_json::json!({ "kind": format!("{restart:?}") }));
+            }
             app.manage(UpdateState::new(settings.auto_update, update::auto_skip_version(&db)));
             app.manage(AppState::new(db, secrets));
             app.manage(RecorderState::default());
@@ -85,7 +99,6 @@ pub fn run() {
 
             // Windows の起動時に自動で起動したときは、ウィンドウを出さずトレイに常駐する。
             // 更新による再起動では更新前と同じ引数で起動されるので、引数ではなく更新の種類で決める
-            let autostart = std::env::args().any(|a| a == AUTOSTART_ARG);
             let show = update::show_window_on_launch(autostart, restart);
             if show {
                 background::show_main(&handle);
@@ -115,11 +128,30 @@ pub fn run() {
     register_commands(builder)
         .build(context)
         .expect("Kiroscribe の起動に失敗しました")
-        .run(|app, event| {
-            if let RunEvent::Exit = event {
-                companion::shutdown(app);
-            }
-        });
+        .run(|app, event| on_run_event(app, &event));
+}
+
+/// 起動したことを、アプリと OS のバージョンと一緒に、デバッグ用のログに書く。
+fn log_started(app: &runtime::AppHandle, autostart: bool) {
+    debug::info(
+        app,
+        "app.started",
+        serde_json::json!({
+            "appVersion": app.package_info().version.to_string(),
+            "os": kiroscribe_core::debug_bundle::os_description(),
+            "osBuild": kiroscribe_core::debug_bundle::windows_build(),
+            "arch": std::env::consts::ARCH,
+            "autostart": autostart,
+        }),
+    );
+}
+
+/// アプリ全体の出来事。終了するときに、デバッグ用のログに書く。
+fn on_run_event(app: &runtime::AppHandle, event: &RunEvent) {
+    if let RunEvent::Exit = event {
+        debug::info(app, "app.exit", serde_json::json!({}));
+        companion::shutdown(app);
+    }
 }
 
 /// 画面から呼べるコマンドを登録する（テストでも同じ一覧を登録して、画面側との食い違いを確かめる）。
@@ -161,7 +193,10 @@ fn register_commands(builder: tauri::Builder<Runtime>) -> tauri::Builder<Runtime
             background::close_popup,
             background::open_note_from_popup,
             background::open_settings_from_popup,
-            meeting_watch::save_meeting_record,
+            debug::get_debug_log_status,
+            debug::set_debug_verbose,
+            debug::write_debug_log,
+            debug::save_debug_bundle,
             help::get_guide,
             help::get_release_notes,
             help::open_external,

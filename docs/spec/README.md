@@ -24,6 +24,7 @@ Kiroscribe の振る舞いを、確かめられる単位で 1 項目ずつ書き
 | DAT | [データの保存と引き継ぎ](dat.md) |
 | ERR | [エラーの扱い](err.md) |
 | SEC | [セキュリティ上の約束](sec.md) |
+| LOG | [デバッグ用のログ](log.md) |
 | REL | [配布とリリース](rel.md) |
 | IPC | [画面と本体の取り決め](ipc.md) |
 | CMP | [会議の相棒](cmp.md) |

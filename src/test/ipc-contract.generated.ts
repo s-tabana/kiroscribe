@@ -59,6 +59,9 @@ export const called = {
   getAppVersion: [
     [],
   ] satisfies Called<"getAppVersion">[],
+  getDebugLogStatus: [
+    [],
+  ] satisfies Called<"getDebugLogStatus">[],
   getGuide: [
     [],
   ] satisfies Called<"getGuide">[],
@@ -136,6 +139,10 @@ export const called = {
     ["anthropic","…"],
     ["openai","…"],
   ] satisfies Called<"setApiKey">[],
+  setDebugVerbose: [
+    [false],
+    [true],
+  ] satisfies Called<"setDebugVerbose">[],
   setSearchFolderNoContent: [
     ["…",true],
   ] satisfies Called<"setSearchFolderNoContent">[],
@@ -151,6 +158,9 @@ export const called = {
   updateNote: [
     ["…",{"title":"…","userNotes":"…"}],
   ] satisfies Called<"updateNote">[],
+  writeDebugLog: [
+    ["error","…",{"command":"x","message":"y"}],
+  ] satisfies Called<"writeDebugLog">[],
 };
 
 export const returned = {
@@ -193,6 +203,9 @@ export const returned = {
   getAppVersion: [
     "…",
   ] satisfies Returned<"getAppVersion">[],
+  getDebugLogStatus: [
+    {"verboseUntil":null},
+  ] satisfies Returned<"getDebugLogStatus">[],
   getGuide: [
     {"fetchedAt":0,"markdown":"…","source":"network"},
   ] satisfies Returned<"getGuide">[],
@@ -276,6 +289,10 @@ export const returned = {
     {"anthropic":false,"openai":true,"storage":"…"},
     {"anthropic":true,"openai":true,"storage":"…"},
   ] satisfies Returned<"setApiKey">[],
+  setDebugVerbose: [
+    {"verboseUntil":0},
+    {"verboseUntil":null},
+  ] satisfies Returned<"setDebugVerbose">[],
   setSearchFolderNoContent: [
     {"done":0,"files":0,"folders":[{"files":0,"missing":false,"noContent":true,"path":"…","truncated":false,"unconfirmed":false}],"revision":0,"state":"ready","total":0,"updatedAt":0},
   ] satisfies Returned<"setSearchFolderNoContent">[],
@@ -291,6 +308,9 @@ export const returned = {
   updateNote: [
     {"createdAt":0,"enhancedAt":null,"enhancedNotes":null,"id":"…","title":"…","updatedAt":0,"userNotes":"…"},
   ] satisfies Returned<"updateNote">[],
+  writeDebugLog: [
+    null,
+  ] satisfies Returned<"writeDebugLog">[],
 };
 
 export const emitted = {
