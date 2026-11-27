@@ -202,21 +202,31 @@ jobs:
           cargo build -p kiroscribe-core --example hold_mic --example meeting_probe --locked
 
       # hold_mic を Zoom.exe の名前で動かし、オーディオのセッションに Active で現れ、Zoom の会議と判定することを、
-      # 確認用の道具で確かめる（Windows のオーディオのセッションを読む部分の確認。MTG-020）
+      # 確認用の道具で確かめる（Windows のオーディオのセッションを読む部分の確認。MTG-020）。
+      # セッションが現れるまでの遅れを見込み、2 秒ごとに 5 回まで調べる。失敗したときは、最後の表示を残す
       - name: オーディオのセッションからの会議の検出の確認
         shell: pwsh
         run: |
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $PSNativeCommandUseErrorActionPreference = $false
           $dir = Join-Path $env:RUNNER_TEMP 'probe-zoom'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           Copy-Item target/debug/examples/hold_mic.exe (Join-Path $dir 'Zoom.exe')
           $zoom = Start-Process -FilePath (Join-Path $dir 'Zoom.exe') -ArgumentList '30' -PassThru -WindowStyle Hidden
           try {
-            Start-Sleep -Seconds 3
-            $output = (& target/debug/examples/meeting_probe.exe --once) -join "`n"
-            $output
-            if ($LASTEXITCODE -ne 0) { throw "meeting_probe が失敗しました（$LASTEXITCODE）" }
-            if ($output -notmatch 'active\s+zoom\.exe\b.*Zoom') { throw 'オーディオのセッションに、Active の zoom.exe が会議アプリとして出ていません' }
+            $passed = $false
+            foreach ($attempt in 1..5) {
+              Start-Sleep -Seconds 2
+              $output = (& target/debug/examples/meeting_probe.exe --once --require-sessions --expect zoom) -join "`n"
+              $code = $LASTEXITCODE
+              "--- $attempt 回目（終了コード $code）"
+              $output
+              if ($code -eq 0 -and $output -match '(?m)^\s*active\s+zoom\.exe\b.*Zoom') {
+                $passed = $true
+                break
+              }
+            }
+            if (-not $passed) { throw 'オーディオのセッションの Active の zoom.exe から、Zoom の会議と判定できませんでした（最後の表示を参照）' }
           } finally {
             Stop-Process -Id $zoom.Id -Force -ErrorAction SilentlyContinue
           }
@@ -225,6 +235,16 @@ jobs:
         env:
           KIROSCRIBE_E2E_REAL_AUDIO: "1"
         run: npm run test:e2e -- e2e/specs/14-real-audio.test.mjs e2e/specs/15-real-meeting.test.mjs
+
+      # 失敗したときに、そのときのオーディオのセッションの一覧と判定を残す（ログを見て原因を切り分けるため）
+      - name: 失敗したときの会議の検出の様子
+        if: failure()
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $probe = 'target/debug/examples/meeting_probe.exe'
+          if (Test-Path $probe) { & $probe --once } else { '確認用の道具がビルドされていません' }
+          exit 0
 
       - name: 失敗したテストのスクリーンショットとログを保存
         if: failure()

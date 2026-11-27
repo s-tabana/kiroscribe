@@ -37,7 +37,7 @@ pub const VERBOSE_MS: i64 = 24 * 60 * 60 * 1000;
 /// 文字列の値の長さの上限（文字数）。
 pub const MAX_TEXT_CHARS: usize = 300;
 /// 1 つの出来事に入れる値の数の上限（入れ子を含む）。
-const MAX_VALUES: usize = 64;
+pub const MAX_VALUES: usize = 64;
 /// 1 日のファイルが上限に達したことを書く出来事の名前。
 const FULL_EVENT: &str = "log.file.full";
 

@@ -67,6 +67,25 @@ pub(crate) const BROWSERS: &[&str] = &[
     "arc.exe",
 ];
 
+/// 会議アプリと一緒に入る更新・起動のためのプロセスと、ほかのアプリも使う部品（実行ファイル名、小文字）。
+/// 会議アプリのパッケージに入っていても、会議とはみなさない（MTG-003）。
+const HELPER_EXES: &[&str] = &[
+    // Slack（通常版）の更新
+    "update.exe",
+    // 新しい Teams の更新・起動
+    "ms-teamsupdate.exe",
+    "msteams_autostarter.exe",
+    // Teams・Slack などが画面に使う WebView2
+    "msedgewebview2.exe",
+    // Zoom の SDK を使うほかのアプリの部品
+    "zcscpthost.exe",
+];
+
+/// 実行ファイル（フルパスか名前）が、会議とみなさない補助のプロセスか。
+pub fn is_helper_exe(path: &str) -> bool {
+    HELPER_EXES.contains(&exe_name(path).as_str())
+}
+
 /// パスの最後の要素（実行ファイル名）を小文字で返す。
 pub fn exe_name(id: &str) -> String {
     id.rsplit(['\\', '/']).next().unwrap_or(id).to_lowercase()
@@ -552,7 +571,8 @@ pub struct MicSources {
 }
 
 impl MicSources {
-    /// 判定に使う手がかり: オーディオのセッションの一覧を取れたらそれを使い、取れないときだけ ConsentStore を使う。
+    /// 判定に使う手がかり: オーディオのセッションの一覧を取れたらそれを使い、取れないときだけ ConsentStore を使う
+    /// （取れたかの決まりは [`crate::mic_sessions::summarize`]。録音デバイスがないときは、空の一覧を取れたとする）。
     pub fn source(&self) -> MicSource {
         if self.sessions.available {
             MicSource::AudioSessions
@@ -1107,7 +1127,7 @@ mod tests {
                 package: Some("91750D7E.Slack_8she8kybcnzg4".into()),
                 state: SessionState::Active,
             }],
-            error: None,
+            ..Default::default()
         };
         // この PC の Windows は、ConsentStore にマイクの使用を書いていない（どのアプリも使用中にならない）
         let stale = MicStore {
@@ -1118,7 +1138,7 @@ mod tests {
                 last_stop: Some(134_370_000_100_000_000),
             }],
         };
-        let sources = MicSources { sessions: huddle, store: stale.clone() };
+        let sources = MicSources { sessions: huddle.clone(), store: stale.clone() };
         assert_eq!(sources.source(), MicSource::AudioSessions);
         let observation = Observation { mic_users: sources.mic_users(), windows: vec![] };
         assert_eq!(app(detect(&observation, None)), Some(MeetingApp::SlackHuddle));
@@ -1132,9 +1152,34 @@ mod tests {
         assert_eq!(detect(&Observation { mic_users: idle.mic_users(), windows: vec![] }, None), None);
 
         // 一覧を取れないときは、ConsentStore から読む
-        let fallback = MicSources { sessions: MicSessions { error: Some("0x80040154".into()), ..Default::default() }, store: stuck };
+        let fallback = MicSources { sessions: MicSessions { error: Some("0x80040154".into()), ..Default::default() }, store: stuck.clone() };
         assert_eq!(fallback.source(), MicSource::ConsentStore);
         assert_eq!(app(detect(&Observation { mic_users: fallback.mic_users(), windows: vec![] }, None)), Some(MeetingApp::Zoom));
+
+        // すべての録音デバイス、またはすべてのセッションの情報を読めなかったときも、ConsentStore から読む
+        use crate::mic_sessions::{summarize, EndpointSessions};
+        for unreadable in [
+            summarize(vec![Err("0x88890004".into())]),
+            summarize(vec![Ok(EndpointSessions { sessions: vec![], failed: vec!["0x8007001F".into()] })]),
+        ] {
+            let sources = MicSources { sessions: unreadable, store: stuck.clone() };
+            assert_eq!(sources.source(), MicSource::ConsentStore, "{:?}", sources.sessions);
+            assert_eq!(app(detect(&Observation { mic_users: sources.mic_users(), windows: vec![] }, None)), Some(MeetingApp::Zoom));
+        }
+        // 録音デバイスがない・一部だけ読めなかったときは、オーディオのセッションを使う（読めたセッションで判定する）
+        let slack = huddle.sessions[0].clone();
+        for readable in [
+            summarize(vec![]),
+            summarize(vec![Err("0x80070005".into()), Ok(EndpointSessions { sessions: vec![slack.clone()], failed: vec!["pid=0".into()] })]),
+        ] {
+            let sources = MicSources { sessions: readable, store: stuck.clone() };
+            assert_eq!(sources.source(), MicSource::AudioSessions, "{:?}", sources.sessions);
+        }
+        let partial = MicSources {
+            sessions: summarize(vec![Err("0x80070005".into()), Ok(EndpointSessions { sessions: vec![slack], failed: vec![] })]),
+            store: stuck,
+        };
+        assert_eq!(app(detect(&Observation { mic_users: partial.mic_users(), windows: vec![] }, None)), Some(MeetingApp::SlackHuddle));
     }
 
     // [MTG-001]

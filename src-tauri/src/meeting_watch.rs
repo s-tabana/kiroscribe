@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::Local;
+use kiroscribe_core::debug_log::MAX_VALUES;
 use kiroscribe_core::meeting_record::{MeetingRecord, MeetingRecorder};
 use kiroscribe_core::meetings::{
     browser_titles, diagnose, observe_detailed, MeetingApp, MeetingEvent, MeetingTracker, MicSources, Observation,
@@ -176,7 +177,7 @@ pub(crate) fn check_fields(check: &Check<'_>, now: Option<i64>) -> Value {
         "phase": phase.name(),
         "phaseApp": app_value(phase.app()),
         "micSource": check.sources.map(MicSources::source),
-        "micSessions": check.sources.map(|sources| mic_sessions::report(&sources.sessions)),
+        "micSessions": check.sources.map(|sources| mic_sessions::report(&sources.sessions, false)),
         "micStore": check.sources.map(|sources| mic_store::report(&sources.store, now)),
     });
     if let (Some(now), Some(since)) = (now, check.tracker.confirming_since()) {
@@ -186,6 +187,27 @@ pub(crate) fn check_fields(check: &Check<'_>, now: Option<i64>) -> Value {
         fields["browserTitles"] = json!(browser_titles(check.observation, check.own_exe));
     }
     fields
+}
+
+fn value_count(value: &Value) -> usize {
+    1 + match value {
+        Value::Array(items) => items.iter().map(value_count).sum(),
+        Value::Object(fields) => fields.values().map(value_count).sum(),
+        _ => 0,
+    }
+}
+
+/// ログの値数の上限に合わせて、一覧の末尾から行単位で減らす。
+/// 各一覧の先頭は残し、セッションと ConsentStore の両方に記録があれば比較できるようにする。
+fn limit_check_fields(fields: &mut Value) {
+    let mut count = value_count(fields);
+    for path in ["/browserTitles", "/micInUse", "/micStore/entries", "/micSessions/sessions"] {
+        if let Some(rows) = fields.pointer_mut(path).and_then(Value::as_array_mut) {
+            while count > MAX_VALUES && rows.len() > 1 {
+                count -= value_count(&rows.pop().unwrap());
+            }
+        }
+    }
 }
 
 /// 判定の様子を書くかどうかを決める: 様子が変わったとき（調べるたびに変わる値は比べない）と、
@@ -209,6 +231,7 @@ impl CheckLog {
         self.last_written_ms = now;
         let mut fields = check_fields(check, Some(now));
         fields["changed"] = json!(changed);
+        limit_check_fields(&mut fields);
         Some(fields)
     }
 }
@@ -457,7 +480,7 @@ mod tests {
                     package: None,
                     state: SessionState::Active,
                 }],
-                error: None,
+                ..Default::default()
             },
             store,
         }
@@ -494,10 +517,12 @@ mod tests {
         assert_eq!(normal["phase"], "idle");
         assert_eq!(normal["micSource"], "audioSessions");
         assert_eq!(normal["micSessions"]["available"], true);
+        assert_eq!(normal["micSessions"]["status"], "ok");
         assert_eq!(normal["micSessions"]["endpoints"], 1);
+        assert_eq!(normal["micSessions"]["total"], 1);
         assert_eq!(
             normal["micSessions"]["sessions"],
-            json!([{ "exe": "chrome.exe", "package": null, "state": "active", "app": null, "browser": true }])
+            json!([{ "exe": "chrome.exe", "state": "active", "browser": true }])
         );
         assert_eq!(normal["micStore"]["opened"], true);
         let slack = &normal["micStore"]["entries"][0];
@@ -585,7 +610,13 @@ mod tests {
             .collect();
         // 会議アプリに見えない記録も、件数には入る
         entries.push(MicEntry { id: r"C:\Program Files\Recorder\rec.exe".into(), last_start: 1, last_stop: Some(2) });
-        let sources = sources_with(MicStore { opened: true, entries });
+        let mut sources = sources_with(MicStore { opened: true, entries });
+        sources.sessions.sessions.extend((0..12).map(|i| MicSession {
+            pid: 2000 + i,
+            exe_path: format!(r"C:\Program Files\Tool{i}\tool{i}.exe"),
+            package: None,
+            state: SessionState::Active,
+        }));
         let observation = Observation {
             mic_users: vec![MicUser { id: r"C:\x\chrome.exe".into(), in_use: true }],
             windows: (0..12)
@@ -597,8 +628,9 @@ mod tests {
         let log = DebugLog::open(dir.path()).unwrap();
         for verbose in [false, true] {
             let check = Check { observation: &observation, sources: Some(&sources), own_exe: None, tracker: &tracker, verbose };
-            let fields = check_fields(&check, Some(kiroscribe_core::mic_store::filetime_to_unix_ms(134_402_160_000_000_000)));
-            assert!(fields["micStore"]["entries"].as_array().unwrap().len() >= 10, "{fields}");
+            let now = kiroscribe_core::mic_store::filetime_to_unix_ms(134_402_160_000_000_000);
+            let fields = CheckLog::default().next(&check, now).unwrap();
+            assert!(value_count(&fields) <= MAX_VALUES, "{fields}");
             log.write(Level::Info, Source::App, "meeting.check", fields);
         }
 
@@ -612,9 +644,31 @@ mod tests {
             assert_eq!(fields["phase"], "idle");
             assert_eq!(fields["micSource"], "audioSessions");
             assert_eq!(fields["micSessions"]["available"], true);
+            assert_eq!(fields["micSessions"]["total"], 13);
+            assert_eq!(fields["micSessions"]["sessions"][0]["exe"], "chrome.exe");
+            assert_eq!(fields["micSessions"]["sessions"][0]["state"], "active");
             assert_eq!(fields["micStore"]["opened"], true);
             assert_eq!(fields["micStore"]["total"], 13);
+            assert_eq!(fields["micStore"]["entries"][0]["sinceStopSec"], 6_000);
         }
         assert!(!text.contains("山田"), "{text}");
+    }
+
+    // [LOG-005][MTG-020]
+    #[test]
+    fn check_logs_the_fallback_source_and_read_failure() {
+        let mut sources = sources();
+        sources.sessions = mic_sessions::summarize(vec![Err("0x80070005".into())]);
+        sources.store.entries[0].last_stop = Some(0);
+        let observation = Observation { mic_users: sources.mic_users(), windows: vec![] };
+        let tracker = MeetingTracker::default();
+        let check = Check { observation: &observation, sources: Some(&sources), own_exe: None, tracker: &tracker, verbose: false };
+        let fields = CheckLog::default().next(&check, 1_000).unwrap();
+        assert_eq!(fields["micSource"], "consentStore");
+        assert_eq!(fields["micSessions"]["status"], "failed");
+        assert_eq!(fields["micSessions"]["failedEndpoints"], 1);
+        assert_eq!(fields["micSessions"]["error"], "0x80070005");
+        assert_eq!(fields["micStore"]["entries"][0]["inUse"], true);
+        assert_eq!(fields["verdict"], "desktopApp");
     }
 }
