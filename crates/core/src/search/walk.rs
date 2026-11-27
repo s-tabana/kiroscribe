@@ -149,9 +149,18 @@ pub fn reachable_without_links(root: &Path, path: &Path) -> bool {
     true
 }
 
-/// フォルダの中（下のフォルダを含む）の、索引に入れるファイルを集める。フォルダがなければエラー。
+/// そのパスそのものが、たどらないリンク（シンボリックリンク・ジャンクション）か。
+pub fn is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| traits_of(&meta).link)
+}
+
+/// フォルダの中（下のフォルダを含む）の、索引に入れるファイルを集める。
+/// フォルダがないとき・フォルダそのものがリンクのとき（リンクの先はたどらない）はエラー。
 pub fn walk(root: &Path, limits: Limits) -> std::io::Result<Walked> {
-    let meta = std::fs::metadata(root)?;
+    let meta = std::fs::symlink_metadata(root)?;
+    if traits_of(&meta).link {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "リンクのフォルダはたどりません"));
+    }
     if !meta.is_dir() {
         return Err(std::io::Error::new(std::io::ErrorKind::NotADirectory, "フォルダではありません"));
     }
@@ -278,6 +287,13 @@ mod tests {
         assert!(!reachable_without_links(root, &root.join("外へ.txt")));
         assert!(reachable_without_links(root, &root.join("中.txt")));
         assert!(!reachable_without_links(root, &outside.path().join("外.txt")), "フォルダの外");
+
+        // 追加したフォルダそのものがリンクでも、リンクの先はたどらない
+        let linked = dir.path().join("リンクのフォルダ");
+        std::os::unix::fs::symlink(outside.path(), &linked).unwrap();
+        assert!(is_link(&linked));
+        assert!(!is_link(root));
+        assert!(walk(&linked, Limits::default()).is_err());
     }
 
     // [IDX-027]

@@ -35,6 +35,17 @@ pub fn setup(app: &AppHandle, data_dir: &Path, settings: &Settings, folders: Vec
     app.manage(CompanionState { indexer });
 }
 
+/// アプリを終えるときに呼ぶ。索引の作業用のスレッドを止めて、少しのあいだ終わるのを待つ
+/// （作業用のスレッドは状態を知らせるためにアプリを持っているので、アプリが片付くだけでは止まらない）。
+pub fn shutdown(app: &AppHandle) {
+    if let Some(companion) = app.try_state::<CompanionState>() {
+        companion.indexer.shutdown_and_wait(SHUTDOWN_WAIT);
+    }
+}
+
+/// 終えるときに、索引の作業用のスレッドが終わるのを待つ長さ（読んでいる途中の資料を読み終えるまで）。
+const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// 設定を保存したときに呼ぶ。相棒のオンとオフが変わったら、索引を作り始めるか、止めて消す。
 pub fn settings_changed(app: &AppHandle, before: Option<&Settings>, saved: &Settings) {
     let Some(companion) = app.try_state::<CompanionState>() else {
@@ -53,8 +64,7 @@ pub fn settings_changed(app: &AppHandle, before: Option<&Settings>, saved: &Sett
 
 fn save_folders(state: &AppState, companion: &CompanionState, folders: Vec<SearchFolder>) -> CmdResult<IndexStatus> {
     state.db().save_search_folders(&folders)?;
-    companion.indexer.set_folders(folders);
-    Ok(companion.indexer.status())
+    Ok(companion.indexer.set_folders(folders))
 }
 
 /// フォルダを選ぶダイアログを出す（画面にはファイルを選ぶ権限を渡さないので、本体が出す）。取り消したら None。
@@ -92,6 +102,12 @@ pub async fn add_search_folder(
     };
     if !path.is_dir() {
         return Err(CommandError("フォルダを選んでください".into()));
+    }
+    // リンクの先はたどらないので、リンクのフォルダは足さない（IDX-027）
+    if kiroscribe_core::search::walk::is_link(&path) {
+        return Err(CommandError(
+            "ショートカットやリンク（ジャンクション・シンボリックリンク）のフォルダは追加できません。リンク先のフォルダを選んでください".into(),
+        ));
     }
     let path = path.to_string_lossy().to_string();
     let mut folders = state.db().load_search_folders()?;
@@ -139,7 +155,7 @@ pub fn set_search_folder_no_content(
         folder.no_content = value;
         state.db().save_search_folders(&folders)?;
         // 索引の中身は変わらないので、調べ直さない（作っている途中の処理も止めない）
-        companion.indexer.set_folder_options(folders);
+        return Ok(companion.indexer.set_folder_options(folders));
     }
     Ok(companion.indexer.status())
 }
@@ -150,8 +166,6 @@ pub fn rebuild_search_index(
     state: State<'_, AppState>,
     companion: State<'_, CompanionState>,
 ) -> CmdResult<IndexStatus> {
-    if !state.db().load_settings()?.companion || !companion.indexer.rebuild() {
-        return Err(CommandError("会議の相棒がオフのときは、索引を作り直せません".into()));
-    }
-    Ok(companion.indexer.status())
+    let rebuilt = if state.db().load_settings()?.companion { companion.indexer.rebuild() } else { None };
+    rebuilt.ok_or_else(|| CommandError("会議の相棒がオフのときは、索引を作り直せません".into()))
 }

@@ -265,14 +265,23 @@ fn local(name: &str) -> &str {
     name.rsplit(':').next().unwrap_or(name)
 }
 
+/// 属性の値を、名前空間の接頭辞（`w:` など）によらず、名前で探す。
+fn attr_local(e: &BytesStart, name: &str) -> Option<String> {
+    e.attributes()
+        .flatten()
+        .find(|a| local(a.key.as_ref()) == name)
+        .and_then(|a| a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok().map(|v| v.into_owned()))
+}
+
 /// Word の段落スタイルが見出しか（英語版は Heading1・Title、日本語版の組み込みの見出しは 1〜9）。
 fn is_heading_style(style: &str) -> bool {
     let style = style.to_ascii_lowercase();
-    style.starts_with("heading") || style == "title" || (style.len() == 1 && style.chars().all(|c| c.is_ascii_digit()))
+    style.starts_with("heading") || style == "title" || matches!(style.as_str(), "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
 }
 
 /// Word: 本文と、最初の見出し（見出しの段落スタイルか、アウトラインのレベルがある段落）。
 /// テキストボックスの中の段落のように、段落の中にある段落は、外の段落と分けて読む。
+/// 要素と属性は、名前空間の接頭辞によらず名前で見る（`w:` 以外の接頭辞で書いた文書もある）。
 fn docx(bytes: &[u8]) -> Option<(Option<String>, String)> {
     let mut archive = open_zip(bytes)?;
     let xml = zip_entry(&mut archive, "word/document.xml")?;
@@ -282,27 +291,27 @@ fn docx(bytes: &[u8]) -> Option<(Option<String>, String)> {
     let mut in_text = false;
     let mut title = None;
     walk_xml(&xml, |event| match event {
-        Xml::Start(e) => match e.name().as_ref() {
-            "w:p" => paragraphs.push((String::new(), false)),
-            "w:pStyle" => {
+        Xml::Start(e) => match local(e.name().as_ref()) {
+            "p" => paragraphs.push((String::new(), false)),
+            "pStyle" => {
                 if let Some(paragraph) = paragraphs.last_mut() {
-                    paragraph.1 |= is_heading_style(&attr(e, "w:val").unwrap_or_default());
+                    paragraph.1 |= is_heading_style(&attr_local(e, "val").unwrap_or_default());
                 }
             }
             // アウトラインのレベルは 0〜8 が見出し。9 は本文
-            "w:outlineLvl" => {
-                let level = attr(e, "w:val").and_then(|v| v.parse::<u8>().ok());
+            "outlineLvl" => {
+                let level = attr_local(e, "val").and_then(|v| v.parse::<u8>().ok());
                 if let Some(paragraph) = paragraphs.last_mut() {
                     paragraph.1 |= level.is_some_and(|level| level < 9);
                 }
             }
-            "w:t" => in_text = true,
-            "w:tab" => {
+            "t" => in_text = true,
+            "tab" => {
                 if let Some(paragraph) = paragraphs.last_mut() {
                     paragraph.0.push('\t');
                 }
             }
-            "w:br" | "w:cr" => {
+            "br" | "cr" => {
                 if let Some(paragraph) = paragraphs.last_mut() {
                     paragraph.0.push('\n');
                 }
@@ -315,9 +324,9 @@ fn docx(bytes: &[u8]) -> Option<(Option<String>, String)> {
             }
         }
         Xml::Text(_) => {}
-        Xml::End(name) => match name {
-            "w:t" => in_text = false,
-            "w:p" => {
+        Xml::End(name) => match local(name) {
+            "t" => in_text = false,
+            "p" => {
                 if let Some((paragraph, heading)) = paragraphs.pop() {
                     if heading && title.is_none() && !paragraph.trim().is_empty() {
                         title = Some(paragraph.clone());
@@ -689,6 +698,30 @@ pub(crate) mod tests {
             assert!(!body.contains(text), "{text} は入れない: {body}");
         }
         assert!(!body.lines().any(|line| line == "0" || line == "1"), "共有の文字列の番号と真偽値は入れない: {body}");
+    }
+
+    // [IDX-006]
+    #[test]
+    fn word_style_0_is_not_a_heading_and_any_namespace_prefix_is_read() {
+        let style0 = zip_of(&[(
+            "word/document.xml",
+            r#"<w:document xmlns:w="w"><w:body>
+            <w:p><w:pPr><w:pStyle w:val="0"/></w:pPr><w:r><w:t>スタイル 0 の段落</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="2"/></w:pPr><w:r><w:t>見出し 2</w:t></w:r></w:p>
+            </w:body></w:document>"#,
+        )]);
+        assert_eq!(extract_bytes(&style0, Kind::Docx).title.as_deref(), Some("見出し 2"), "スタイル 0 は見出しではない");
+
+        let prefixed = zip_of(&[(
+            "word/document.xml",
+            r#"<ns0:document xmlns:ns0="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><ns0:body>
+            <ns0:p><ns0:pPr><ns0:pStyle ns0:val="Heading1"/></ns0:pPr><ns0:r><ns0:t>別の接頭辞の見出し</ns0:t></ns0:r></ns0:p>
+            <ns0:p><ns0:r><ns0:t>本文</ns0:t><ns0:tab/><ns0:t>続き</ns0:t></ns0:r></ns0:p>
+            </ns0:body></ns0:document>"#,
+        )]);
+        let word = extract_bytes(&prefixed, Kind::Docx);
+        assert_eq!(word.title.as_deref(), Some("別の接頭辞の見出し"));
+        assert!(word.body.contains("本文\t続き"), "{}", word.body);
     }
 
     // [IDX-006]

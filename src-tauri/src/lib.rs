@@ -17,7 +17,7 @@ mod state;
 mod update;
 
 use kiroscribe_core::time::now_ms;
-use tauri::{Manager, WindowEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
 
 use crate::ai::AiState;
 use crate::background::{BackgroundState, AUTOSTART_ARG, MAIN_LABEL};
@@ -113,8 +113,13 @@ pub fn run() {
         e2e::plugins(builder)
     };
     register_commands(builder)
-        .run(context)
-        .expect("Kiroscribe の起動に失敗しました");
+        .build(context)
+        .expect("Kiroscribe の起動に失敗しました")
+        .run(|app, event| {
+            if let RunEvent::Exit = event {
+                companion::shutdown(app);
+            }
+        });
 }
 
 /// 画面から呼べるコマンドを登録する（テストでも同じ一覧を登録して、画面側との食い違いを確かめる）。

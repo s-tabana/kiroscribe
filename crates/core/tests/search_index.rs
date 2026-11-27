@@ -157,7 +157,7 @@ fn unchanged_files_are_not_reread_until_rebuild() {
     wait_ready(&f, 1);
     assert_eq!(search(&f, "a案"), ["議事録.txt"], "変わっていないとみなす");
 
-    assert!(f.indexer.rebuild());
+    assert!(f.indexer.rebuild().is_some());
     wait_until("作り直し", Duration::from_secs(20), || search(&f, "b案") == ["議事録.txt"]);
     assert!(search(&f, "a案").is_empty());
 }
@@ -219,7 +219,7 @@ fn turning_off_clears_the_index_and_keeps_the_folders() {
     let status = f.indexer.status();
     assert_eq!(status.folders.len(), 1, "探すフォルダの一覧は残す");
     assert_eq!(status.files, 0);
-    assert!(!f.indexer.rebuild(), "オフのときは作り直さない");
+    assert!(f.indexer.rebuild().is_none(), "オフのときは作り直さない");
 
     // オフのあいだの変更は反映しない（見張りも止まる）
     write(&f.root.join("b.txt"), "経費");
@@ -303,12 +303,40 @@ fn no_content_option_does_not_rescan() {
     for i in 0..300 {
         write(&f.root.join(format!("{i}.txt")), "経費");
     }
-    assert!(f.indexer.rebuild());
+    assert!(f.indexer.rebuild().is_some());
     let mut back = folder(&f.root);
     back.no_content = false;
     f.indexer.set_folder_options(vec![back]);
     wait_ready(&f, 301);
     assert!(!f.indexer.status().folders[0].no_content, "作り終えたあとも、切り替えたあとの値");
+}
+
+/// 命令の戻り値は、命令を出した時点の状態（作業用のスレッドの進み方によらない）。
+/// 空のフォルダはすぐ作り終えるので、命令のあとに状態を読み直すと「できている」が返ることがある。
+// [IDX-008]
+#[test]
+fn commands_return_the_status_at_the_time_of_the_command() {
+    let f = fixture();
+    f.indexer.enable(vec![folder(&f.root)]);
+    wait_ready(&f, 0);
+    for _ in 0..50 {
+        let before = f.indexer.status().revision;
+        let returned = f.indexer.set_folders(vec![folder(&f.root)]);
+        assert_eq!((returned.state, returned.revision), (IndexState::Building, before + 1), "フォルダの一覧を変えた直後");
+        wait_ready(&f, 0);
+
+        let before = f.indexer.status().revision;
+        let returned = f.indexer.rebuild().unwrap();
+        assert_eq!((returned.state, returned.revision), (IndexState::Building, before + 1), "作り直しを始めた直後");
+        wait_ready(&f, 0);
+
+        let before = f.indexer.status().revision;
+        let mut changed = folder(&f.root);
+        changed.no_content = !f.indexer.status().folders[0].no_content;
+        let returned = f.indexer.set_folder_options(vec![changed.clone()]);
+        assert_eq!((returned.state, returned.revision), (IndexState::Ready, before + 1), "「中身を送らない」を変えた直後");
+        assert_eq!(returned.folders[0].no_content, changed.no_content);
+    }
 }
 
 /// 状態の番号は、知らせるたびに増える（画面は、古い戻り値で新しい知らせを上書きしない）。
@@ -359,8 +387,8 @@ fn changes_are_reflected_while_other_files_keep_changing() {
 // [IDX-010]
 #[test]
 fn a_watched_folder_that_disappears_keeps_its_index() {
-    // 見つからないフォルダを見直す間隔（ふだんは 30 分）だけを縮める
-    let f = fixture_with(Intervals { poll: Duration::from_secs(1), ..Intervals::default() });
+    // 見張れないフォルダの見直し（30 分）を待たずに、フォルダそのものを確かめる間隔で、戻ったことに気づく
+    let f = fixture_with(Intervals { poll: Duration::from_secs(3600), root_check: Duration::from_millis(200) });
     write(&f.root.join("a.txt"), "経費");
     f.indexer.enable(vec![folder(&f.root)]);
     wait_ready(&f, 1);
@@ -384,6 +412,69 @@ fn a_watched_folder_that_disappears_keeps_its_index() {
     let mut found = search(&f, "経費");
     found.sort();
     assert_eq!(found, ["a.txt", "b.txt", "c.txt"]);
+}
+
+/// 見張っているフォルダを移して、すぐに同じ名前のフォルダを作っても、新しいフォルダを調べ直して見張る。
+/// 移した先のフォルダの変更は、索引に入れない。
+// [IDX-010]
+#[test]
+fn a_watched_folder_replaced_by_one_of_the_same_name_is_watched_again() {
+    let f = fixture_with(Intervals { poll: Duration::from_secs(3600), root_check: Duration::from_millis(500) });
+    write(&f.root.join("a.txt"), "経費");
+    f.indexer.enable(vec![folder(&f.root)]);
+    wait_ready(&f, 1);
+    let moved = f.root.parent().unwrap().join("退避");
+    std::fs::rename(&f.root, &moved).unwrap();
+    write(&f.root.join("b.txt"), "経費");
+    wait_until("新しいフォルダの反映", Duration::from_secs(30), || search(&f, "経費") == ["b.txt"]);
+
+    write(&f.root.join("c.txt"), "経費");
+    write(&moved.join("d.txt"), "経費");
+    wait_until("新しいフォルダの変更の反映", Duration::from_secs(30), || f.indexer.status().files == 2);
+    std::thread::sleep(Duration::from_secs(3));
+    let mut found = search(&f, "経費");
+    found.sort();
+    assert_eq!(found, ["b.txt", "c.txt"], "移した先の変更は入れない");
+}
+
+/// 見直しても索引が変わらなければ、更新した時刻は変えない。
+// [IDX-008]
+#[test]
+fn updated_at_moves_only_when_the_index_changes() {
+    let f = fixture_with(Intervals { poll: Duration::from_secs(3600), root_check: Duration::from_millis(200) });
+    write(&f.root.join("a.txt"), "経費");
+    f.indexer.enable(vec![folder(&f.root)]);
+    wait_ready(&f, 1);
+    let before = f.indexer.status().updated_at;
+    let moved = f.root.parent().unwrap().join("退避");
+    std::fs::rename(&f.root, &moved).unwrap();
+    wait_until("見つからない表示", Duration::from_secs(30), || f.indexer.status().folders[0].missing);
+    std::fs::rename(&moved, &f.root).unwrap();
+    wait_until("戻ったフォルダの見直し", Duration::from_secs(30), || {
+        let status = f.indexer.status();
+        status.state == IndexState::Ready && !status.folders[0].missing
+    });
+    assert_eq!(f.indexer.status().updated_at, before, "変わったファイルがなければ、前の時刻のまま");
+
+    std::thread::sleep(Duration::from_millis(20));
+    write(&f.root.join("b.txt"), "経費");
+    wait_ready(&f, 2);
+    assert!(f.indexer.status().updated_at > before, "ファイルが増えたら、時刻を進める");
+}
+
+/// アプリを終えるときは、窓口が残っていても作業用のスレッドを止めて、終わるのを待てる。
+// [IDX-012]
+#[test]
+fn shutdown_and_wait_stops_the_worker_while_handles_remain() {
+    let f = fixture();
+    write(&f.root.join("a.txt"), "経費");
+    f.indexer.enable(vec![folder(&f.root)]);
+    wait_ready(&f, 1);
+    assert!(f.indexer.shutdown_and_wait(Duration::from_secs(5)));
+    let emitted = f.events.lock().unwrap().len();
+    write(&f.root.join("b.txt"), "経費");
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(f.events.lock().unwrap().len(), emitted, "止めたあとは、変更を反映しない");
 }
 
 /// 作業用のスレッドは、最後の窓口がなくなったら止まり、一時フォルダを作り直さない。

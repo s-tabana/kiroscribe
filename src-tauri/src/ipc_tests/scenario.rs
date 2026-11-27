@@ -252,13 +252,15 @@ fn ipc_contract_matches_the_frontend() {
     assert_eq!(status["updatedAt"], ready_at);
     assert_eq!(index_events(since), Vec::<Value>::new(), "選び直しと「中身を送らない」では、調べ直さない");
     let since = index_seen();
-    s.ok("rebuild_search_index", json!({}));
+    let status = s.ok("rebuild_search_index", json!({}));
+    assert_eq!(status["state"], "building", "戻り値は、作り直しを始めた直後の状態");
     wait_until("索引の作り直し", || {
         index_events(since).iter().any(|status| status["state"] == "ready" && status["files"] == 1).then_some(())
     });
     let since = index_seen();
     let status = s.ok("remove_search_folder", json!({ "path": folder_path }));
     assert_eq!(status["folders"], json!([]));
+    assert_eq!(status["state"], "building", "戻り値は、一覧を変えた直後の状態");
     wait_until("フォルダを外したあとの索引", || {
         index_events(since).iter().any(|status| status["state"] == "ready").then_some(())
     });
