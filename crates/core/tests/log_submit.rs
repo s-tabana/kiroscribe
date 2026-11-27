@@ -148,7 +148,7 @@ async fn unreachable_intake_says_to_check_the_connection() {
 }
 
 /// 入口がリダイレクトを返しても従わず、ほかの場所には送らない。
-// [SEC-015]
+// [SEC-015][SET-018]
 #[tokio::test]
 async fn redirects_are_not_followed() {
     let server = MockServer::start().await;
@@ -164,6 +164,8 @@ async fn redirects_are_not_followed() {
         .expect(0)
         .mount(&server)
         .await;
-    let err = send(&server, zip(100)).await.unwrap_err();
-    assert_eq!(err.to_string(), "ログの送り先がエラーを返しました（HTTP 308）。しばらく待ってから、もう一度お試しください");
+    let message = send(&server, zip(100)).await.unwrap_err().to_string();
+    assert!(message.contains("HTTP 308"), "{message}");
+    assert!(message.contains("最新版に更新"), "{message}");
+    assert!(message.contains("デバッグ用のログを保存"), "{message}");
 }

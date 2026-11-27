@@ -160,11 +160,11 @@ export interface Backend {
   onSettingsChanged(cb: (settings: Settings) => void): Unsubscribe;
 }
 
-/** Tauri のイベント購読を、同期的に解除できる形にする */
 function subscribeAsync<T>(event: string, cb: (payload: T) => void): Promise<Unsubscribe> {
   return listen<T>(event, (e) => cb(e.payload));
 }
 
+/** Tauri のイベント購読を、同期的に解除できる形にする */
 function subscribe<T>(event: string, cb: (payload: T) => void): Unsubscribe {
   let disposed = false;
   let unlisten: (() => void) | null = null;
