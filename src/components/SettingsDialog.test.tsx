@@ -1,11 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { SettingsDialog, meetingRecordFileName } from "./SettingsDialog";
+import {
+  DEBUG_LOG_SUBMIT_CONFIRM,
+  DEBUG_LOG_SUBMIT_OFFLINE,
+  SettingsDialog,
+  meetingRecordFileName,
+} from "./SettingsDialog";
 import { BackendContext } from "../lib/backend";
 import { createMemoryBackend, type MemoryBackend } from "../lib/memoryBackend";
 import { DEFAULT_SETTINGS } from "../lib/types";
-import type { Settings } from "../lib/types";
+import type { LogSubmission, Settings } from "../lib/types";
 
 function setup(settings: Partial<Settings> = {}) {
   const backend = createMemoryBackend({ settings });
@@ -395,5 +400,100 @@ describe("SettingsDialog: 会議の検出の記録", () => {
 
   it("[MTG-026] 記録のファイル名には、保存した日付と時刻を付ける", () => {
     expect(meetingRecordFileName(new Date(2026, 10, 23, 9, 4))).toBe("kiroscribe-meeting-record-20261123-0904.json");
+  });
+});
+
+describe("SettingsDialog: デバッグ用のログの提出", () => {
+  function setupSubmit(
+    submitLogs?: (progress: (value: { sent: number; total: number }) => void) => Promise<LogSubmission>,
+  ) {
+    const confirm = vi.fn(() => true);
+    const backend = createMemoryBackend({ confirm, submitLogs });
+    const submit = vi.spyOn(backend, "submitDebugLogs");
+    render(
+      <BackendContext.Provider value={backend}>
+        <SettingsDialog onClose={() => undefined} />
+      </BackendContext.Provider>,
+    );
+    return { backend, confirm, submit };
+  }
+
+  it("[SET-014] 押すと、送るもの・送らないもの・置く期間を確認し、取り消したら送らない", async () => {
+    const user = userEvent.setup();
+    const { confirm, submit } = setupSubmit();
+    confirm.mockReturnValue(false);
+
+    await user.click(await screen.findByRole("button", { name: "デバッグ用のログを提出…" }));
+
+    expect(confirm).toHaveBeenCalledWith(DEBUG_LOG_SUBMIT_CONFIRM);
+    expect(DEBUG_LOG_SUBMIT_CONFIRM).toContain("送るもの: アプリの動きの記録");
+    expect(DEBUG_LOG_SUBMIT_CONFIRM).toContain("送らないもの: 録音、ノート・文字起こし・議事録・チャットの内容、API キー");
+    expect(DEBUG_LOG_SUBMIT_CONFIRM).toContain("30 日で消します");
+    expect(submit).not.toHaveBeenCalled();
+    expect(screen.queryByText(/ログを提出しました/)).not.toBeInTheDocument();
+  });
+
+  it("[SET-015] 送っている間は進み具合を出してボタンを押せなくし、終わったら提出の番号を出す", async () => {
+    const user = userEvent.setup();
+    let report: (value: { sent: number; total: number }) => void = () => undefined;
+    let finish: (submission: LogSubmission) => void = () => undefined;
+    const { backend, submit } = setupSubmit(
+      (progress) =>
+        new Promise((resolve) => {
+          report = progress;
+          finish = resolve;
+        }),
+    );
+    const copy = vi.spyOn(backend, "copyText");
+    const button = await screen.findByRole("button", { name: "デバッグ用のログを提出…" });
+
+    await user.click(button);
+    expect(submit).toHaveBeenCalledOnce();
+    expect(await screen.findByText("ログをまとめています…")).toBeInTheDocument();
+    expect(button).toBeDisabled();
+
+    act(() => report({ sent: 1_000, total: 4_000 }));
+    expect(await screen.findByText(/ログを送っています… 25%/)).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "ログの送信" })).toHaveAttribute("value", "25");
+
+    await act(async () => finish({ id: "KS-20261127-7F3A", receivedAt: "2026-11-27T12:50:30.217Z" }));
+    expect(await screen.findByText(/ログを提出しました。提出の番号:/)).toHaveTextContent(
+      "ログを提出しました。提出の番号: KS-20261127-7F3A（問い合わせるときに伝えてください）",
+    );
+    expect(button).toBeEnabled();
+    expect(screen.queryByText(/ログを送っています/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "番号をコピー" }));
+    expect(copy).toHaveBeenCalledWith("KS-20261127-7F3A");
+  });
+
+  it("[SET-016] 送れなかったときは理由を出し、もう一度押せる", async () => {
+    const user = userEvent.setup();
+    const { submit } = setupSubmit(() =>
+      Promise.reject("ログを送れませんでした。送り先につながりませんでした。インターネットに接続しているか、プロキシの設定を確かめてください（接続が拒否されました）"),
+    );
+    const button = await screen.findByRole("button", { name: "デバッグ用のログを提出…" });
+
+    await user.click(button);
+    expect(await screen.findByText(/ログを送れませんでした。送り先につながりませんでした/)).toBeInTheDocument();
+    expect(button).toBeEnabled();
+
+    submit.mockResolvedValueOnce({ id: "KS-20261127-AAAA", receivedAt: "2026-11-27T12:50:30.217Z" });
+    await user.click(button);
+    expect(await screen.findByText(/ログを提出しました。提出の番号:/)).toHaveTextContent("KS-20261127-AAAA");
+    expect(screen.queryByText(/ログを送れませんでした/)).not.toBeInTheDocument();
+  });
+
+  it("[SET-016] オフラインのときは送らずに、つながっていないことを出す", async () => {
+    const user = userEvent.setup();
+    const { submit } = setupSubmit();
+    const online = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    try {
+      await user.click(await screen.findByRole("button", { name: "デバッグ用のログを提出…" }));
+      expect(await screen.findByText(DEBUG_LOG_SUBMIT_OFFLINE)).toBeInTheDocument();
+      expect(submit).not.toHaveBeenCalled();
+    } finally {
+      online.mockRestore();
+    }
   });
 });

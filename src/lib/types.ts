@@ -40,6 +40,10 @@ export interface Settings {
   launchAtLogin: boolean;
   /** 見つけた新しいバージョンを自動でインストールする（既定はオフで、知らせるだけ） */
   autoUpdate: boolean;
+  /** デバッグ用のログの回収の入口（https://<ホスト>）。null なら既定（画面には出さない） */
+  logIntakeUrl: string | null;
+  /** 入口に添える提出用の値。null なら既定（画面には出さない） */
+  logIntakeToken: string | null;
 }
 
 export type Provider = "openai" | "anthropic";
@@ -61,6 +65,8 @@ export const DEFAULT_SETTINGS: Settings = {
   autoRecordMeetings: true,
   launchAtLogin: true,
   autoUpdate: false,
+  logIntakeUrl: null,
+  logIntakeToken: null,
 };
 
 // ---- 録音・文字起こし ----
@@ -234,3 +240,17 @@ export const NO_UPDATE: UpdateStatus = {
   totalBytes: null,
   ready: false,
 };
+
+/** デバッグ用のログを入口が受け付けたときの応答 */
+export interface LogSubmission {
+  /** 提出の番号（例: KS-20261127-7F3A） */
+  id: string;
+  /** 入口が受け取った時刻（ISO 8601） */
+  receivedAt: string;
+}
+
+/** デバッグ用のログの提出の進み具合（バイト） */
+export interface LogSubmitProgress {
+  sent: number;
+  total: number;
+}

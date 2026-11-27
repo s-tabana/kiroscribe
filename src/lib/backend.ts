@@ -13,6 +13,8 @@ import type {
   ExportResult,
   Guide,
   LevelEvent,
+  LogSubmission,
+  LogSubmitProgress,
   Note,
   NotePatch,
   NoteSummary,
@@ -107,6 +109,12 @@ export interface Backend {
    * 保存したパスと記録の件数、取り消したら null
    */
   saveMeetingRecord(fileName: string): Promise<{ path: string; entries: number } | null>;
+  /**
+   * デバッグ用のログを zip にまとめて、ログの回収の入口に送る。返すのは提出の番号と受け取った時刻。
+   * 送れなかったら理由のメッセージで reject する。進み具合は onLogSubmitProgress
+   */
+  submitDebugLogs(): Promise<LogSubmission>;
+  onLogSubmitProgress(cb: (progress: LogSubmitProgress) => void): Unsubscribe;
 
   // ---- バージョン・ヘルプ ----
   getAppVersion(): Promise<string>;
@@ -212,6 +220,8 @@ export function createTauriBackend(): Backend {
       const entries = (await invoke("save_meeting_record", { path })) as number;
       return { path, entries };
     },
+    submitDebugLogs: () => invoke("submit_debug_logs"),
+    onLogSubmitProgress: (cb) => subscribe("log-submit-progress", cb),
 
     getAppVersion: () => invoke("get_app_version"),
     getGuide: () => invoke("get_guide"),

@@ -427,6 +427,7 @@ function AboutSection({ autoUpdate, onAutoUpdateChange, onOpenHelp }: AboutSecti
       </p>
 
       <MeetingRecordSave />
+      <DebugLogSubmit />
     </section>
   );
 }
@@ -472,6 +473,92 @@ function MeetingRecordSave() {
           {message.text}
         </p>
       )}
+    </div>
+  );
+}
+
+/** 提出の前に出す確認の文 */
+export const DEBUG_LOG_SUBMIT_CONFIRM =
+  "デバッグ用のログを開発者に送ります。\n\n" +
+  "送るもの: アプリの動きの記録、会議の検出の記録（マイクを使ったアプリとブラウザのタブの名前）、" +
+  "環境の情報（バージョン・Windows の版・設定）\n" +
+  "送らないもの: 録音、ノート・文字起こし・議事録・チャットの内容、API キー\n\n" +
+  "送ったログは開発者だけが見られる場所に置き、30 日で消します。送りますか？";
+
+/** オフラインのときの文 */
+export const DEBUG_LOG_SUBMIT_OFFLINE =
+  "インターネットにつながっていないため、ログを送れません。接続してから、もう一度お試しください";
+
+type SubmitState =
+  | { phase: "idle" }
+  | { phase: "packing" }
+  | { phase: "sending"; percent: number }
+  | { phase: "done"; id: string }
+  | { phase: "error"; message: string };
+
+/** デバッグ用のログを、ログの回収の入口に送る（保存したファイルを渡す手間を省く） */
+function DebugLogSubmit() {
+  const backend = useBackend();
+  const [state, setState] = useState<SubmitState>({ phase: "idle" });
+  const busy = state.phase === "packing" || state.phase === "sending";
+
+  const submit = async () => {
+    if (!(await backend.confirm(DEBUG_LOG_SUBMIT_CONFIRM, "デバッグ用のログを提出", "info"))) return;
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      setState({ phase: "error", message: DEBUG_LOG_SUBMIT_OFFLINE });
+      return;
+    }
+    setState({ phase: "packing" });
+    const unsubscribe = backend.onLogSubmitProgress(({ sent, total }) => {
+      const percent = total > 0 ? Math.min(100, Math.floor((sent / total) * 100)) : 0;
+      setState((current) =>
+        current.phase === "packing" || current.phase === "sending" ? { phase: "sending", percent } : current,
+      );
+    });
+    try {
+      setState({ phase: "done", id: (await backend.submitDebugLogs()).id });
+    } catch (err) {
+      setState({ phase: "error", message: errorMessage(err) });
+    } finally {
+      unsubscribe();
+    }
+  };
+
+  return (
+    <div className="about-record">
+      <button type="button" className="link-button" onClick={() => void submit()} disabled={busy}>
+        デバッグ用のログを提出…
+      </button>
+      <small className="hint">
+        {"不具合を調べるために、デバッグ用のログを開発者に直接送ります。" +
+          "保存したファイルを渡す手間がかかりません。送る前に、送るものを確かめられます。"}
+      </small>
+      <div aria-live="polite">
+        {state.phase === "packing" && <p role="status">ログをまとめています…</p>}
+        {state.phase === "sending" && (
+          <p role="status">
+            ログを送っています… {state.percent}%
+            <progress max={100} value={state.percent} aria-label="ログの送信" />
+          </p>
+        )}
+        {state.phase === "done" && (
+          <p className="ok-text" role="status">
+            ログを提出しました。提出の番号: <strong>{state.id}</strong>（問い合わせるときに伝えてください）
+            <button
+              type="button"
+              className="link-button"
+              onClick={() => void backend.copyText(state.id).catch(() => undefined)}
+            >
+              番号をコピー
+            </button>
+          </p>
+        )}
+        {state.phase === "error" && (
+          <p className="error-text" role="status">
+            {state.message}
+          </p>
+        )}
+      </div>
     </div>
   );
 }

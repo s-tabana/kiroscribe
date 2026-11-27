@@ -12,6 +12,8 @@ import {
   type DeltaEvent,
   type ExportOptions,
   type LevelEvent,
+  type LogSubmission,
+  type LogSubmitProgress,
   type Note,
   type OpenNoteRequest,
   type PopupPayload,
@@ -44,6 +46,11 @@ interface MemoryOptions {
   updateStepDelayMs?: number;
   /** 設定の初期値（指定した項目だけ既定値から変える） */
   settings?: Partial<Settings>;
+  /**
+   * デバッグ用のログの提出を差し替える（テスト用）。progress で進み具合を知らせ、提出の番号を返す。
+   * 既定は、進み具合を 4 回知らせてから、プレビュー用の番号を返す
+   */
+  submitLogs?: (progress: (value: LogSubmitProgress) => void) => Promise<LogSubmission>;
 }
 
 /** テストから文字起こしやエラーを発生させるための追加機能 */
@@ -250,6 +257,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
   let updatedNotice: string | null = null;
   const mainShownEvents = new Emitter<void>();
   const settingsEvents = new Emitter<Settings>();
+  const logSubmitEvents = new Emitter<LogSubmitProgress>();
   const UPDATE_BYTES = 8_400_000;
   const updateStep = () =>
     new Promise((resolve) => setTimeout(resolve, options.updateStepDelayMs ?? (options.demo ? 220 : 0)));
@@ -709,6 +717,18 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       // プレビューには会議の検出がないので、記録は空
       return { path: fileName, entries: 0 };
     },
+    async submitDebugLogs() {
+      const report = (value: LogSubmitProgress) => logSubmitEvents.emit({ ...value });
+      if (options.submitLogs) return options.submitLogs(report);
+      // プレビューでは送らずに、送ったように見せる
+      const total = 4 * 1024 * 1024;
+      for (let step = 1; step <= 4; step++) {
+        await new Promise((resolve) => setTimeout(resolve, options.demo ? 300 : 0));
+        report({ sent: (total * step) / 4, total });
+      }
+      return { id: "KS-PREVIEW-0000", receivedAt: new Date(now()).toISOString() };
+    },
+    onLogSubmitProgress: (cb) => logSubmitEvents.on(cb),
     get lastCopied() {
       return lastCopied;
     },
