@@ -11,7 +11,7 @@ pub mod normalize;
 pub mod store;
 pub mod walk;
 
-pub use indexer::{FolderStatus, IndexState, IndexStatus, Indexer, SearchFolder};
+pub use indexer::{FolderStatus, IndexState, IndexStatus, Indexer, Intervals, SearchFolder};
 pub use store::{Hit, SearchIndex, INDEX_FILE};
 
 use crate::db::Database;

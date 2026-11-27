@@ -19,7 +19,7 @@ use crate::time::now_ms;
 
 /// 見張れないフォルダ（ネットワークのドライブなど）を見直す間隔。
 pub const POLL_INTERVAL: Duration = Duration::from_secs(30 * 60);
-/// 見張っているフォルダそのものがあるかを確かめる間隔。Windows では、見張っているフォルダ自身の移動や削除は
+/// 見張っているフォルダそのものがあるかを確かめる間隔。Windows では、見張っているフォルダ自身を移したことは
 /// 変更の知らせに含まれないため、ここで見つける。
 pub const ROOT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// 変更の知らせを受けてから、まとめて反映するまでの待ち時間（続けて届く知らせを 1 回にまとめる）。
@@ -28,6 +28,21 @@ pub const CHANGE_DEBOUNCE: Duration = Duration::from_secs(2);
 pub const MAX_CHANGE_DELAY: Duration = Duration::from_secs(10);
 /// 索引のファイルを消せなかったときに、消し直す間隔。
 const PURGE_RETRY: Duration = Duration::from_secs(60);
+
+/// 見直しの間隔。
+#[derive(Debug, Clone, Copy)]
+pub struct Intervals {
+    /// 見張れないフォルダ・見つからないフォルダを見直す間隔
+    pub poll: Duration,
+    /// 見張っているフォルダそのものがあるかを確かめる間隔
+    pub root_check: Duration,
+}
+
+impl Default for Intervals {
+    fn default() -> Self {
+        Self { poll: POLL_INTERVAL, root_check: ROOT_CHECK_INTERVAL }
+    }
+}
 
 /// 探すフォルダ（保存する設定）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +166,15 @@ impl Indexer {
     }
 
     pub fn spawn_with(index_path: PathBuf, limits: Limits, on_status: impl Fn(&IndexStatus) + Send + Sync + 'static) -> Self {
+        Self::spawn_with_intervals(index_path, limits, Intervals::default(), on_status)
+    }
+
+    pub fn spawn_with_intervals(
+        index_path: PathBuf,
+        limits: Limits,
+        intervals: Intervals,
+        on_status: impl Fn(&IndexStatus) + Send + Sync + 'static,
+    ) -> Self {
         let (tx, rx) = channel();
         let shared = Arc::new(Mutex::new(Shared {
             status: IndexStatus {
@@ -170,6 +194,7 @@ impl Indexer {
         let worker = Worker {
             index_path,
             limits,
+            intervals,
             index: None,
             shared: shared.clone(),
             order: order.clone(),
@@ -280,6 +305,7 @@ impl Indexer {
 struct Worker {
     index_path: PathBuf,
     limits: Limits,
+    intervals: Intervals,
     index: Option<SearchIndex>,
     shared: Arc<Mutex<Shared>>,
     order: Arc<Mutex<()>>,
@@ -320,7 +346,7 @@ impl Worker {
         let mut pending_since: Option<Instant> = None;
         loop {
             let timeout = match pending_since {
-                None => ROOT_CHECK_INTERVAL,
+                None => self.intervals.root_check.min(self.intervals.poll),
                 Some(since) => CHANGE_DEBOUNCE.min(MAX_CHANGE_DELAY.saturating_sub(since.elapsed())),
             };
             let flush = match rx.recv_timeout(timeout) {
@@ -347,7 +373,7 @@ impl Worker {
             if self.purge_pending && !self.enabled() && self.last_purge.elapsed() >= PURGE_RETRY {
                 self.purge();
             }
-            if self.enabled() && self.last_root_check.elapsed() >= ROOT_CHECK_INTERVAL {
+            if self.enabled() && self.last_root_check.elapsed() >= self.intervals.root_check {
                 self.last_root_check = Instant::now();
                 let gone: BTreeSet<PathBuf> = self
                     .folders()
@@ -357,7 +383,7 @@ impl Worker {
                     .collect();
                 self.apply_changes(gone);
             }
-            if self.enabled() && !self.polled.is_empty() && self.last_poll.elapsed() >= POLL_INTERVAL {
+            if self.enabled() && !self.polled.is_empty() && self.last_poll.elapsed() >= self.intervals.poll {
                 self.last_poll = Instant::now();
                 let folders: BTreeSet<PathBuf> = self.polled.iter().cloned().collect();
                 self.apply_changes(folders);

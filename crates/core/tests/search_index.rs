@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use kiroscribe_core::search::store::SearchIndex;
-use kiroscribe_core::search::{IndexState, IndexStatus, Indexer, SearchFolder, INDEX_FILE};
+use kiroscribe_core::search::walk::Limits;
+use kiroscribe_core::search::{IndexState, IndexStatus, Indexer, Intervals, SearchFolder, INDEX_FILE};
 
 /// 知らせた状態と、知らせた時点で索引のファイルに資料の中身（[`MARKER`]）が残っていたか。
 type Events = Arc<Mutex<Vec<(IndexStatus, bool)>>>;
@@ -24,6 +25,10 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_with(Intervals::default())
+}
+
+fn fixture_with(intervals: Intervals) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("共有資料");
     std::fs::create_dir_all(&root).unwrap();
@@ -31,7 +36,7 @@ fn fixture() -> Fixture {
     let events: Events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
     let path = index_path.clone();
-    let indexer = Indexer::spawn(index_path.clone(), move |status| {
+    let indexer = Indexer::spawn_with_intervals(index_path.clone(), Limits::default(), intervals, move |status| {
         sink.lock().unwrap().push((status.clone(), left_on_disk(&path)));
     });
     Fixture { indexer, root, index_path, events, _dir: dir }
@@ -350,10 +355,12 @@ fn changes_are_reflected_while_other_files_keep_changing() {
 }
 
 /// 見張っているフォルダが見つからなくなっても（ドライブが外れたなど）、索引は消さずに「見つかりません」にする。
+/// 戻ったら、見つからないあいだの変更を索引に反映し、また見張る。
 // [IDX-010]
 #[test]
 fn a_watched_folder_that_disappears_keeps_its_index() {
-    let f = fixture();
+    // 見つからないフォルダを見直す間隔（ふだんは 30 分）だけを縮める
+    let f = fixture_with(Intervals { poll: Duration::from_secs(1), ..Intervals::default() });
     write(&f.root.join("a.txt"), "経費");
     f.indexer.enable(vec![folder(&f.root)]);
     wait_ready(&f, 1);
@@ -362,6 +369,21 @@ fn a_watched_folder_that_disappears_keeps_its_index() {
     wait_until("見つからない表示", Duration::from_secs(30), || f.indexer.status().folders[0].missing);
     assert_eq!(search(&f, "経費"), ["a.txt"], "索引は消さずに残す");
     assert_eq!(f.indexer.status().files, 1);
+
+    // 見つからないあいだに増えたファイルも、戻ったら索引に入れる
+    write(&moved.join("b.txt"), "経費");
+    std::fs::rename(&moved, &f.root).unwrap();
+    wait_until("戻ったフォルダの反映", Duration::from_secs(30), || {
+        let status = f.indexer.status();
+        status.state == IndexState::Ready && !status.folders[0].missing && status.files == 2
+    });
+
+    // 戻ったフォルダを、また見張る
+    write(&f.root.join("c.txt"), "経費");
+    wait_until("戻ったフォルダの変更の反映", Duration::from_secs(30), || f.indexer.status().files == 3);
+    let mut found = search(&f, "経費");
+    found.sort();
+    assert_eq!(found, ["a.txt", "b.txt", "c.txt"]);
 }
 
 /// 作業用のスレッドは、最後の窓口がなくなったら止まり、一時フォルダを作り直さない。
