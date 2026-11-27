@@ -17,6 +17,7 @@ pub mod meetings;
 pub mod notes;
 pub mod prompts;
 pub mod recorder;
+pub mod recording_check;
 pub mod retry;
 pub mod secrets;
 pub mod session;

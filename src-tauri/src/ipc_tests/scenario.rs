@@ -337,6 +337,31 @@ fn ipc_contract_matches_the_frontend() {
     assert_eq!(events_named(&events, "open-settings").len(), 1);
     assert_eq!(s.ok("close_popup", json!({})), Value::Null);
 
+    // ---- 長い録音で、会議が終わったかを聞く [REC-025][REC-026] ----
+    let long = s.ok("create_note", json!({}))["id"].as_str().unwrap().to_string();
+    s.ok("start_recording", json!({ "noteId": long }));
+    let handle = s.window.app_handle().clone();
+    let check_at = |minutes: i64| {
+        let handle = handle.clone();
+        let now = kiroscribe_core::time::now_ms() + minutes * 60_000;
+        tauri::async_runtime::block_on(async move { crate::recording_check::tick(&handle, now).await });
+    };
+    check_at(61);
+    let asked = s.wait_for_popup("confirmEnd");
+    assert_eq!(asked["noteId"], long.as_str());
+    let answer = json!({ "noteId": long, "deadline": asked["deadline"], "keep": true });
+    assert_eq!(s.ok("answer_recording_check", answer), Value::Null);
+    check_at(31);
+    let asked = s.wait_for_popup("confirmEnd");
+    check_at(34);
+    assert_eq!(s.wait_for_popup("stoppedUnanswered")["noteId"], long.as_str());
+    // 止まったあとに答えても、何も変わらない
+    let late = json!({ "noteId": long, "deadline": asked["deadline"], "keep": false });
+    assert_eq!(s.ok("answer_recording_check", late), Value::Null);
+    assert_eq!(s.ok("get_popup_state", json!({}))["kind"], "stoppedUnanswered");
+    assert_eq!(s.ok("delete_note", json!({ "id": long })), Value::Null);
+    assert_eq!(s.ok("close_popup", json!({})), Value::Null);
+
     // ---- ヘルプ ----
     assert_eq!(s.ok("get_app_version", json!({})), "0.1.0", "模擬のアプリのバージョン");
     let guide = s.ok("get_guide", json!({}));

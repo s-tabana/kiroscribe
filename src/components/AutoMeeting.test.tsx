@@ -64,6 +64,164 @@ describe("会議検出のポップアップ", () => {
     expect(openSettings).toHaveBeenCalled();
   });
 
+  it("[POP-014][REC-025] 会議が終わったかを聞き、「止める」で止めて保存する。止めるまでの残り時間を表示する", async () => {
+    const user = userEvent.setup();
+    const backend = await meetingBackend();
+    const note = backend.simulateMeetingNote("対面の打ち合わせ");
+    await backend.startRecording(note.id);
+    const deadline = Date.now() + 118_000;
+    backend.setPopup({ kind: "confirmEnd", app: "Kiroscribe", noteId: note.id, title: note.title, deadline });
+    renderWith(backend, <MeetingPopup />);
+    const popup = await screen.findByRole("alertdialog", { name: "会議の自動録音" });
+    expect(within(popup).getByText("会議は終わりましたか？")).toBeInTheDocument();
+    expect(within(popup).getByText("Kiroscribe")).toBeInTheDocument();
+    expect(within(popup).getByRole("timer")).toHaveTextContent(/^1:5[78]$/);
+    expect(within(popup).getByText(/後に止めて保存します/)).toBeInTheDocument();
+
+    await user.click(within(popup).getByRole("button", { name: "止める" }));
+    expect(await within(popup).findByText(/録音を停止しました。「対面の打ち合わせ」に保存しています。/)).toBeInTheDocument();
+    expect(backend.recordingCheckAnswers).toEqual([{ noteId: note.id, deadline, keep: false }]);
+    expect((await backend.getRecordingStatus()).state).toBe("idle");
+  });
+
+  it("[POP-014][REC-025] 「続ける」と答えたら、録音を止めない", async () => {
+    const user = userEvent.setup();
+    const backend = await meetingBackend();
+    const note = backend.simulateMeetingNote("Zoom 11/20 10:00");
+    await backend.startRecording(note.id);
+    const deadline = Date.now() + 120_000;
+    backend.setPopup({ kind: "confirmEnd", app: "Zoom", noteId: note.id, title: note.title, deadline });
+    renderWith(backend, <MeetingPopup />);
+    await user.click(await screen.findByRole("button", { name: "続ける" }));
+    expect(backend.recordingCheckAnswers).toEqual([{ noteId: note.id, deadline, keep: true }]);
+    expect((await backend.getRecordingStatus()).state).toBe("recording");
+    // 自動で始めた録音なので、録音中の表示に戻る
+    expect(await screen.findByText(/自動で録音・文字起こしを始めました/)).toBeInTheDocument();
+    expect(await backend.getPopupState()).toEqual({ kind: "recording", app: "Zoom", noteId: note.id, title: note.title });
+  });
+
+  it("[POP-014] 確認を出している録音をほかで止めたら、停止の表示にする（確認の操作は残さない）", async () => {
+    const backend = await meetingBackend();
+    const note = backend.simulateMeetingNote("確認中に止める");
+    await backend.startRecording(note.id);
+    backend.setPopup({ kind: "confirmEnd", app: "Kiroscribe", noteId: note.id, title: note.title, deadline: Date.now() + 60_000 });
+    renderWith(backend, <MeetingPopup />);
+    const popup = await screen.findByRole("alertdialog", { name: "会議の自動録音" });
+    expect(await within(popup).findByText("会議は終わりましたか？")).toBeInTheDocument();
+
+    // メインウィンドウの「停止」（ポップアップの外から録音を止める）
+    await act(async () => {
+      await backend.stopRecording();
+    });
+    expect(
+      await within(popup).findByText("録音を停止しました。「確認中に止める」に保存しています。"),
+    ).toBeInTheDocument();
+    expect(within(popup).queryByRole("button", { name: "続ける" })).not.toBeInTheDocument();
+  });
+
+  it("[POP-014] 確認に「止める」と答えても、保存が終わるまでは停止の表示にしない", async () => {
+    const user = userEvent.setup();
+    const backend = await meetingBackend();
+    const note = backend.simulateMeetingNote("保存を待つ");
+    await backend.startRecording(note.id);
+    backend.setPopup({ kind: "confirmEnd", app: "Kiroscribe", noteId: note.id, title: note.title, deadline: Date.now() + 60_000 });
+    let finish!: () => void;
+    const saved = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const answer = backend.answerRecordingCheck.bind(backend);
+    vi.spyOn(backend, "answerRecordingCheck").mockImplementation(async (...args) => {
+      await saved;
+      return answer(...args);
+    });
+    renderWith(backend, <MeetingPopup />);
+    const popup = await screen.findByRole("alertdialog", { name: "会議の自動録音" });
+
+    await user.click(await within(popup).findByRole("button", { name: "止める" }));
+    expect(await within(popup).findByText("録音を停止しました。文字起こしを仕上げています…")).toBeInTheDocument();
+    expect(within(popup).queryByText(/に保存しています/)).not.toBeInTheDocument();
+
+    await act(async () => finish());
+    expect(await within(popup).findByText("録音を停止しました。「保存を待つ」に保存しています。")).toBeInTheDocument();
+  });
+
+  it("[POP-015] 「止める」の答えが届く前に答えがなく止まったら、その知らせを遅れた答えで上書きしない", async () => {
+    const user = userEvent.setup();
+    const backend = await meetingBackend();
+    const note = backend.simulateMeetingNote("入れ違い");
+    await backend.startRecording(note.id);
+    backend.setPopup({ kind: "confirmEnd", app: "Kiroscribe", noteId: note.id, title: note.title, deadline: Date.now() + 1_000 });
+    let finish!: () => void;
+    const late = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    vi.spyOn(backend, "answerRecordingCheck").mockImplementation(async () => {
+      await late;
+    });
+    renderWith(backend, <MeetingPopup />);
+    const popup = await screen.findByRole("alertdialog", { name: "会議の自動録音" });
+
+    await user.click(await within(popup).findByRole("button", { name: "止める" }));
+    // 本体が、答えを待つ時間が過ぎたので止めた
+    act(() => backend.setPopup({ kind: "finishing", app: "Kiroscribe", noteId: note.id, title: note.title }));
+    await act(async () => {
+      await backend.stopRecording();
+    });
+    expect(await within(popup).findByText("会議が終わりました。文字起こしを仕上げています…")).toBeInTheDocument();
+    act(() => backend.setPopup({ kind: "stoppedUnanswered", app: "Kiroscribe", noteId: note.id, title: note.title }));
+    await act(async () => finish());
+
+    expect(
+      await within(popup).findByText("答えがなかったため、録音を停止しました。「入れ違い」に保存しています。"),
+    ).toBeInTheDocument();
+    expect(within(popup).queryByText(/^録音を停止しました。/)).not.toBeInTheDocument();
+  });
+
+  it("[POP-015] タイトルが空白だけのノートは、「無題のノート」として知らせる", async () => {
+    const backend = await meetingBackend();
+    backend.setPopup({ kind: "stoppedUnanswered", app: "Kiroscribe", noteId: "n1", title: "  " });
+    renderWith(backend, <MeetingPopup />);
+    expect(
+      await screen.findByText("答えがなかったため、録音を停止しました。「無題のノート」に保存しています。"),
+    ).toBeInTheDocument();
+  });
+
+  it("[POP-014] もう出していない確認への答えは、録音に触れない", async () => {
+    const backend = await meetingBackend();
+    const note = backend.simulateMeetingNote("古い確認");
+    await backend.startRecording(note.id);
+    const deadline = Date.now() + 60_000;
+    backend.setPopup({ kind: "confirmEnd", app: "Kiroscribe", noteId: note.id, title: note.title, deadline });
+    await backend.answerRecordingCheck(note.id, deadline - 300_000, false);
+    expect((await backend.getRecordingStatus()).state).toBe("recording");
+    expect((await backend.getPopupState())?.kind).toBe("confirmEnd");
+  });
+
+  it("[POP-015] 答えがなく止めたことを、自動では閉じずに表示し、ノートを開ける", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const backend = await meetingBackend();
+      backend.setPopup({ kind: "stoppedUnanswered", app: "Kiroscribe", noteId: "n1", title: "週次の定例" });
+      const openNote = vi.spyOn(backend, "openNoteFromPopup");
+      const close = vi.spyOn(backend, "closePopup");
+      renderWith(backend, <MeetingPopup />);
+      expect(
+        await screen.findByText("答えがなかったため、録音を停止しました。「週次の定例」に保存しています。"),
+      ).toBeInTheDocument();
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(close).not.toHaveBeenCalled();
+      await user.click(screen.getByRole("button", { name: "ノートを開く" }));
+      expect(openNote).toHaveBeenCalledWith("n1", false);
+      await user.click(screen.getByRole("button", { name: "議事録を作成" }));
+      expect(openNote).toHaveBeenCalledWith("n1", true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("[POP-010] 閉じても録音は止めない", async () => {
     const user = userEvent.setup();
     const backend = await meetingBackend();

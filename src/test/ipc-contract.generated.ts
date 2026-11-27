@@ -22,6 +22,10 @@ type Returned<K extends Method> = Backend[K] extends (...args: never[]) => Promi
 type Emitted<K extends Method> = Backend[K] extends (cb: (payload: infer T) => void) => unknown ? T : never;
 
 export const called = {
+  answerRecordingCheck: [
+    ["…",0,true],
+    ["…",0,false],
+  ] satisfies Called<"answerRecordingCheck">[],
   cancelAi: [
     ["…","enhance"],
   ] satisfies Called<"cancelAi">[],
@@ -131,6 +135,9 @@ export const called = {
 };
 
 export const returned = {
+  answerRecordingCheck: [
+    null,
+  ] satisfies Returned<"answerRecordingCheck">[],
   cancelAi: [
     null,
   ] satisfies Returned<"cancelAi">[],
@@ -172,6 +179,8 @@ export const returned = {
     {"app":"…","kind":"error","message":"…"},
     {"app":"…","kind":"recording","noteId":"…","title":"…"},
     {"app":"…","kind":"stopped","noteId":"…","title":"…"},
+    {"app":"…","deadline":0,"kind":"confirmEnd","noteId":"…","title":"…"},
+    {"app":"…","kind":"stoppedUnanswered","noteId":"…","title":"…"},
   ] satisfies Returned<"getPopupState">[],
   getRecordingStatus: [
     {"elapsedMs":0,"noteId":null,"runningSince":null,"sources":[],"state":"idle"},
@@ -264,6 +273,8 @@ export const emitted = {
     {"app":"…","kind":"recording","noteId":"…","title":"…"},
     {"app":"…","kind":"finishing","noteId":"…","title":"…"},
     {"app":"…","kind":"stopped","noteId":"…","title":"…"},
+    {"app":"…","deadline":0,"kind":"confirmEnd","noteId":"…","title":"…"},
+    {"app":"…","kind":"stoppedUnanswered","noteId":"…","title":"…"},
   ] satisfies Emitted<"onPopupUpdate">[],
   onRecordingError: [
     {"message":"…","noteId":"…"},

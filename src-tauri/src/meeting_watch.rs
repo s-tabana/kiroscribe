@@ -33,6 +33,13 @@ pub struct MeetingState {
     record: Mutex<MeetingRecorder>,
 }
 
+impl MeetingState {
+    /// いま続いている会議（開始を確定してから、終了を確定するまで）。
+    pub fn current_meeting(&self) -> Option<MeetingApp> {
+        *self.current.lock().unwrap()
+    }
+}
+
 /// 順に処理すること。
 enum Job {
     /// 会議の開始・終了が確定した
