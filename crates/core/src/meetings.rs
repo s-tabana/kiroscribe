@@ -1,7 +1,12 @@
 //! 会議の自動検出。
 //!
-//! 「どのアプリがマイクを使っているか」を手がかりにする。Windows はタスクバーのマイク表示のために、
-//! アプリごとのマイク使用状況をレジストリ（CapabilityAccessManager）に記録しているので、それを数秒ごとに読む。
+//! 「どのアプリがマイクを使っているか」を手がかりにし、数秒ごとに調べる。
+//! - 第一の手がかりは、Windows のオーディオのセッション（[`crate::mic_sessions`]）。録音のデバイスごとの、
+//!   いま録音しているプロセスが分かる
+//! - オーディオのセッションの一覧を取れないときだけ、Windows がアプリごとのマイクの使用状況を記録している
+//!   レジストリ（CapabilityAccessManager の ConsentStore。[`crate::mic_store`]）を読む
+//!
+//! マイクを使っているアプリから、会議を次のように見分ける。
 //! - Slack（ハドル）・Zoom・Teams・Discord のデスクトップ版は、マイクを使い始めたら会議中とみなす
 //! - ブラウザがマイクを使っているときは、ウィンドウタイトル（表示中のタブ）が Google Meet などなら会議中とみなす
 //!
@@ -529,18 +534,62 @@ impl MeetingTracker {
     }
 }
 
+/// マイクを使っているアプリを読み取った手がかり。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MicSource {
+    /// Windows のオーディオのセッション（[`crate::mic_sessions`]）
+    AudioSessions,
+    /// Windows のマイクの使用状況の記録（ConsentStore。[`crate::mic_store`]）
+    ConsentStore,
+}
+
+/// マイクを使っているアプリの手がかりの、生の値（デバッグ用のログに書く）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MicSources {
+    pub sessions: crate::mic_sessions::MicSessions,
+    pub store: crate::mic_store::MicStore,
+}
+
+impl MicSources {
+    /// 判定に使う手がかり: オーディオのセッションの一覧を取れたらそれを使い、取れないときだけ ConsentStore を使う。
+    pub fn source(&self) -> MicSource {
+        if self.sessions.available {
+            MicSource::AudioSessions
+        } else {
+            MicSource::ConsentStore
+        }
+    }
+
+    /// 判定に使う手がかりから読んだ、マイクを使ったアプリ。
+    pub fn mic_users(&self) -> Vec<MicUser> {
+        match self.source() {
+            MicSource::AudioSessions => crate::mic_sessions::mic_users(&self.sessions),
+            MicSource::ConsentStore => self
+                .store
+                .entries
+                .iter()
+                .map(|entry| MicUser {
+                    id: entry.id.clone(),
+                    in_use: entry.in_use(),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// 現在のマイク使用状況とウィンドウを調べる。Windows 以外では何も検出しない。
 pub fn observe() -> Observation {
     observe_detailed().0
 }
 
-/// 現在のマイク使用状況とウィンドウを調べ、マイクの使用状況の記録の生の値（デバッグ用のログに書く）も返す。
-/// Windows 以外では、何も検出せず、記録もない（`None`）。
-pub fn observe_detailed() -> (Observation, Option<crate::mic_store::MicStore>) {
+/// 現在のマイク使用状況とウィンドウを調べ、手がかりの生の値（デバッグ用のログに書く）も返す。
+/// Windows 以外では、何も検出せず、手がかりもない（`None`）。
+pub fn observe_detailed() -> (Observation, Option<MicSources>) {
     #[cfg(windows)]
     {
-        let (observation, store) = windows_observer::observe_detailed();
-        (observation, Some(store))
+        let (observation, sources) = windows_observer::observe_detailed();
+        (observation, Some(sources))
     }
     #[cfg(not(windows))]
     {
@@ -555,7 +604,7 @@ pub mod windows_observer {
     use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
 
-    use super::{exe_name, MicUser, Observation, WindowInfo};
+    use super::{exe_name, MicSources, MicUser, Observation, WindowInfo};
     use crate::mic_store::{MicEntry, MicStore};
 
     pub const CONSENT_STORE: &str =
@@ -678,24 +727,22 @@ pub mod windows_observer {
         observe_detailed().0
     }
 
-    pub fn observe_detailed() -> (Observation, MicStore) {
+    /// オーディオのセッションと ConsentStore の両方を読み（ConsentStore はデバッグ用のログのため）、
+    /// 判定には [`MicSources::mic_users`] で選んだ手がかりを使う。
+    pub fn observe_detailed() -> (Observation, MicSources) {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let store = read_mic_store(&hkcu, CONSENT_STORE);
-        let mic_users: Vec<MicUser> = store
-            .entries
-            .iter()
-            .map(|entry| MicUser {
-                id: entry.id.clone(),
-                in_use: entry.in_use(),
-            })
-            .collect();
+        let sources = MicSources {
+            sessions: crate::mic_sessions::read(),
+            store: read_mic_store(&hkcu, CONSENT_STORE),
+        };
+        let mic_users = sources.mic_users();
         // ウィンドウを列挙するのは、ブラウザがマイクを使っているときだけ
         let windows = if mic_users.iter().any(|u| u.in_use) {
             list_windows()
         } else {
             Vec::new()
         };
-        (Observation { mic_users, windows }, store)
+        (Observation { mic_users, windows }, sources)
     }
 
     #[cfg(test)]
@@ -1040,6 +1087,54 @@ mod tests {
         for forbidden in ["reqwest", "crate::http", "crate::audio", "crate::transcribe", "crate::claude", "BitBlt", "PrintWindow"] {
             assert!(!code.contains(forbidden), "会議の検出が {forbidden} を使っている");
         }
+    }
+
+    /// マイクを使っているアプリは、オーディオのセッションから読む。ConsentStore が古いまま（使用中を書かない）でも、
+    /// セッションが Active なら会議とみなし、ConsentStore に残った「使用中」は判定に使わない。
+    /// オーディオのセッションの一覧を取れないときだけ、ConsentStore から読む。
+    // [MTG-020]
+    #[test]
+    fn audio_sessions_come_first_and_consent_store_is_the_fallback() {
+        use crate::mic_sessions::{MicSession, MicSessions, SessionState};
+        use crate::mic_store::{MicEntry, MicStore};
+
+        let huddle = MicSessions {
+            available: true,
+            endpoints: 1,
+            sessions: vec![MicSession {
+                pid: 4242,
+                exe_path: r"C:\Program Files\WindowsApps\91750D7E.Slack_4.47.69.0_x64__8she8kybcnzg4\app\Slack.exe".into(),
+                package: Some("91750D7E.Slack_8she8kybcnzg4".into()),
+                state: SessionState::Active,
+            }],
+            error: None,
+        };
+        // この PC の Windows は、ConsentStore にマイクの使用を書いていない（どのアプリも使用中にならない）
+        let stale = MicStore {
+            opened: true,
+            entries: vec![MicEntry {
+                id: "91750D7E.Slack_8she8kybcnzg4".into(),
+                last_start: 134_370_000_000_000_000,
+                last_stop: Some(134_370_000_100_000_000),
+            }],
+        };
+        let sources = MicSources { sessions: huddle, store: stale.clone() };
+        assert_eq!(sources.source(), MicSource::AudioSessions);
+        let observation = Observation { mic_users: sources.mic_users(), windows: vec![] };
+        assert_eq!(app(detect(&observation, None)), Some(MeetingApp::SlackHuddle));
+
+        // セッションがないなら、ConsentStore に「使用中」が残っていても会議とみなさない
+        let stuck = MicStore {
+            opened: true,
+            entries: vec![MicEntry { id: r"C:\Zoom\bin\Zoom.exe".into(), last_start: 134_370_000_000_000_000, last_stop: Some(0) }],
+        };
+        let idle = MicSources { sessions: MicSessions { available: true, ..Default::default() }, store: stuck.clone() };
+        assert_eq!(detect(&Observation { mic_users: idle.mic_users(), windows: vec![] }, None), None);
+
+        // 一覧を取れないときは、ConsentStore から読む
+        let fallback = MicSources { sessions: MicSessions { error: Some("0x80040154".into()), ..Default::default() }, store: stuck };
+        assert_eq!(fallback.source(), MicSource::ConsentStore);
+        assert_eq!(app(detect(&Observation { mic_users: fallback.mic_users(), windows: vec![] }, None)), Some(MeetingApp::Zoom));
     }
 
     // [MTG-001]

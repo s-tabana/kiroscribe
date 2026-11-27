@@ -6,9 +6,9 @@ use std::time::Duration;
 use chrono::Local;
 use kiroscribe_core::meeting_record::{MeetingRecord, MeetingRecorder};
 use kiroscribe_core::meetings::{
-    browser_titles, diagnose, observe_detailed, MeetingApp, MeetingEvent, MeetingTracker, Observation,
+    browser_titles, diagnose, observe_detailed, MeetingApp, MeetingEvent, MeetingTracker, MicSources, Observation,
 };
-use kiroscribe_core::mic_store::{self, MicStore};
+use kiroscribe_core::{mic_sessions, mic_store};
 use kiroscribe_core::notes::{Note, NotePatch};
 use kiroscribe_core::secrets::{require_api_key, Provider};
 use kiroscribe_core::settings::Settings;
@@ -109,7 +109,7 @@ pub fn spawn(app: AppHandle) {
                     Some((detected, continuing)) => tracker.tick(detected, continuing, now_ms()),
                     None => {
                         let now = now_ms();
-                        let (observation, store) = observe_detailed();
+                        let (observation, sources) = observe_detailed();
                         let event = tracker.observe(&observation, own_exe.as_deref(), now);
                         app.state::<MeetingState>()
                             .record
@@ -118,7 +118,7 @@ pub fn spawn(app: AppHandle) {
                             .record(now, &observation, event);
                         let check = Check {
                             observation: &observation,
-                            store: store.as_ref(),
+                            sources: sources.as_ref(),
                             own_exe: own_exe.as_deref(),
                             tracker: &tracker,
                             verbose: crate::debug::verbose(&app),
@@ -151,8 +151,8 @@ const CHECK_HEARTBEAT_VERBOSE_MS: i64 = 15_000;
 /// 1 回分の判定の材料。
 pub(crate) struct Check<'a> {
     pub observation: &'a Observation,
-    /// マイクの使用状況の記録の生の値（Windows 以外では `None`）
-    pub store: Option<&'a MicStore>,
+    /// マイクを使っているアプリの手がかり（オーディオのセッションと ConsentStore）の生の値（Windows 以外では `None`）
+    pub sources: Option<&'a MicSources>,
     pub own_exe: Option<&'a str>,
     pub tracker: &'a MeetingTracker,
     pub verbose: bool,
@@ -160,6 +160,7 @@ pub(crate) struct Check<'a> {
 
 /// 会議の検出の判定の様子を、ログに書く形にする。なぜ録音を始めた・始めなかったかが後から分かるように、
 /// マイクを使っているアプリの名前、見たブラウザのウィンドウの数、判定とその理由、開始・終了の確定の段階、
+/// 判定に使った手がかり、オーディオのセッションの一覧（実行ファイルの名前・パッケージファミリー名・状態）、
 /// マイクの使用状況の記録（開けたか、会議アプリに見える記録ごとの Stop の値・名前の分類・置き場所の区分）を入れる。
 /// ウィンドウのタイトル（メールの件名なども入りうる）は、「詳しい記録」のときだけ入れる。
 /// `now` を渡すと、調べるたびに変わる値（Stop からの経過秒、開始の確定を待ち始めてからのミリ秒）も入れる。
@@ -174,7 +175,9 @@ pub(crate) fn check_fields(check: &Check<'_>, now: Option<i64>) -> Value {
         "app": app_value(diagnosis.app),
         "phase": phase.name(),
         "phaseApp": app_value(phase.app()),
-        "micStore": check.store.map(|store| mic_store::report(store, now)),
+        "micSource": check.sources.map(MicSources::source),
+        "micSessions": check.sources.map(|sources| mic_sessions::report(&sources.sessions)),
+        "micStore": check.sources.map(|sources| mic_store::report(&sources.store, now)),
     });
     if let (Some(now), Some(since)) = (now, check.tracker.confirming_since()) {
         fields["confirmingMs"] = json!(now - since);
@@ -414,6 +417,8 @@ pub fn export_record(app: &AppHandle) -> MeetingRecord {
 #[cfg(test)]
 mod tests {
     use kiroscribe_core::meetings::{MicUser, WindowInfo};
+    use kiroscribe_core::mic_sessions::{MicSession, MicSessions, SessionState};
+    use kiroscribe_core::mic_store::MicStore;
 
     use super::*;
 
@@ -441,7 +446,29 @@ mod tests {
         }
     }
 
+    fn sources_with(store: MicStore) -> MicSources {
+        MicSources {
+            sessions: MicSessions {
+                available: true,
+                endpoints: 1,
+                sessions: vec![MicSession {
+                    pid: 1200,
+                    exe_path: r"C:\Users\山田 太郎\AppData\Local\Google\Chrome\Application\chrome.exe".into(),
+                    package: None,
+                    state: SessionState::Active,
+                }],
+                error: None,
+            },
+            store,
+        }
+    }
+
+    fn sources() -> MicSources {
+        sources_with(store())
+    }
+
     /// ログに書く判定の様子: マイクを使っているアプリの名前、見たウィンドウの数、判定と理由、段階、
+    /// 判定に使った手がかり、オーディオのセッションの一覧（実行ファイルの名前・パッケージファミリー名・状態）、
     /// マイクの使用状況の記録（開けたか、会議アプリに見える記録の Stop の値と経過秒、名前の分類、置き場所の区分）、
     /// 開始の確定を待ち始めてからのミリ秒。ウィンドウのタイトルは、「詳しい記録」のときだけ入れる。
     /// 利用者の名前を含むフルパスは入れない。
@@ -449,11 +476,11 @@ mod tests {
     #[test]
     fn check_fields_tell_why_and_include_titles_only_when_verbose() {
         let observation = observation();
-        let store = store();
+        let sources = sources();
         let tracker = MeetingTracker::default();
         let check = |verbose| Check {
             observation: &observation,
-            store: Some(&store),
+            sources: Some(&sources),
             own_exe: None,
             tracker: &tracker,
             verbose,
@@ -465,6 +492,13 @@ mod tests {
         assert_eq!(normal["why"], "ブラウザがマイクを使っているが、そのブラウザに会議のタブが見えない");
         assert_eq!(normal["app"], Value::Null);
         assert_eq!(normal["phase"], "idle");
+        assert_eq!(normal["micSource"], "audioSessions");
+        assert_eq!(normal["micSessions"]["available"], true);
+        assert_eq!(normal["micSessions"]["endpoints"], 1);
+        assert_eq!(
+            normal["micSessions"]["sessions"],
+            json!([{ "exe": "chrome.exe", "package": null, "state": "active", "app": null, "browser": true }])
+        );
         assert_eq!(normal["micStore"]["opened"], true);
         let slack = &normal["micStore"]["entries"][0];
         assert_eq!(slack["name"], "slack.exe");
@@ -493,10 +527,11 @@ mod tests {
         };
         let mut tracker = MeetingTracker::default();
         tracker.observe(&meeting, None, 10_000);
-        let check = Check { observation: &meeting, store: None, own_exe: None, tracker: &tracker, verbose: false };
+        let check = Check { observation: &meeting, sources: None, own_exe: None, tracker: &tracker, verbose: false };
         let fields = check_fields(&check, Some(12_000));
         assert_eq!((&fields["phase"], &fields["confirmingMs"]), (&json!("confirming"), &json!(2_000)));
         assert_eq!(fields["micStore"], Value::Null, "Windows 以外では、記録はない");
+        assert_eq!((&fields["micSource"], &fields["micSessions"]), (&Value::Null, &Value::Null));
     }
 
     /// 判定の様子は、変わったときと、変わらなくても 60 秒（詳しい記録のときは 15 秒）ごとに書く。
@@ -505,9 +540,9 @@ mod tests {
     #[test]
     fn check_log_writes_on_change_and_at_a_heartbeat() {
         let observation = observation();
-        let store = store();
+        let sources = sources();
         let tracker = MeetingTracker::default();
-        let check = |verbose| Check { observation: &observation, store: Some(&store), own_exe: None, tracker: &tracker, verbose };
+        let check = |verbose| Check { observation: &observation, sources: Some(&sources), own_exe: None, tracker: &tracker, verbose };
         let mut log = CheckLog::default();
         let first = log.next(&check(false), 1_000_000).expect("最初は書く");
         assert_eq!(first["changed"], true);
@@ -517,8 +552,14 @@ mod tests {
         assert_eq!(beat["changed"], false);
 
         let changed = Observation::default();
-        let check2 = Check { observation: &changed, store: Some(&store), own_exe: None, tracker: &tracker, verbose: false };
+        let check2 = Check { observation: &changed, sources: Some(&sources), own_exe: None, tracker: &tracker, verbose: false };
         assert_eq!(log.next(&check2, 1_062_000).unwrap()["changed"], true, "変わったらすぐ書く");
+
+        // オーディオのセッションの状態が変わったときも、すぐ書く
+        let mut ended = sources.clone();
+        ended.sessions.sessions[0].state = SessionState::Inactive;
+        let check3 = Check { observation: &changed, sources: Some(&ended), own_exe: None, tracker: &tracker, verbose: false };
+        assert_eq!(log.next(&check3, 1_064_000).unwrap()["changed"], true, "セッションの状態が変わったらすぐ書く");
 
         let mut verbose_log = CheckLog::default();
         verbose_log.next(&check(true), 0);
@@ -544,7 +585,7 @@ mod tests {
             .collect();
         // 会議アプリに見えない記録も、件数には入る
         entries.push(MicEntry { id: r"C:\Program Files\Recorder\rec.exe".into(), last_start: 1, last_stop: Some(2) });
-        let store = MicStore { opened: true, entries };
+        let sources = sources_with(MicStore { opened: true, entries });
         let observation = Observation {
             mic_users: vec![MicUser { id: r"C:\x\chrome.exe".into(), in_use: true }],
             windows: (0..12)
@@ -555,7 +596,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log = DebugLog::open(dir.path()).unwrap();
         for verbose in [false, true] {
-            let check = Check { observation: &observation, store: Some(&store), own_exe: None, tracker: &tracker, verbose };
+            let check = Check { observation: &observation, sources: Some(&sources), own_exe: None, tracker: &tracker, verbose };
             let fields = check_fields(&check, Some(kiroscribe_core::mic_store::filetime_to_unix_ms(134_402_160_000_000_000)));
             assert!(fields["micStore"]["entries"].as_array().unwrap().len() >= 10, "{fields}");
             log.write(Level::Info, Source::App, "meeting.check", fields);
@@ -569,6 +610,8 @@ mod tests {
             assert_eq!(fields["verdict"], "noMeetingTab", "{line}");
             assert_eq!(fields["why"], "ブラウザがマイクを使っているが、そのブラウザに会議のタブが見えない");
             assert_eq!(fields["phase"], "idle");
+            assert_eq!(fields["micSource"], "audioSessions");
+            assert_eq!(fields["micSessions"]["available"], true);
             assert_eq!(fields["micStore"]["opened"], true);
             assert_eq!(fields["micStore"]["total"], 13);
         }

@@ -112,7 +112,8 @@ WebDriver が届かないところは、次の方法で確かめます。どれ�
 
 - **OS の画面（UI オートメーション）**: 起動に失敗したときのダイアログ、タスクトレイのアイコンと右クリックのメニュー、ポップアップのドラッグは、Windows の UI オートメーションで画面の部品を読み、本物のマウスの操作で押します（`e2e/lib/uia.mjs`。Windows PowerShell 5.1 から呼ぶ）。
 - **本物の音声デバイス**: `e2e.yml` の「本物の音声デバイス」のジョブは、仮想のオーディオケーブル（VB-CABLE）を入れ、Windows のプライバシー設定でマイクを許可してから、`KIROSCRIBE_E2E_REAL_AUDIO=1` で `e2e/specs/14-real-audio.test.mjs`・`15-real-meeting.test.mjs` を走らせます。模擬の音声を切って（`config.json` の `audio` を `null`）、既定の出力に鳴らした音が、マイク（自分）と PC の音声（相手）として WASAPI から届くことを確かめます。デバイスを無効にして、抜いたときの知らせも確かめます。
-- **会議の検出**: `config.json` の `realMeetingDetection` で模擬をやめ、マイクを開いたまま待つだけのプログラム（`cargo build -p kiroscribe-core --example hold_mic`）を `Zoom.exe` などの名前に写して動かしたり、Edge で「Meet - …」の題のページにマイクを使わせたりして、Windows の記録から検出できることを確かめます。
+- **会議の検出**: `config.json` の `realMeetingDetection` で模擬をやめ、マイクを開いたまま待つだけのプログラム（`cargo build -p kiroscribe-core --example hold_mic`）を `Zoom.exe` などの名前に写して動かしたり、Edge で「Meet - …」の題のページにマイクを使わせたりして、Windows のオーディオのセッションから検出できることを確かめます。
+- **会議の検出の確認用の道具**: `meeting_probe`（`cargo build -p kiroscribe-core --release --example meeting_probe`）は、製品と同じ部品・間隔（2 秒）・判定で、オーディオのセッションの一覧（実行ファイルの名前・パッケージファミリー名・状態）、ConsentStore の様子、会議と判定したか、開始・終了の確定の段階を表示します。`--once` で 1 回だけ、`--titles` でマイクを使っているブラウザのタブの題も出します。CI の `ci.yml` が Windows でビルドし、`meeting_probe.exe` を成果物として保存するので、配布の前に実機で会議に入って確かめられます。
 - **会議の検出の記録**: 設定の「デバッグ用のログを保存…」で書き出した zip の `meeting-detection.json` に `description` と `expected` を書き足して `crates/core/tests/fixtures/meetings/` に置くと、回帰テストになります（同じフォルダの README.md）。
 
 ### インターネットの先の本物を使うテスト
