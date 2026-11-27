@@ -733,12 +733,12 @@ impl Worker {
         for folder in index.folders().unwrap_or_default() {
             match listed.get(folder.to_string_lossy().as_ref()) {
                 None => unlisted.push(folder),
-                Some(place) => {
-                    let bound = index.binding(&folder).ok().flatten().map(|binding| binding.place);
-                    if bound.is_some() && bound != *place {
-                        unconfirmed.push(folder);
-                    }
-                }
+                // 記録が読めないときも、確かめられないものとして外す
+                Some(place) => match index.binding(&folder) {
+                    Ok(None) => {}
+                    Ok(Some(binding)) if Some(&binding.place) == place.as_ref() => {}
+                    _ => unconfirmed.push(folder),
+                },
             }
         }
         for folder in unlisted {
@@ -753,9 +753,8 @@ impl Worker {
     /// 消せたら true。
     fn erase_folder(&mut self, folder: &Path) -> bool {
         let Some(index) = self.open_index() else { return false };
-        let rows = index.stored_rows(folder).unwrap_or(0);
-        let bound = index.binding(folder).ok().flatten().is_some();
-        if rows == 0 && !bound {
+        // 行も記録もないと確かめられたときだけ、消すものがないとする（読めなければ消しにいく）
+        if matches!(index.stored_rows(folder), Ok(0)) && matches!(index.binding(folder), Ok(None)) {
             self.unverified.remove(folder);
             return true;
         }
