@@ -523,22 +523,26 @@ describe("SettingsDialog: デバッグ用のログの提出", () => {
     const { backend, submit } = setupSubmit();
     const unsubscribe = vi.fn();
     let registered: () => void = () => undefined;
+    let reportOther: () => void = () => undefined;
+    let fail: (error: Error) => void = () => undefined;
     vi.spyOn(backend, "onLogSubmitProgress").mockImplementation(
       (report) => new Promise((resolve) => {
         registered = () => resolve(unsubscribe);
-        submit.mockImplementationOnce(async (requestId) => {
-          report({ requestId: "other", sent: 100, total: 100 });
-          expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+        reportOther = () => report({ requestId: "other", sent: 100, total: 100 });
+        submit.mockImplementationOnce((requestId) => new Promise((_, reject) => {
           report({ requestId, sent: 1, total: 4 });
-          expect(await screen.findByRole("progressbar")).toHaveAttribute("value", "25");
-          throw new Error("模擬サーバーへの送信に失敗しました");
-        });
+          fail = reject;
+        }));
       }),
     );
 
     await user.click(await screen.findByRole("button", { name: "デバッグ用のログを提出…" }));
     expect(submit).not.toHaveBeenCalled();
-    act(() => registered());
+    await act(async () => registered());
+    expect(await screen.findByRole("progressbar")).toHaveAttribute("value", "25");
+    act(() => reportOther());
+    expect(screen.getByRole("progressbar")).toHaveAttribute("value", "25");
+    await act(async () => fail(new Error("模擬サーバーへの送信に失敗しました")));
     expect(await screen.findByText("模擬サーバーへの送信に失敗しました")).toBeInTheDocument();
     expect(submit).toHaveBeenCalledOnce();
     expect(unsubscribe).toHaveBeenCalledOnce();
