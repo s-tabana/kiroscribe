@@ -210,13 +210,19 @@ fn ipc_contract_matches_the_frontend() {
     std::fs::create_dir_all(folder.join("人事")).unwrap();
     std::fs::write(folder.join("経費精算の手順.txt"), "申請は月末まで").unwrap();
     let folder_path = folder.to_string_lossy().to_string();
-    assert_eq!(s.ok("get_search_index_status", json!({}))["state"], "off");
+    // 起動時（相棒がオフ）は、索引を消し終えてから「オフ」になる
+    wait_until("起動時に索引を消し終えた状態", || (s.ok("get_search_index_status", json!({}))["state"] == "off").then_some(()));
     std::fs::write(&answers, "{}").unwrap();
     assert_eq!(s.ok("add_search_folder", json!({})), Value::Null, "ダイアログを取り消したら何も足さない");
     std::fs::write(&answers, json!({ "folderPath": folder_path }).to_string()).unwrap();
+    let since = index_seen();
     let status = s.ok("add_search_folder", json!({}));
     assert_eq!(status["folders"][0]["path"], folder_path.as_str());
     assert_eq!(status["folders"][0]["noContent"], false);
+    // 一覧を変えた知らせ（オフのまま）が届いてから、次の命令の知らせを数える（前の知らせで、次の待ち合わせが通らないように）
+    wait_until("フォルダを足した知らせ", || {
+        index_events(since).iter().any(|status| status["state"] == "off" && status["folders"][0]["path"] == folder_path.as_str()).then_some(())
+    });
     // 相棒をオフにしてから、オンにして保存すると、索引を作る
     let mut companion = settings.clone();
     companion["companion"] = json!(false);

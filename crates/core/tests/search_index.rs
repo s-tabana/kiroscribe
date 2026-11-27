@@ -388,7 +388,7 @@ fn changes_are_reflected_while_other_files_keep_changing() {
 #[test]
 fn a_watched_folder_that_disappears_keeps_its_index() {
     // 見張れないフォルダの見直し（30 分）を待たずに、フォルダそのものを確かめる間隔で、戻ったことに気づく
-    let f = fixture_with(Intervals { poll: Duration::from_secs(3600), root_check: Duration::from_millis(200) });
+    let f = fixture_with(Intervals { poll: Duration::from_secs(3600), root_check: Duration::from_millis(200), ..Intervals::default() });
     write(&f.root.join("a.txt"), "経費");
     f.indexer.enable(vec![folder(&f.root)]);
     wait_ready(&f, 1);
@@ -419,7 +419,7 @@ fn a_watched_folder_that_disappears_keeps_its_index() {
 // [IDX-010]
 #[test]
 fn a_watched_folder_replaced_by_one_of_the_same_name_is_watched_again() {
-    let f = fixture_with(Intervals { poll: Duration::from_secs(3600), root_check: Duration::from_millis(500) });
+    let f = fixture_with(Intervals { poll: Duration::from_secs(3600), root_check: Duration::from_millis(500), ..Intervals::default() });
     write(&f.root.join("a.txt"), "経費");
     f.indexer.enable(vec![folder(&f.root)]);
     wait_ready(&f, 1);
@@ -441,7 +441,7 @@ fn a_watched_folder_replaced_by_one_of_the_same_name_is_watched_again() {
 // [IDX-008]
 #[test]
 fn updated_at_moves_only_when_the_index_changes() {
-    let f = fixture_with(Intervals { poll: Duration::from_secs(3600), root_check: Duration::from_millis(200) });
+    let f = fixture_with(Intervals { poll: Duration::from_secs(3600), root_check: Duration::from_millis(200), ..Intervals::default() });
     write(&f.root.join("a.txt"), "経費");
     f.indexer.enable(vec![folder(&f.root)]);
     wait_ready(&f, 1);
@@ -495,4 +495,145 @@ fn dropping_the_indexer_stops_the_worker() {
     drop(dir);
     std::thread::sleep(Duration::from_millis(300));
     assert!(!path.exists(), "止めたあとに、索引のフォルダを作り直さない");
+}
+
+/// 足したあとで、フォルダそのものがリンクに替わっても、リンクの先（範囲の外）のファイルを索引に入れない。
+/// 見張りの知らせで 1 つずつ反映する経路・すべてを調べ直す経路・作り直しのどれでも入れず、それまでの索引は残す。
+// [IDX-027][IDX-010]
+#[cfg(unix)]
+#[test]
+fn a_folder_replaced_by_a_link_does_not_bring_in_files_outside_it() {
+    // フォルダそのものを確かめる間隔を長くし、見張りの知らせから反映する経路を通す
+    let f = fixture_with(Intervals { poll: Duration::from_secs(3600), root_check: Duration::from_secs(3600), ..Intervals::default() });
+    write(&f.root.join("a.txt"), "経費");
+    f.indexer.enable(vec![folder(&f.root)]);
+    wait_ready(&f, 1);
+
+    // 範囲の外の、無害な一時フォルダ
+    let outside = tempfile::tempdir().unwrap();
+    write(&outside.path().join("leak.txt"), "社外秘");
+    write(&outside.path().join("下").join("deep.txt"), "社外秘");
+    let moved = f.root.parent().unwrap().join("退避");
+    std::fs::rename(&f.root, &moved).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &f.root).unwrap();
+    // 移したフォルダへの書き込みは、見張りから、もとのパス（いまはリンク）の下のファイルの変更として届く
+    write(&moved.join("leak.txt"), "経費");
+    wait_until("見つからない表示", Duration::from_secs(30), || f.indexer.status().folders[0].missing);
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(search(&f, "社外秘").is_empty(), "リンクの先の中身を入れない");
+    assert_eq!(search(&f, "経費"), ["a.txt"], "それまでの索引は残す");
+
+    // 作り直しても、リンクの先は入れない
+    assert!(f.indexer.rebuild().is_some());
+    wait_until("作り直し", Duration::from_secs(20), || {
+        let status = f.indexer.status();
+        status.state == IndexState::Ready && status.folders[0].missing
+    });
+    assert!(search(&f, "社外秘").is_empty());
+}
+
+/// 前回の索引が残ったまま、相棒がオフで起動し、索引のファイルを消すことも、中身を空にすることもできないとき:
+/// 「消している」のままにして、消し直す。消し直せたら、消し終えてから「オフ」を知らせる。
+// [IDX-028]
+#[cfg(unix)]
+#[test]
+fn erasing_is_reported_until_a_retry_erases_the_index() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("共有資料");
+    write(&root.join("a.txt"), &format!("{MARKER} 経費"));
+    let data = dir.path().join("data");
+    let index_path = data.join(INDEX_FILE);
+    // 前回の起動で作った索引
+    {
+        let indexer = Indexer::spawn(index_path.clone(), |_| {});
+        indexer.enable(vec![folder(&root)]);
+        wait_until("前回の索引", Duration::from_secs(20), || {
+            let status = indexer.status();
+            status.state == IndexState::Ready && status.files == 1
+        });
+        assert!(indexer.shutdown_and_wait(Duration::from_secs(5)));
+    }
+    assert!(left_on_disk(&index_path));
+
+    // 索引のファイルとフォルダを、書き込めないようにする（管理者で動かしているときは確かめられない）
+    let files: Vec<PathBuf> = kiroscribe_core::search::store::index_files(&index_path).into_iter().filter(|p| p.exists()).collect();
+    for file in &files {
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let restore = || {
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for file in &files {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+    };
+    if std::fs::write(data.join("probe"), "").is_ok() {
+        restore();
+        eprintln!("書き込みを禁じられない（管理者で動かしている）ため、確かめません");
+        return;
+    }
+
+    // 知らせた状態と、知らせた時点で、索引のファイルがあったか・中身が残っていたか
+    let events: Arc<Mutex<Vec<(IndexState, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let path = index_path.clone();
+    let intervals = Intervals { purge_retry: Duration::from_millis(300), ..Intervals::default() };
+    let indexer = Indexer::spawn_with_intervals(index_path.clone(), Limits::default(), intervals, move |status| {
+        sink.lock().unwrap().push((status.state, path.exists(), left_on_disk(&path)));
+    });
+    // 起動時（相棒がオフ）と同じ順に命令する
+    indexer.set_folders(vec![folder(&root)]);
+    let returned = indexer.disable();
+    assert_eq!(returned.state, IndexState::Erasing, "命令の戻り値");
+    assert_eq!(indexer.status().state, IndexState::Erasing, "状態の読み取り");
+    wait_until("「消している」の知らせ", Duration::from_secs(10), || !events.lock().unwrap().is_empty());
+    // 何度か消し直しても消せないあいだは、「消している」のまま
+    std::thread::sleep(Duration::from_millis(1_500));
+    assert_eq!(indexer.status().state, IndexState::Erasing);
+    assert!(events.lock().unwrap().iter().all(|(state, ..)| *state == IndexState::Erasing), "{:?}", events.lock().unwrap());
+    assert!(left_on_disk(&index_path), "消せないあいだは、中身が残っている（だから「オフ」にしない）");
+
+    // 書き込めるようになったら、消し直して「オフ」にする
+    restore();
+    wait_until("オフ", Duration::from_secs(10), || indexer.status().state == IndexState::Off);
+    let events = events.lock().unwrap().clone();
+    let first_off = events.iter().position(|(state, ..)| *state == IndexState::Off).expect("「オフ」の知らせ");
+    assert!(events[..first_off].iter().all(|(state, ..)| *state == IndexState::Erasing), "{events:?}");
+    for (state, exists, left) in &events[first_off..] {
+        assert_eq!(*state, IndexState::Off, "「オフ」のあとに、ほかの状態を知らせない: {events:?}");
+        assert!(!exists && !left, "「オフ」を知らせた時点で、索引のファイルは消えている: {events:?}");
+    }
+    assert!(!index_path.exists());
+    assert!(indexer.shutdown_and_wait(Duration::from_secs(5)));
+}
+
+/// 中を読めないフォルダ（読み取りの権限を外したなど）のファイルは、消えたとみなさず、索引に残す。
+// [IDX-010]
+#[cfg(unix)]
+#[test]
+fn files_in_a_folder_that_cannot_be_read_are_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    write(&f.root.join("a.txt"), "経費");
+    let locked = f.root.join("人事");
+    write(&locked.join("b.txt"), "経費");
+    f.indexer.enable(vec![folder(&f.root)]);
+    wait_ready(&f, 2);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&locked).is_ok() {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("読み取りを禁じられない（管理者で動かしている）ため、確かめません");
+        return;
+    }
+    // 一覧を変えて、すべて調べ直す
+    let returned = f.indexer.set_folders(vec![folder(&f.root)]);
+    wait_until("調べ直し", Duration::from_secs(20), || {
+        let status = f.indexer.status();
+        status.state == IndexState::Ready && status.revision > returned.revision
+    });
+    let mut found = search(&f, "経費");
+    found.sort();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(found, ["a.txt", "b.txt"], "読めないフォルダのファイルを消さない");
 }

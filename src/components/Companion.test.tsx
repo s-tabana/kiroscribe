@@ -151,6 +151,34 @@ describe("会議の相棒の設定", () => {
     expect(await within(area).findByText("索引に入っています: 5,000 件（11:20 に更新）")).toBeInTheDocument();
   });
 
+  it("[IDX-008] 開いた直後、待ち受けの登録が済むまでに届いた知らせも、登録が済んでから読み直して表示する", async () => {
+    const backend = createMemoryBackend({ settings: { companion: true } });
+    const subscribe = backend.onSearchIndexStatus.bind(backend);
+    let ready = () => undefined as void;
+    vi.spyOn(backend, "onSearchIndexStatus").mockImplementation((cb, onReady) => {
+      let registered = false;
+      const off = subscribe((status) => registered && cb(status));
+      ready = () => {
+        registered = true;
+        onReady?.();
+      };
+      return off;
+    });
+    const before = await backend.getSearchIndexStatus();
+    vi.spyOn(backend, "getSearchIndexStatus").mockResolvedValueOnce({ ...before, state: "building" });
+    render(
+      <BackendContext.Provider value={backend}>
+        <SettingsDialog onClose={() => undefined} />
+      </BackendContext.Provider>,
+    );
+    const area = await section();
+    expect(await within(area).findByText("索引を作っています")).toBeInTheDocument();
+    // 登録が済む前に、作り終えた知らせが届く（受け取れない）
+    backend.setSearchIndexStatus({ state: "ready", files: 3, updatedAt: null });
+    ready();
+    expect(await within(area).findByText("索引に入っています: 3 件")).toBeInTheDocument();
+  });
+
   it("[IDX-008] 索引の状態の文", () => {
     const base = { done: 0, total: 0, files: 0, updatedAt: null, folders: [], revision: 0 };
     expect(indexStatusText({ ...base, state: "building", done: 1234, total: 5000 })).toBe("索引を作っています（1,234 / 5,000 件）");
@@ -158,6 +186,7 @@ describe("会議の相棒の設定", () => {
       "索引に入っています: 5,000 件（9:05 に更新）",
     );
     expect(indexStatusText({ ...base, state: "off" })).toBe("会議の相棒がオフのため、索引は作っていません");
+    expect(indexStatusText({ ...base, state: "erasing" })).toBe("会議の相棒をオフにしたため、索引の中身を消しています");
   });
 
   it("[IDX-011][IDX-028] 「索引を作り直す」は相棒がオンのときだけ押せる。オフにして保存すると、索引を空にする", async () => {

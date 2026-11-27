@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::extract::{extract, Extracted};
-use super::store::{remove_index_files, SearchIndex};
-use super::walk::{inspect_file, reachable_without_links, walk, FileEntry, Limits};
+use super::extract::{extract_within, Extracted};
+use super::store::{remove_index_files, stamp_of_file, SearchIndex};
+use super::walk::{inspect_file, is_online_only, is_plain_dir, reachable_without_links, walk, FileEntry, Limits};
 use crate::time::now_ms;
 
 /// 見張れないフォルダ（ネットワークのドライブなど）を見直す間隔。
@@ -26,8 +26,8 @@ pub const ROOT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 pub const CHANGE_DEBOUNCE: Duration = Duration::from_secs(2);
 /// 変更の知らせが途切れずに届き続けても、最初の知らせからこの時間がたったら反映する。
 pub const MAX_CHANGE_DELAY: Duration = Duration::from_secs(10);
-/// 索引のファイルを消せなかったときに、消し直す間隔。
-const PURGE_RETRY: Duration = Duration::from_secs(60);
+/// 索引のファイルを消せず、中身も空にできなかったときに、消し直す間隔。
+pub const PURGE_RETRY: Duration = Duration::from_secs(60);
 
 /// 見直しの間隔。
 #[derive(Debug, Clone, Copy)]
@@ -36,11 +36,13 @@ pub struct Intervals {
     pub poll: Duration,
     /// 見張っているフォルダそのものがあるかを確かめる間隔
     pub root_check: Duration,
+    /// 索引を消せなかったときに、消し直す間隔
+    pub purge_retry: Duration,
 }
 
 impl Default for Intervals {
     fn default() -> Self {
-        Self { poll: POLL_INTERVAL, root_check: ROOT_CHECK_INTERVAL }
+        Self { poll: POLL_INTERVAL, root_check: ROOT_CHECK_INTERVAL, purge_retry: PURGE_RETRY }
     }
 }
 
@@ -57,8 +59,10 @@ pub struct SearchFolder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum IndexState {
-    /// 相棒がオフで、索引を作っていない
+    /// 相棒がオフで、索引を作っていない（索引の中身を消し終えている）
     Off,
+    /// 相棒をオフにして、索引の中身を消している（消せないときは、消し終えるまで消し直す）
+    Erasing,
     /// 索引を作っている・更新している
     Building,
     /// 索引ができている
@@ -114,8 +118,10 @@ enum Message {
     Command(u64, Command),
     /// フォルダの中で変更があった（見張りの知らせ）
     Changed(PathBuf),
-    /// 見張りが変更を取りこぼした（知らせの失敗・あふれ）。すべてのフォルダを調べ直す
+    /// 見張りが変更を取りこぼした（知らせのあふれ）。すべてのフォルダを調べ直す
     Rescan,
+    /// 見張りに失敗した（見張りが止まったことがある）。見張り直して、すべてのフォルダを調べ直す
+    WatchFailed,
     /// 作業用のスレッドを止める
     Shutdown,
 }
@@ -193,15 +199,34 @@ impl Indexer {
             generation: 0,
         }));
         let order = Arc::new(Mutex::new(()));
-        let worker = Worker {
+        let worker = Worker::new(index_path, limits, intervals, shared.clone(), order.clone(), Arc::new(on_status), tx.clone());
+        let thread = std::thread::Builder::new()
+            .name("search-index".into())
+            .spawn(move || worker.run(rx))
+            .expect("索引の作業用のスレッドを起こせません");
+        Self { inner: Arc::new(Inner { tx, shared, order, thread: Mutex::new(Some(thread)) }) }
+    }
+}
+
+impl Worker {
+    fn new(
+        index_path: PathBuf,
+        limits: Limits,
+        intervals: Intervals,
+        shared: Arc<Mutex<Shared>>,
+        order: Arc<Mutex<()>>,
+        on_status: StatusCallback,
+        tx: Sender<Message>,
+    ) -> Self {
+        Worker {
             index_path,
             limits,
             intervals,
             index: None,
-            shared: shared.clone(),
-            order: order.clone(),
-            on_status: Arc::new(on_status),
-            tx: tx.clone(),
+            shared,
+            order,
+            on_status,
+            tx,
             watcher: None,
             watched: HashMap::new(),
             polled: Vec::new(),
@@ -214,13 +239,12 @@ impl Indexer {
             purge_pending: false,
             last_purge: Instant::now(),
             changes: 0,
-        };
-        let thread = std::thread::Builder::new()
-            .name("search-index".into())
-            .spawn(move || worker.run(rx))
-            .expect("索引の作業用のスレッドを起こせません");
-        Self { inner: Arc::new(Inner { tx, shared, order, thread: Mutex::new(Some(thread)) }) }
+            incomplete: HashSet::new(),
+        }
     }
+}
+
+impl Indexer {
 
     /// 共有の状態を変えて、命令を出す（同じ鍵の中で世代を進める。途中の処理が、古い状態を知らせないように）。
     /// 命令を出した時点の状態を返す。鍵を放したあとに読み直すと、作業用のスレッドの進み方で中身が変わるため。
@@ -243,12 +267,16 @@ impl Indexer {
         });
     }
 
-    /// 止めて、索引の中身を消す。状態が「オフ」になるのは、作業用のスレッドが消し終えてから。
-    pub fn disable(&self) {
+    /// 止めて、索引の中身を消す。消し終えるまでの状態は「消している」で、作業用のスレッドが消し終えてから「オフ」になる。
+    /// 戻り値は、命令を出した直後の状態（「消している」）。
+    pub fn disable(&self) -> IndexStatus {
         self.command(|shared| {
             shared.enabled = false;
+            let status = IndexStatus { state: IndexState::Erasing, done: 0, total: 0, updated_at: None, ..shared.status.clone() };
+            shared.set_status(status);
             Some(Command::Disable)
-        });
+        })
+        .expect("オフにする命令は、必ず出す")
     }
 
     /// 探すフォルダの一覧を変える（足した・外した）。相棒がオンなら、索引に反映する。
@@ -354,6 +382,8 @@ struct Worker {
     last_purge: Instant,
     /// 索引に書いた回数（変わったファイルがあったときだけ、更新した時刻を進める）
     changes: u64,
+    /// 中を読めなかったフォルダがあり、調べ切れていないフォルダ（見直しの間隔で調べ直す）
+    incomplete: HashSet<PathBuf>,
 }
 
 /// ネットワークのドライブ（UNC のパス `\\server\share` か、ネットワークに割り当てたドライブ）か。
@@ -383,7 +413,8 @@ fn is_network_path(path: &Path) -> bool {
 type DirIdentity = (u64, u64);
 
 fn dir_identity(path: &Path) -> Option<DirIdentity> {
-    let meta = std::fs::metadata(path).ok()?;
+    // リンクに替わったときに、リンクの先のフォルダの識別子にならないよう、リンクをたどらない
+    let meta = std::fs::symlink_metadata(path).ok()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -401,20 +432,23 @@ fn dir_identity(path: &Path) -> Option<DirIdentity> {
     }
 }
 
-/// 索引に入れる中身を読む。クラウドにだけあるファイルは、ダウンロードさせないよう読まない。
-fn read_content(file: &FileEntry) -> Extracted {
-    if file.online_only {
-        return Extracted { title: None, body: String::new(), name_only: true };
+/// 索引に入れる中身を読む。クラウドにだけあるファイルは、ダウンロードさせないよう読まない（読む直前にも確かめる）。
+/// 探すフォルダ `root` の中に、リンクをたどらずに届かなくなっていたら None（索引に入れない）。
+fn read_content(root: &Path, file: &FileEntry) -> Option<Extracted> {
+    if file.online_only || is_online_only(&file.path) {
+        return reachable_without_links(root, &file.path).then(Extracted::name_only);
     }
-    extract(&file.path, file.kind)
+    extract_within(root, &file.path, file.kind)
 }
 
 impl Worker {
     fn run(mut self, rx: Receiver<Message>) {
         let mut pending: BTreeSet<PathBuf> = BTreeSet::new();
         let mut pending_since: Option<Instant> = None;
+        let mut watch_failed = false;
         loop {
             let timeout = match pending_since {
+                None if self.purge_pending => self.intervals.root_check.min(self.intervals.poll).min(self.intervals.purge_retry),
                 None => self.intervals.root_check.min(self.intervals.poll),
                 Some(since) => CHANGE_DEBOUNCE.min(MAX_CHANGE_DELAY.saturating_sub(since.elapsed())),
             };
@@ -424,15 +458,23 @@ impl Worker {
                     pending.extend(self.folders().iter().map(|folder| PathBuf::from(&folder.path)));
                     pending_since.get_or_insert_with(Instant::now).elapsed() >= MAX_CHANGE_DELAY
                 }
+                Ok(Message::WatchFailed) => {
+                    // 見張りが止まったことがある（Windows では、見張りに失敗すると自分で見張りを外す）。
+                    // 反映するときに見張り直して、すべて調べ直す（失敗が続いても、見張り直すのは反映ごとに 1 回）
+                    watch_failed = true;
+                    pending.extend(self.folders().iter().map(|folder| PathBuf::from(&folder.path)));
+                    pending_since.get_or_insert_with(Instant::now).elapsed() >= MAX_CHANGE_DELAY
+                }
                 Ok(Message::Changed(path)) => {
                     pending.insert(path);
                     // 知らせが続いても、最初の知らせから MAX_CHANGE_DELAY たったら反映する
                     pending_since.get_or_insert_with(Instant::now).elapsed() >= MAX_CHANGE_DELAY
                 }
                 Ok(Message::Command(generation, command)) => {
-                    // 命令は、どれもフォルダをすべて調べ直すか、索引を消す
+                    // 命令は、どれもフォルダをすべて調べ直して見張り直すか、索引を消す
                     pending.clear();
                     pending_since = None;
+                    watch_failed = false;
                     self.handle(generation, command);
                     false
                 }
@@ -440,13 +482,17 @@ impl Worker {
             };
             if flush {
                 pending_since = None;
+                if std::mem::take(&mut watch_failed) {
+                    self.reset_watcher();
+                }
                 let changed = std::mem::take(&mut pending);
                 self.apply_changes(changed);
             }
-            if self.purge_pending && !self.enabled() && self.last_purge.elapsed() >= PURGE_RETRY {
+            if self.purge_pending && !self.enabled() && self.last_purge.elapsed() >= self.intervals.purge_retry {
                 self.purge();
                 if !self.purge_pending {
                     self.erased = true;
+                    // オンにする命令が先に出ていたら、知らせない（emit が、オンのあいだの「オフ」を捨てる）
                     let generation = self.generation();
                     self.emit(generation, IndexState::Off, (0, 0), true, None);
                 }
@@ -455,9 +501,10 @@ impl Worker {
                 self.last_root_check = Instant::now();
                 self.check_roots();
             }
-            if self.enabled() && !self.polled.is_empty() && self.last_poll.elapsed() >= self.intervals.poll {
+            let poll = !self.polled.is_empty() || !self.incomplete.is_empty();
+            if self.enabled() && poll && self.last_poll.elapsed() >= self.intervals.poll {
                 self.last_poll = Instant::now();
-                let folders: BTreeSet<PathBuf> = self.polled.iter().cloned().collect();
+                let folders: BTreeSet<PathBuf> = self.polled.iter().chain(self.incomplete.iter()).cloned().collect();
                 self.apply_changes(folders);
             }
         }
@@ -465,6 +512,21 @@ impl Worker {
 
     fn enabled(&self) -> bool {
         self.shared.lock().unwrap().enabled
+    }
+
+    /// 相棒がオンなら、いまの世代（オンかと世代を同じ鍵の中で読む。あいだにオフにされても、新しい世代で作業しない）。
+    fn enabled_generation(&self) -> Option<u64> {
+        let shared = self.shared.lock().unwrap();
+        shared.enabled.then_some(shared.generation)
+    }
+
+    /// 見張りを作り直し、すべてのフォルダを見張り直す（見張れないフォルダは、見直す一覧に入れる）。
+    fn reset_watcher(&mut self) {
+        if !self.enabled() {
+            return;
+        }
+        let folders = self.folders();
+        self.watch(&folders);
     }
 
     /// 探すフォルダそのものを確かめる。見張っているフォルダがなくなった・同じ名前で作り直された・
@@ -475,7 +537,8 @@ impl Worker {
             if is_network_path(&root) {
                 continue;
             }
-            let exists = root.is_dir();
+            // フォルダそのものがリンクに替わったときも、見つからないものとして扱う（リンクの先は見ない）
+            let exists = is_plain_dir(&root);
             if self.missing.contains(&root) {
                 if exists {
                     changed.insert(root);
@@ -537,10 +600,15 @@ impl Worker {
             Command::Enable(_) | Command::SetFolders(_) | Command::Rebuild if self.stale(generation) => {}
             // オフのあいだは、索引を作らない。索引を消し終えていれば、一覧を変えた「オフ」を知らせる
             // （消し終えていなければ、あとに続くオフにした命令が、消し終えてから知らせる）
+            // オフのあいだは、索引を作らない。一覧を変えた状態を知らせる（消し終えていなければ「消している」）
             Command::Enable(_) | Command::SetFolders(_) | Command::Rebuild if !self.enabled() => {
-                if self.erased {
-                    self.emit(generation, IndexState::Off, (0, 0), true, None);
+                // 一度もオンとオフの命令を受けていない（前回の起動の索引が残っているかもしれない）ときも、消してから「オフ」にする
+                if !self.erased && !self.purge_pending {
+                    self.purge();
+                    self.erased = !self.purge_pending;
                 }
+                let state = if self.erased { IndexState::Off } else { IndexState::Erasing };
+                self.emit(generation, state, (0, 0), true, None);
             }
             Command::Enable(folders) | Command::SetFolders(folders) => {
                 self.erased = false;
@@ -558,9 +626,13 @@ impl Worker {
                 self.polled.clear();
                 self.truncated.clear();
                 self.missing.clear();
+                self.incomplete.clear();
                 self.purge();
-                // 消し終えてから「オフ」を知らせる。消せなかったときは、作成と見張りは止めたまま、消し直せたときに知らせる
-                if !self.purge_pending {
+                // 消し終えてから「オフ」を知らせる。消せなかったときは、作成と見張りは止めたまま「消している」を知らせ、
+                // 消し直せたときに「オフ」を知らせる
+                if self.purge_pending {
+                    self.emit(generation, IndexState::Erasing, (0, 0), true, None);
+                } else {
                     self.erased = true;
                     self.emit(generation, IndexState::Off, (0, 0), true, None);
                 }
@@ -609,6 +681,7 @@ impl Worker {
         let listed: HashSet<&str> = folders.iter().map(|f| f.path.as_str()).collect();
         self.truncated.retain(|p| listed.contains(p.to_string_lossy().as_ref()));
         self.missing.retain(|p| listed.contains(p.to_string_lossy().as_ref()));
+        self.incomplete.retain(|p| listed.contains(p.to_string_lossy().as_ref()));
         let Some(index) = self.open_index() else { return };
         for folder in index.folders().unwrap_or_default() {
             if !listed.contains(folder.to_string_lossy().as_ref()) {
@@ -621,6 +694,9 @@ impl Worker {
     fn build(&mut self, generation: u64, all: bool) {
         let folders = self.folders();
         self.emit(generation, IndexState::Building, (0, 0), true, None);
+        // 調べ始める前に見張る（調べ終えたフォルダで、見張り始めるまでに起きた変更も、知らせで反映する）
+        self.watch(&folders);
+        let changes = self.changes;
         let mut done = 0;
         let mut total = 0;
         for folder in &folders {
@@ -635,8 +711,10 @@ impl Worker {
         if self.stale(generation) {
             return;
         }
-        self.watch(&folders);
-        self.emit(generation, IndexState::Ready, (0, 0), true, Some(now_ms()));
+        // 索引が変わったときだけ、更新した時刻を進める（作り直しと、初めて作ったときは、変わらなくても進める）
+        let first = self.shared.lock().unwrap().status.updated_at.is_none();
+        let updated_at = (all || first || self.changes != changes).then(now_ms);
+        self.emit(generation, IndexState::Ready, (0, 0), true, updated_at);
     }
 
     /// 1 つのフォルダを調べて索引に反映する。途中でやめたら false。
@@ -650,6 +728,11 @@ impl Worker {
             }
         };
         self.missing.remove(root);
+        if walked.unreadable.is_empty() {
+            self.incomplete.remove(root);
+        } else {
+            self.incomplete.insert(root.to_path_buf());
+        }
         if walked.truncated {
             self.truncated.insert(root.to_path_buf());
         } else {
@@ -662,7 +745,9 @@ impl Worker {
         let Some(index) = self.index.as_ref() else { return true };
         let known = index.known_files(root).unwrap_or_default();
         let found: HashSet<&PathBuf> = walked.files.iter().map(|f| &f.path).collect();
-        for path in known.keys().filter(|p| !found.contains(p)) {
+        // 中を読めなかったフォルダのファイルは、消えたとみなさない（読めるようになったら調べ直す）
+        let kept = |path: &Path| walked.unreadable.iter().any(|dir| path.starts_with(dir));
+        for path in known.keys().filter(|p| !found.contains(p) && !kept(p)) {
             if self.stale(generation) {
                 return false;
             }
@@ -673,11 +758,19 @@ impl Worker {
             if self.stale(generation) {
                 return false;
             }
-            let unchanged = known.get(&file.path) == Some(&(file.modified, file.size));
+            let unchanged = known.get(&file.path) == Some(&stamp_of_file(file));
             if all || !unchanged {
-                let content = read_content(file);
+                let content = read_content(root, file);
                 if let Some(index) = self.index.as_ref() {
-                    let _ = index.upsert(root, file, &content);
+                    match &content {
+                        Some(content) => {
+                            let _ = index.upsert(root, file, content);
+                        }
+                        // 調べたあとで、フォルダの範囲の外に替わった
+                        None => {
+                            let _ = index.remove_path(&file.path);
+                        }
+                    }
                 }
                 self.changes += 1;
             }
@@ -689,10 +782,10 @@ impl Worker {
 
     /// 見張りの知らせ・見直しで届いたパスを、それを含むフォルダごとに反映する。
     fn apply_changes(&mut self, changed: BTreeSet<PathBuf>) {
-        if changed.is_empty() || !self.enabled() {
+        if changed.is_empty() {
             return;
         }
-        let generation = self.generation();
+        let Some(generation) = self.enabled_generation() else { return };
         let folders = self.folders();
         let mut roots: BTreeSet<PathBuf> = BTreeSet::new();
         for path in &changed {
@@ -705,12 +798,15 @@ impl Worker {
         }
         let (mut done, mut total) = (0, 0);
         let changes = self.changes;
+        // 戻ったフォルダは、調べ始める前に見張る（調べているあいだの変更も、知らせで反映する）
+        self.rewatch();
         for root in roots {
             if self.stale(generation) {
                 return;
             }
-            if !root.is_dir() {
-                // ドライブが外れた・フォルダが移った。索引は残し、戻るまで見直す
+            if !is_plain_dir(&root) {
+                // ドライブが外れた・フォルダが移った・フォルダそのものがリンクに替わった。
+                // 1 つずつのファイルを反映する前に見張りを外し、それまでの索引は残して、戻るまで見直す
                 self.unwatch(&root);
                 self.missing.insert(root.clone());
                 if !self.polled.contains(&root) {
@@ -764,7 +860,7 @@ impl Worker {
                     return true;
                 };
                 let known = index.stamp(&file.path).unwrap_or_default();
-                if known == Some((file.modified, file.size)) {
+                if known == Some(stamp_of_file(&file)) {
                     return true;
                 }
                 if known.is_none() && index.count_folder(root).unwrap_or(0) >= limits.max_files {
@@ -772,15 +868,22 @@ impl Worker {
                     self.truncated.insert(root.to_path_buf());
                     return true;
                 }
-                let content = read_content(&file);
+                let content = read_content(root, &file);
                 if let Some(index) = self.index.as_ref() {
-                    let _ = index.upsert(root, &file, &content);
+                    match &content {
+                        Some(content) => {
+                            let _ = index.upsert(root, &file, content);
+                        }
+                        None => {
+                            let _ = index.remove_path(&file.path);
+                        }
+                    }
                 }
                 self.changes += 1;
                 true
             }
             // 消えた（またはフォルダごと消えた）。ファイルなら行を消し、フォルダならたどり直す
-            Err(_) => match index.contains(path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => match index.contains(path) {
                 Ok(true) => {
                     let _ = index.remove_path(path);
                     self.changes += 1;
@@ -788,6 +891,8 @@ impl Worker {
                 }
                 _ => false,
             },
+            // 調べられない（読み取りの権限がないなど）。消えたとはみなさず、フォルダごと調べ直す
+            Err(_) => false,
         }
     }
 
@@ -813,7 +918,8 @@ impl Worker {
         let Some(watcher) = self.watcher.as_mut() else { return };
         let watched = &mut self.watched;
         self.polled.retain(|root| {
-            if is_network_path(root) || !root.is_dir() {
+            // リンクに替わったフォルダは見張らない（見張りはリンクの先をたどる）
+            if is_network_path(root) || !is_plain_dir(root) {
                 return true;
             }
             let Some(identity) = dir_identity(root) else { return true };
@@ -833,7 +939,13 @@ impl Worker {
             return;
         }
         let folders = self.folders();
-        let enabled = self.enabled();
+        // 「作っている」「できている」はオンのあいだだけ、「消している」「オフ」はオフのあいだだけ知らせる（鍵の中で確かめる）
+        let enabled = matches!(state, IndexState::Building | IndexState::Ready);
+        let current = |shared: &Shared| shared.generation == generation && shared.enabled == enabled;
+        // 古い・合わない状態のために、索引を開かない（オフのあいだに索引のファイルを作らない）
+        if !current(&self.shared.lock().unwrap()) {
+            return;
+        }
         if enabled {
             self.open_index();
         }
@@ -855,7 +967,7 @@ impl Worker {
         let _order = self.order.lock().unwrap();
         let status = {
             let mut shared = self.shared.lock().unwrap();
-            if shared.generation != generation {
+            if !current(&shared) {
                 return;
             }
             // 調べているあいだに「中身を送らない」が変わっていたら、いまの値にする
@@ -867,7 +979,7 @@ impl Worker {
                 })
                 .collect();
             let status = IndexStatus {
-                state: if enabled { state } else { IndexState::Off },
+                state,
                 done: progress.0,
                 total: progress.1,
                 files,
@@ -884,12 +996,13 @@ impl Worker {
     }
 }
 
-/// 見張りの知らせを、作業用のスレッドへの知らせにする。知らせに失敗したとき・取りこぼしがあったとき
-/// （知らせがあふれたなど）・どのパスか分からないときは、すべて調べ直す。
+/// 見張りの知らせを、作業用のスレッドへの知らせにする。取りこぼしがあったとき（知らせがあふれたなど）・
+/// どのパスか分からないときは、すべて調べ直す。見張りに失敗したときは、見張り直してから、すべて調べ直す。
 fn watch_messages(event: notify::Result<notify::Event>) -> Vec<Message> {
     match event {
         Ok(event) if !event.need_rescan() && !event.paths.is_empty() => event.paths.into_iter().map(Message::Changed).collect(),
-        _ => vec![Message::Rescan],
+        Ok(_) => vec![Message::Rescan],
+        Err(_) => vec![Message::WatchFailed],
     }
 }
 
@@ -933,6 +1046,7 @@ mod tests {
             .map(|message| match message {
                 Message::Changed(path) => path.to_string_lossy().to_string(),
                 Message::Rescan => "調べ直す".into(),
+                Message::WatchFailed => "見張り直す".into(),
                 Message::Command(..) | Message::Shutdown => "ほか".into(),
             })
             .collect()
@@ -947,6 +1061,56 @@ mod tests {
         let overflowed = notify::Event::new(EventKind::Other).set_flag(Flag::Rescan);
         assert_eq!(kinds(watch_messages(Ok(overflowed))), ["調べ直す"], "知らせがあふれた");
         assert_eq!(kinds(watch_messages(Ok(notify::Event::new(EventKind::Any)))), ["調べ直す"], "どのパスか分からない");
-        assert_eq!(kinds(watch_messages(Err(notify::Error::generic("失敗")))), ["調べ直す"], "知らせに失敗した");
+        assert_eq!(kinds(watch_messages(Err(notify::Error::generic("失敗")))), ["見張り直す"], "見張りに失敗した");
+    }
+
+    fn worker(shared: Arc<Mutex<Shared>>, seen: Arc<Mutex<Vec<IndexState>>>) -> Worker {
+        let (tx, _rx) = channel();
+        let dir = std::env::temp_dir().join(format!("kiroscribe-indexer-unit-{}", std::process::id())).join(INDEX_FILE_FOR_TEST);
+        let on_status: StatusCallback = Arc::new(move |status: &IndexStatus| seen.lock().unwrap().push(status.state));
+        Worker::new(dir, Limits::default(), Intervals::default(), shared, Arc::new(Mutex::new(())), on_status, tx)
+    }
+
+    const INDEX_FILE_FOR_TEST: &str = "search-index.db";
+
+    fn shared(enabled: bool, generation: u64) -> Arc<Mutex<Shared>> {
+        Arc::new(Mutex::new(Shared {
+            status: IndexStatus { state: IndexState::Erasing, done: 0, total: 0, files: 0, updated_at: None, folders: Vec::new(), revision: 0 },
+            enabled,
+            folders: Vec::new(),
+            generation,
+        }))
+    }
+
+    /// オンかと世代を別々に読むと、あいだにオフにされたとき、新しい世代で消す前の「オフ」を知らせてしまう。
+    /// 知らせる状態は、鍵の中で、いまのオンとオフに合うものだけにする。
+    // [IDX-028]
+    #[test]
+    fn statuses_that_do_not_match_on_or_off_are_not_reported() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        // オフにした命令（世代 5）のあと
+        let state = shared(false, 5);
+        let mut worker = worker(state.clone(), seen.clone());
+        worker.emit(5, IndexState::Ready, (0, 0), true, None);
+        worker.emit(5, IndexState::Building, (0, 0), true, None);
+        assert!(seen.lock().unwrap().is_empty(), "オフのあいだに、作っている・できているを知らせない");
+        assert_eq!(state.lock().unwrap().status.state, IndexState::Erasing, "命令の戻り値・状態の読み取りも「消している」のまま");
+        // 差分の反映は、オフなら何も知らせない（オンかと世代を同じ鍵で読む）
+        worker.apply_changes(BTreeSet::from([PathBuf::from("/なし/a.txt")]));
+        assert!(seen.lock().unwrap().is_empty());
+        worker.emit(5, IndexState::Erasing, (0, 0), true, None);
+        worker.emit(5, IndexState::Off, (0, 0), true, None);
+        assert_eq!(*seen.lock().unwrap(), [IndexState::Erasing, IndexState::Off]);
+
+        // オンにした命令（世代 6）のあとに、消し直しが終わっても「オフ」を知らせない
+        {
+            let mut shared = state.lock().unwrap();
+            shared.enabled = true;
+            shared.generation = 6;
+        }
+        worker.emit(6, IndexState::Off, (0, 0), true, None);
+        worker.emit(6, IndexState::Erasing, (0, 0), true, None);
+        assert_eq!(seen.lock().unwrap().len(), 2, "オンのあいだに、オフ・消しているを知らせない");
+        assert!(!worker.index_path.exists(), "オフのあいだは、索引のファイルを作らない");
     }
 }

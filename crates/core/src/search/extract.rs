@@ -50,20 +50,21 @@ pub struct Extracted {
 }
 
 impl Extracted {
-    fn name_only() -> Self {
+    pub fn name_only() -> Self {
         Self { title: None, body: String::new(), name_only: true }
     }
 }
 
-/// ファイルの中身を取り出す。読めないとき（壊れている・パスワード付き・文字がない）は、名前だけで探す。
-pub fn extract(path: &Path, kind: Kind) -> Extracted {
+/// 探すフォルダ `root` の中のファイルの中身を取り出す。読めないとき（壊れている・パスワード付き・文字がない）は、名前だけで探す。
+/// リンクをたどらないと届かない（フォルダの範囲の外にある）ときは None（中身も名前も索引に入れない）。
+pub fn extract_within(root: &Path, path: &Path, kind: Kind) -> Option<Extracted> {
     if kind == Kind::NameOnly {
-        return Extracted::name_only();
+        return super::walk::reachable_without_links(root, path).then(Extracted::name_only);
     }
-    let Ok(bytes) = std::fs::read(path) else {
-        return Extracted::name_only();
-    };
-    extract_bytes(&bytes, kind)
+    match super::walk::read_within(root, path)? {
+        Ok(bytes) => Some(extract_bytes(&bytes, kind)),
+        Err(_) => Some(Extracted::name_only()),
+    }
 }
 
 /// バイト列から取り出す（読み取りの部品が、壊れたファイルで止まらないようにする）。

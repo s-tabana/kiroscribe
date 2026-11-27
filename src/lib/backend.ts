@@ -65,7 +65,11 @@ export interface Backend {
   setSearchFolderNoContent(path: string, value: boolean): Promise<SearchIndexStatus>;
   /** 索引を空にして作り直す（相棒がオフなら、理由のメッセージで reject する） */
   rebuildSearchIndex(): Promise<SearchIndexStatus>;
-  onSearchIndexStatus(cb: (status: SearchIndexStatus) => void): Unsubscribe;
+  /**
+   * 索引の状態の知らせを待ち受ける。`onReady` は、待ち受けの登録が済んだときに呼ぶ
+   * （それより前に届いた知らせは受け取れないので、登録が済んでから状態を読み直す）
+   */
+  onSearchIndexStatus(cb: (status: SearchIndexStatus) => void, onReady?: () => void): Unsubscribe;
 
   // ---- 録音・文字起こし ----
   listAudioDevices(): Promise<AudioDevice[]>;
@@ -146,13 +150,16 @@ export interface Backend {
   onSettingsChanged(cb: (settings: Settings) => void): Unsubscribe;
 }
 
-/** Tauri のイベント購読を、同期的に解除できる形にする */
-function subscribe<T>(event: string, cb: (payload: T) => void): Unsubscribe {
+/** Tauri のイベント購読を、同期的に解除できる形にする。`onReady` は、購読の登録が済んだときに呼ぶ */
+function subscribe<T>(event: string, cb: (payload: T) => void, onReady?: () => void): Unsubscribe {
   let disposed = false;
   let unlisten: (() => void) | null = null;
   void listen<T>(event, (e) => cb(e.payload)).then((fn) => {
     if (disposed) fn();
-    else unlisten = fn;
+    else {
+      unlisten = fn;
+      onReady?.();
+    }
   });
   return () => {
     disposed = true;
@@ -180,7 +187,7 @@ export function createTauriBackend(): Backend {
     removeSearchFolder: (path) => invoke("remove_search_folder", { path }),
     setSearchFolderNoContent: (path, value) => invoke("set_search_folder_no_content", { path, value }),
     rebuildSearchIndex: () => invoke("rebuild_search_index"),
-    onSearchIndexStatus: (cb) => subscribe("search-index-status", cb),
+    onSearchIndexStatus: (cb, onReady) => subscribe("search-index-status", cb, onReady),
 
     listAudioDevices: () => invoke("list_audio_devices"),
     listSegments: (noteId) => invoke("list_segments", { noteId }),

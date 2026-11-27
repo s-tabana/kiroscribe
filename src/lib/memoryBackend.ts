@@ -572,7 +572,11 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       if (!settings.companion) throw "会議の相棒がオフのときは、索引を作り直せません";
       return publishSearchIndex();
     },
-    onSearchIndexStatus: (cb) => searchIndexEvents.on(cb),
+    onSearchIndexStatus: (cb, onReady) => {
+      const off = searchIndexEvents.on(cb);
+      if (onReady) queueMicrotask(onReady);
+      return off;
+    },
     setSearchIndexStatus(status) {
       if (status.folders) searchFolders = status.folders.map((folder) => ({ ...folder }));
       searchIndex = { ...searchIndex, ...status, revision: status.revision ?? searchIndex.revision + 1 };

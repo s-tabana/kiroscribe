@@ -17,7 +17,7 @@ pub const EXCERPT_CHARS: usize = 600;
 /// 抜粋の位置を決めるときに数える、1 つの検索語の一致の数の上限。
 const MAX_HITS_PER_TERM: usize = 5_000;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const SCHEMA: &str = r#"
 CREATE TABLE docs (
     id          INTEGER PRIMARY KEY,
@@ -32,7 +32,8 @@ CREATE TABLE docs (
     norm_body   TEXT NOT NULL,
     name_only   INTEGER NOT NULL,
     modified    INTEGER NOT NULL,
-    size        INTEGER NOT NULL
+    size        INTEGER NOT NULL,
+    online_only INTEGER NOT NULL
 );
 CREATE INDEX docs_folder ON docs(folder);
 "#;
@@ -57,6 +58,19 @@ pub struct Hit {
 
 pub struct SearchIndex {
     conn: Connection,
+}
+
+/// 読み直すかを決める、ファイルの目印（更新日時・大きさ・クラウドにだけあるか）。
+/// クラウドにだけあるかが変わったら、日時と大きさが同じでも読み直す（名前だけで入れたファイルを、手元に来たら中身ごと入れる）。
+pub type Stamp = (i64, u64, bool);
+
+/// ファイルの目印（索引の行と比べる）。
+pub fn stamp_of_file(file: &FileEntry) -> Stamp {
+    (file.modified, file.size, file.online_only)
+}
+
+fn stamp_of(row: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Stamp> {
+    Ok((row.get::<_, i64>(at)?, row.get::<_, i64>(at + 1)? as u64, row.get::<_, bool>(at + 2)?))
 }
 
 /// 索引のファイル（本体と、書き込みの途中の内容を持つ `-wal`・`-shm`）のパス。
@@ -128,11 +142,12 @@ impl SearchIndex {
         let stem = file.path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let title = content.title.clone().unwrap_or(stem);
         self.conn.execute(
-            "INSERT INTO docs (source, folder, path, title, file_name, body, norm_title, norm_name, norm_body, name_only, modified, size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            "INSERT INTO docs (source, folder, path, title, file_name, body, norm_title, norm_name, norm_body, name_only, modified, size, online_only)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(path) DO UPDATE SET folder = excluded.folder, title = excluded.title, file_name = excluded.file_name,
                body = excluded.body, norm_title = excluded.norm_title, norm_name = excluded.norm_name, norm_body = excluded.norm_body,
-               name_only = excluded.name_only, modified = excluded.modified, size = excluded.size",
+               name_only = excluded.name_only, modified = excluded.modified, size = excluded.size,
+               online_only = excluded.online_only",
             params![
                 SOURCE_FOLDER,
                 folder.to_string_lossy(),
@@ -146,17 +161,16 @@ impl SearchIndex {
                 content.name_only,
                 file.modified,
                 file.size as i64,
+                file.online_only,
             ],
         )?;
         Ok(())
     }
 
-    /// フォルダの、いま索引にあるファイルと、その更新日時と大きさ。
-    pub fn known_files(&self, folder: &Path) -> Result<HashMap<PathBuf, (i64, u64)>> {
-        let mut stmt = self.conn.prepare("SELECT path, modified, size FROM docs WHERE folder = ?1")?;
-        let rows = stmt.query_map([folder.to_string_lossy()], |row| {
-            Ok((PathBuf::from(row.get::<_, String>(0)?), (row.get::<_, i64>(1)?, row.get::<_, i64>(2)? as u64)))
-        })?;
+    /// フォルダの、いま索引にあるファイルと、その目印（更新日時・大きさ・クラウドにだけあるか）。
+    pub fn known_files(&self, folder: &Path) -> Result<HashMap<PathBuf, Stamp>> {
+        let mut stmt = self.conn.prepare("SELECT path, modified, size, online_only FROM docs WHERE folder = ?1")?;
+        let rows = stmt.query_map([folder.to_string_lossy()], |row| Ok((PathBuf::from(row.get::<_, String>(0)?), stamp_of(row, 1)?)))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
@@ -189,12 +203,12 @@ impl SearchIndex {
         Ok(())
     }
 
-    /// そのパスのファイルの、索引にある更新日時と大きさ（なければ None）。
-    pub fn stamp(&self, path: &Path) -> Result<Option<(i64, u64)>> {
-        let mut stmt = self.conn.prepare("SELECT modified, size FROM docs WHERE path = ?1")?;
+    /// そのパスのファイルの、索引にある目印（なければ None）。
+    pub fn stamp(&self, path: &Path) -> Result<Option<Stamp>> {
+        let mut stmt = self.conn.prepare("SELECT modified, size, online_only FROM docs WHERE path = ?1")?;
         let mut rows = stmt.query([path.to_string_lossy()])?;
         Ok(match rows.next()? {
-            Some(row) => Some((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? as u64)),
+            Some(row) => Some(stamp_of(row, 0)?),
             None => None,
         })
     }
@@ -337,6 +351,21 @@ mod tests {
 
     fn paths(hits: &[Hit]) -> Vec<String> {
         hits.iter().map(|h| h.path.to_string_lossy().to_string()).collect()
+    }
+
+    /// クラウドにだけあるかが変わったら、更新日時と大きさが同じでも、目印が変わる（読み直す）。
+    // [IDX-027][IDX-009]
+    #[test]
+    fn stamp_includes_whether_the_file_is_online_only() {
+        let index = SearchIndex::open_in_memory().unwrap();
+        let folder = Path::new("/r");
+        let mut file = entry("/r/a.txt", 5);
+        file.online_only = true;
+        index.upsert(folder, &file, &Extracted::name_only()).unwrap();
+        assert_eq!(index.stamp(&file.path).unwrap(), Some((5, 1, true)));
+        assert_eq!(index.known_files(folder).unwrap()[&file.path], (5, 1, true));
+        file.online_only = false;
+        assert_ne!(index.stamp(&file.path).unwrap(), Some(stamp_of_file(&file)), "手元に来たら読み直す");
     }
 
     // [IDX-013]

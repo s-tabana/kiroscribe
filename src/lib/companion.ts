@@ -51,6 +51,8 @@ export function indexStatusText(status: SearchIndexStatus): string {
       const time = `${at.getHours()}:${String(at.getMinutes()).padStart(2, "0")}`;
       return `索引に入っています: ${count(status.files)} 件（${time} に更新）`;
     }
+    case "erasing":
+      return "会議の相棒をオフにしたため、索引の中身を消しています";
     case "off":
       return "会議の相棒がオフのため、索引は作っていません";
   }

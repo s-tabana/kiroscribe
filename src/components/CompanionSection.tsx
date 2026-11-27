@@ -26,11 +26,14 @@ export function CompanionSection({ settings, modelSelect, onCompanionChange, onE
 
   useEffect(() => {
     let active = true;
-    backend
-      .getSearchIndexStatus()
-      .then((status) => active && apply(status))
-      .catch((err) => onError(errorMessage(err)));
-    const off = backend.onSearchIndexStatus(apply);
+    const load = () =>
+      backend
+        .getSearchIndexStatus()
+        .then((status) => active && apply(status))
+        .catch((err) => onError(errorMessage(err)));
+    void load();
+    // 購読の登録が済むまでに届いた知らせは受け取れないので、登録が済んだら読み直す（新しい方を revision で選ぶ）
+    const off = backend.onSearchIndexStatus(apply, () => void load());
     return () => {
       active = false;
       off();
@@ -142,7 +145,7 @@ export function CompanionSection({ settings, modelSelect, onCompanionChange, onE
           <button
             type="button"
             className="button button-ghost"
-            disabled={busy || !index || index.state === "off" || indexing}
+            disabled={busy || !index || index.state === "off" || index.state === "erasing" || indexing}
             onClick={() => void act(() => backend.rebuildSearchIndex())}
           >
             索引を作り直す

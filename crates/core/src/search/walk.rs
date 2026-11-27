@@ -43,6 +43,8 @@ pub struct Walked {
     pub files: Vec<FileEntry>,
     /// 上限（[`MAX_FILES_PER_FOLDER`]）を超えたため、一部だけを集めた
     pub truncated: bool,
+    /// 中を読めなかったフォルダ（読み取りの権限がないなど）。この中のファイルは、消えたとみなさない
+    pub unreadable: Vec<PathBuf>,
 }
 
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
@@ -123,10 +125,14 @@ pub fn inspect_file(path: &Path, limits: Limits) -> Option<FileEntry> {
 }
 
 /// `path` が `root` の中にあり、途中のフォルダを含めて、リンクをたどらずに届き、除くフォルダを通らないか。
+/// 足したあとでフォルダそのものがリンクに替わったときも、リンクの先を範囲に入れない。
 pub fn reachable_without_links(root: &Path, path: &Path) -> bool {
     let Ok(rest) = path.strip_prefix(root) else {
         return false;
     };
+    if !is_plain_dir(root) {
+        return false;
+    }
     let mut current = root.to_path_buf();
     let parts: Vec<_> = rest.components().collect();
     for (index, part) in parts.iter().enumerate() {
@@ -149,6 +155,53 @@ pub fn reachable_without_links(root: &Path, path: &Path) -> bool {
     true
 }
 
+/// クラウドにだけあるファイルか（読む直前に確かめる。読むとダウンロードが始まるため）。
+pub fn is_online_only(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| traits_of(&meta).online_only)
+}
+
+/// そのパスそのものが、リンクでないフォルダか（リンクをたどらずに確かめる）。
+pub fn is_plain_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && !traits_of(&meta).link)
+}
+
+/// フォルダの中のファイルを、リンクをたどらずに届くときだけ読む（範囲の外なら None）。
+/// 調べてから開くまでのあいだに途中のフォルダがリンクに替わっても、範囲の外の中身を返さないよう、
+/// 開いたファイルが調べたファイルと同じかと、読み終えたあとにも範囲の中にあるかを確かめる。
+pub fn read_within(root: &Path, path: &Path) -> Option<std::io::Result<Vec<u8>>> {
+    use std::io::Read;
+    if !reachable_without_links(root, path) {
+        return None;
+    }
+    let before = std::fs::symlink_metadata(path).ok()?;
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) => return Some(Err(err)),
+    };
+    let opened = file.metadata().ok()?;
+    if !same_file(&before, &opened) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    if let Err(err) = file.read_to_end(&mut bytes) {
+        return Some(Err(err));
+    }
+    reachable_without_links(root, path).then_some(Ok(bytes))
+}
+
+/// リンクをたどらずに調べたファイルと、開いたファイルが同じか。
+fn same_file(before: &Metadata, opened: &Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        before.is_file() && before.dev() == opened.dev() && before.ino() == opened.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        before.is_file() && !traits_of(before).link && opened.is_file()
+    }
+}
+
 /// そのパスそのものが、たどらないリンク（シンボリックリンク・ジャンクション）か。
 pub fn is_link(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| traits_of(&meta).link)
@@ -168,9 +221,13 @@ pub fn walk(root: &Path, limits: Limits) -> std::io::Result<Walked> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
+            walked.unreadable.push(dir);
             continue;
         };
-        let mut entries: Vec<_> = entries.flatten().collect();
+        let Ok(mut entries) = entries.collect::<std::io::Result<Vec<_>>>() else {
+            walked.unreadable.push(dir);
+            continue;
+        };
         entries.sort_by_key(|entry| entry.file_name());
         let mut subdirs = Vec::new();
         for entry in entries {
@@ -294,6 +351,32 @@ mod tests {
         assert!(is_link(&linked));
         assert!(!is_link(root));
         assert!(walk(&linked, Limits::default()).is_err());
+        assert!(!is_plain_dir(&linked) && is_plain_dir(root));
+        // フォルダそのものがリンクなら、リンクの先のファイルは範囲の外（読まない）
+        assert!(!reachable_without_links(&linked, &linked.join("外.txt")));
+        assert!(read_within(&linked, &linked.join("外.txt")).is_none());
+        assert_eq!(read_within(root, &root.join("中.txt")).unwrap().unwrap(), "経費".as_bytes());
+        assert!(read_within(root, &root.join("外へ.txt")).is_none());
+    }
+
+    // [IDX-010]
+    #[cfg(unix)]
+    #[test]
+    fn folders_that_cannot_be_read_are_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        touch(&root.join("a.txt"));
+        touch(&root.join("鍵/b.txt"));
+        std::fs::set_permissions(root.join("鍵"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_dir(root.join("鍵")).is_ok();
+        let walked = walk(root, Limits::default()).unwrap();
+        std::fs::set_permissions(root.join("鍵"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        if readable {
+            return; // 管理者で動かしているときは、読めてしまう
+        }
+        assert_eq!(names(&walked, root), ["a.txt"]);
+        assert_eq!(walked.unreadable, [root.join("鍵")]);
     }
 
     // [IDX-027]

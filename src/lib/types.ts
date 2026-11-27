@@ -71,8 +71,11 @@ export const DEFAULT_SETTINGS: Settings = {
 
 // ---- 会議の相棒の資料の索引 ----
 
-/** off = 相棒がオフで索引を作っていない、building = 作っている・更新している、ready = できている */
-export type IndexState = "off" | "building" | "ready";
+/**
+ * off = 相棒がオフで索引を作っていない（中身を消し終えている）、erasing = オフにして中身を消している
+ * （消せないときは消し終えるまで消し直す）、building = 作っている・更新している、ready = できている
+ */
+export type IndexState = "off" | "erasing" | "building" | "ready";
 
 /** 探すフォルダの一覧の 1 行 */
 export interface SearchFolderStatus {
