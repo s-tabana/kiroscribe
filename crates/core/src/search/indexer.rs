@@ -19,6 +19,9 @@ use crate::time::now_ms;
 
 /// 見張れないフォルダ（ネットワークのドライブなど）を見直す間隔。
 pub const POLL_INTERVAL: Duration = Duration::from_secs(30 * 60);
+/// 見張っているフォルダそのものがあるかを確かめる間隔。Windows では、見張っているフォルダ自身の移動や削除は
+/// 変更の知らせに含まれないため、ここで見つける。
+pub const ROOT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// 変更の知らせを受けてから、まとめて反映するまでの待ち時間（続けて届く知らせを 1 回にまとめる）。
 pub const CHANGE_DEBOUNCE: Duration = Duration::from_secs(2);
 /// 変更の知らせが途切れずに届き続けても、最初の知らせからこの時間がたったら反映する。
@@ -175,6 +178,7 @@ impl Indexer {
             watcher: None,
             polled: Vec::new(),
             last_poll: Instant::now(),
+            last_root_check: Instant::now(),
             last_emit: Instant::now(),
             truncated: HashSet::new(),
             missing: HashSet::new(),
@@ -285,6 +289,7 @@ struct Worker {
     /// 見張れないので、見直すフォルダ（ネットワークのドライブ・見つからなくなったフォルダ）
     polled: Vec<PathBuf>,
     last_poll: Instant,
+    last_root_check: Instant,
     last_emit: Instant,
     truncated: HashSet<PathBuf>,
     missing: HashSet<PathBuf>,
@@ -315,7 +320,7 @@ impl Worker {
         let mut pending_since: Option<Instant> = None;
         loop {
             let timeout = match pending_since {
-                None => Duration::from_secs(60),
+                None => ROOT_CHECK_INTERVAL,
                 Some(since) => CHANGE_DEBOUNCE.min(MAX_CHANGE_DELAY.saturating_sub(since.elapsed())),
             };
             let flush = match rx.recv_timeout(timeout) {
@@ -341,6 +346,16 @@ impl Worker {
             }
             if self.purge_pending && !self.enabled() && self.last_purge.elapsed() >= PURGE_RETRY {
                 self.purge();
+            }
+            if self.enabled() && self.last_root_check.elapsed() >= ROOT_CHECK_INTERVAL {
+                self.last_root_check = Instant::now();
+                let gone: BTreeSet<PathBuf> = self
+                    .folders()
+                    .iter()
+                    .map(|folder| PathBuf::from(&folder.path))
+                    .filter(|root| !self.polled.contains(root) && !self.missing.contains(root) && !root.is_dir())
+                    .collect();
+                self.apply_changes(gone);
             }
             if self.enabled() && !self.polled.is_empty() && self.last_poll.elapsed() >= POLL_INTERVAL {
                 self.last_poll = Instant::now();
