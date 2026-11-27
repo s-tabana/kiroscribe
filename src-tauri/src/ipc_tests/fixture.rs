@@ -71,6 +71,7 @@ pub(super) struct Api {
     pub claude: Mutex<ClaudeReply>,
     /// ログの回収の入口が返す HTTP の状態（`None` なら受け付ける）
     pub log_intake_status: Mutex<Option<u16>>,
+    pub log_intake_delay: Mutex<Duration>,
 }
 
 impl Api {
@@ -80,6 +81,7 @@ impl Api {
             transcription_delay: Mutex::new(Duration::ZERO),
             claude: Mutex::new(Self::default_claude()),
             log_intake_status: Mutex::new(None),
+            log_intake_delay: Mutex::new(Duration::ZERO),
         }
     }
 
@@ -92,6 +94,7 @@ impl Api {
         *self.transcription_delay.lock().unwrap() = Duration::ZERO;
         *self.claude.lock().unwrap() = Self::default_claude();
         *self.log_intake_status.lock().unwrap() = None;
+        *self.log_intake_delay.lock().unwrap() = Duration::ZERO;
     }
 }
 
@@ -159,7 +162,7 @@ struct LogIntake(Arc<Api>);
 
 impl Respond for LogIntake {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
-        match *self.0.log_intake_status.lock().unwrap() {
+        let response = match *self.0.log_intake_status.lock().unwrap() {
             None => ResponseTemplate::new(201)
                 .set_body_json(json!({ "id": LOG_SUBMISSION_ID, "receivedAt": "2026-11-27T12:50:30.217Z" })),
             Some(429) => ResponseTemplate::new(429).set_body_json(
@@ -167,7 +170,8 @@ impl Respond for LogIntake {
             ),
             Some(status @ 300..=399) => ResponseTemplate::new(status).insert_header("location", "/redirected/v1/logs/kiroscribe"),
             Some(status) => ResponseTemplate::new(status),
-        }
+        };
+        response.set_delay(*self.0.log_intake_delay.lock().unwrap())
     }
 }
 

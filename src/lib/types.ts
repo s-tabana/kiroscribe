@@ -261,6 +261,7 @@ export interface LogSubmission {
 
 /** デバッグ用のログの提出の進み具合（バイト） */
 export interface LogSubmitProgress {
+  requestId: string;
   sent: number;
   total: number;
 }

@@ -51,7 +51,7 @@ interface MemoryOptions {
    * デバッグ用のログの提出を差し替える（テスト用）。progress で進み具合を知らせ、提出の番号を返す。
    * 既定は、進み具合を 4 回知らせてから、プレビュー用の番号を返す
    */
-  submitLogs?: (progress: (value: LogSubmitProgress) => void) => Promise<LogSubmission>;
+  submitLogs?: (progress: (value: Omit<LogSubmitProgress, "requestId">) => void) => Promise<LogSubmission>;
 }
 
 /** テストから文字起こしやエラーを発生させるための追加機能 */
@@ -766,8 +766,8 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
     get debugLog() {
       return debugLog;
     },
-    async submitDebugLogs() {
-      const report = (value: LogSubmitProgress) => logSubmitEvents.emit({ ...value });
+    async submitDebugLogs(requestId) {
+      const report = (value: Omit<LogSubmitProgress, "requestId">) => logSubmitEvents.emit({ ...value, requestId });
       if (options.submitLogs) return options.submitLogs(report);
       // プレビューでは送らずに、送ったように見せる
       const total = 4 * 1024 * 1024;
@@ -777,7 +777,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       }
       return { id: "KS-PREVIEW-0000", receivedAt: new Date(now()).toISOString() };
     },
-    onLogSubmitProgress: (cb) => logSubmitEvents.on(cb),
+    onLogSubmitProgress: async (cb) => logSubmitEvents.on(cb),
     get lastCopied() {
       return lastCopied;
     },

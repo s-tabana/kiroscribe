@@ -247,14 +247,16 @@ pub fn update_endpoint() -> Option<String> {
 /// 模擬の入口に添える提出用の値
 pub const LOG_INTAKE_TOKEN: &str = "kiroscribe-e2e-log-token";
 
-/// 差し替え後のログの回収の入口と提出用の値。作業フォルダを使っていなければ `None`（本番の入口を使う）。
-/// 作業フォルダを使っていて入口を書いていなければ `Some(None)`（送らない）
-pub fn log_intake() -> Option<Option<(String, String)>> {
-    resolve_log_intake(dir().ok().flatten().is_some(), &config().log_intake_url)
+/// ログの回収の入口と提出用の値。作業フォルダや入口の指定が使えなければ送らない。
+pub fn log_intake() -> Option<(String, String)> {
+    resolve_log_intake(state())
 }
 
-fn resolve_log_intake(in_work_dir: bool, configured: &Option<String>) -> Option<Option<(String, String)>> {
-    in_work_dir.then(|| trimmed(configured).map(|url| (url, LOG_INTAKE_TOKEN.to_string())))
+fn resolve_log_intake(state: Result<&State, &str>) -> Option<(String, String)> {
+    let state = state.ok()?;
+    state.dir.as_ref()?;
+    let url = trimmed(&state.config.log_intake_url)?;
+    Some((url, LOG_INTAKE_TOKEN.to_string()))
 }
 
 fn shortened_retry(timing: &Timing, default: &RetryPolicy) -> Option<RetryPolicy> {
@@ -379,12 +381,19 @@ mod tests {
     // [SEC-012][SEC-015]
     #[test]
     fn log_intake_is_local_and_explicit_inside_a_work_directory() {
-        assert_eq!(resolve_log_intake(false, &Some("http://127.0.0.1:4010/logs".into())), None);
-        assert_eq!(resolve_log_intake(true, &None), Some(None));
-        assert_eq!(resolve_log_intake(true, &Some("  ".into())), Some(None));
+        assert_eq!(resolve_log_intake(Err("作業フォルダを読み込めません")), None);
+        let mut state = State { dir: None, config: Config::default() };
+        state.config.log_intake_url = Some("http://127.0.0.1:4010/logs".into());
+        assert_eq!(resolve_log_intake(Ok(&state)), None);
+        state.dir = Some(PathBuf::from("work"));
+        state.config.log_intake_url = None;
+        assert_eq!(resolve_log_intake(Ok(&state)), None);
+        state.config.log_intake_url = Some("  ".into());
+        assert_eq!(resolve_log_intake(Ok(&state)), None);
+        state.config.log_intake_url = Some("http://127.0.0.1:4010/logs/".into());
         assert_eq!(
-            resolve_log_intake(true, &Some("http://127.0.0.1:4010/logs/".into())),
-            Some(Some(("http://127.0.0.1:4010/logs".into(), LOG_INTAKE_TOKEN.into())))
+            resolve_log_intake(Ok(&state)),
+            Some(("http://127.0.0.1:4010/logs".into(), LOG_INTAKE_TOKEN.into()))
         );
         let config = parse_config(r#"{"logIntakeUrl": "http://127.0.0.1:4010/logs"}"#).unwrap();
         assert_eq!(config.log_intake_url.as_deref(), Some("http://127.0.0.1:4010/logs"));

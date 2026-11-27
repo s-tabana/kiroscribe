@@ -19,6 +19,7 @@ pub const EVENT_LOG_SUBMIT_PROGRESS: &str = "log-submit-progress";
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogSubmitProgress {
+    pub request_id: String,
     pub sent: u64,
     pub total: u64,
 }
@@ -26,7 +27,9 @@ pub struct LogSubmitProgress {
 /// デバッグ用のログを zip にまとめて送り、入口が返した提出の番号を返す。
 /// 送り先は本体に埋め込んだ入口だけで、画面からは変えられない。送り先を使えなければ、まとめずに理由を返す。
 #[tauri::command]
-pub async fn submit_debug_logs(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Submission> {
+pub async fn submit_debug_logs(app: AppHandle, state: State<'_, AppState>, request_id: String) -> CmdResult<Submission> {
+    let _submission = state.log_submission.try_lock()
+        .map_err(|_| CommandError("デバッグ用のログを提出しています。完了するまでお待ちください".into()))?;
     let intake = log_submit::intake()?;
     let client_id = log_submit::client_id(&state.db())?;
 
@@ -40,7 +43,11 @@ pub async fn submit_debug_logs(app: AppHandle, state: State<'_, AppState>) -> Cm
 
     let emitter = app.clone();
     let progress: Progress = Arc::new(move |sent, total| {
-        let _ = emitter.emit(EVENT_LOG_SUBMIT_PROGRESS, LogSubmitProgress { sent, total });
+        let _ = emitter.emit(EVENT_LOG_SUBMIT_PROGRESS, LogSubmitProgress {
+            request_id: request_id.clone(),
+            sent,
+            total,
+        });
     });
     let version = app.package_info().version.to_string();
     let result = log_submit::submit_logs(

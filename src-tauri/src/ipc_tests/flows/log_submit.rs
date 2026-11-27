@@ -1,9 +1,11 @@
 //! デバッグ用のログの提出: zip を契約どおりに送ること、
 //! 進み具合のイベント、断られたときの文、送り先を画面から変えられないこと。
 
+use std::time::Duration;
+
 use serde_json::{json, Value};
 
-use super::super::fixture::{Harness, ANTHROPIC_KEY, LOG_SUBMISSION_ID, OPENAI_KEY};
+use super::super::fixture::{wait_until, Harness, ANTHROPIC_KEY, LOG_SUBMISSION_ID, OPENAI_KEY};
 
 /// zip を契約どおりのヘッダーで送り、提出の番号を返す。導入ごとの ID は、2 回目も同じ値を使う。
 // [SET-015][SET-017][SEC-015][IPC-001][IPC-005]
@@ -11,9 +13,9 @@ use super::super::fixture::{Harness, ANTHROPIC_KEY, LOG_SUBMISSION_ID, OPENAI_KE
 fn submits_the_bundle_with_the_contract_headers() {
     let h = Harness::new();
 
-    let first = h.ok("submit_debug_logs", json!({}));
+    let first = h.ok("submit_debug_logs", json!({ "requestId": "first" }));
     assert_eq!(first, json!({ "id": LOG_SUBMISSION_ID, "receivedAt": "2026-11-27T12:50:30.217Z" }));
-    h.ok("submit_debug_logs", json!({}));
+    h.ok("submit_debug_logs", json!({ "requestId": "second" }));
 
     let requests = h.requests("/logs/v1/logs/kiroscribe");
     assert_eq!(requests.len(), 2);
@@ -41,6 +43,7 @@ fn submits_the_bundle_with_the_contract_headers() {
     // 進み具合は、送った分と全体の大きさ（バイト）。最後は全体に届く
     let progress = h.events("log-submit-progress");
     let last = progress.last().expect("進み具合のイベントがない");
+    assert_eq!(last["requestId"], "second");
     assert_eq!(last["sent"], last["total"]);
     assert_eq!(last["total"].as_u64().unwrap() as usize, requests[1].body.len());
 
@@ -49,13 +52,33 @@ fn submits_the_bundle_with_the_contract_headers() {
     assert_eq!(done[0]["fields"]["id"], LOG_SUBMISSION_ID);
 }
 
+// [SET-015][IPC-005]
+#[test]
+fn concurrent_submission_does_not_send_or_emit_progress() {
+    let h = Harness::new();
+    *h.fixture.api.log_intake_delay.lock().unwrap() = Duration::from_secs(2);
+
+    let first = h.spawn("submit_debug_logs", json!({ "requestId": "first" }));
+    wait_until("提出の進み具合", || h.events("log-submit-progress").first().cloned());
+    let err = h.call("submit_debug_logs", json!({ "requestId": "second" })).unwrap_err();
+    assert!(err.contains("完了するまでお待ちください"), "{err}");
+    assert_eq!(first.join().unwrap().unwrap()["id"], LOG_SUBMISSION_ID);
+    assert_eq!(h.requests("/logs/v1/logs/kiroscribe").len(), 1);
+    assert_eq!(h.debug_log_events("log.submit.start").len(), 1);
+    assert!(h.events("log-submit-progress").iter().all(|event| event["requestId"] == "first"));
+
+    *h.fixture.api.log_intake_delay.lock().unwrap() = Duration::ZERO;
+    h.ok("submit_debug_logs", json!({ "requestId": "retry" }));
+    assert_eq!(h.requests("/logs/v1/logs/kiroscribe").len(), 2);
+}
+
 /// 入口が断ったら、入口の説明を添えた文を返し、ログにも書く。
 // [SET-018][IPC-006]
 #[test]
 fn rejection_from_the_intake_becomes_the_message() {
     let h = Harness::new();
     *h.fixture.api.log_intake_status.lock().unwrap() = Some(429);
-    let err = h.call("submit_debug_logs", json!({})).unwrap_err();
+    let err = h.call("submit_debug_logs", json!({ "requestId": "rejected" })).unwrap_err();
     assert_eq!(err, "ログを送れませんでした: 提出が多すぎます。1 時間ほど待ってから送ってください（HTTP 429）");
     let failed = h.debug_log_events("log.submit.failed");
     assert_eq!(failed.len(), 1);
@@ -69,8 +92,9 @@ fn rejection_from_the_intake_becomes_the_message() {
 fn redirects_from_the_intake_are_not_followed() {
     let h = Harness::new();
     *h.fixture.api.log_intake_status.lock().unwrap() = Some(307);
-    let err = h.call("submit_debug_logs", json!({})).unwrap_err();
+    let err = h.call("submit_debug_logs", json!({ "requestId": "redirected" })).unwrap_err();
     assert!(err.contains("HTTP 307"), "{err}");
+    assert!(err.contains("最新版に更新") && err.contains("デバッグ用のログを保存"), "{err}");
     assert!(h.requests("/redirected/v1/logs/kiroscribe").is_empty(), "リダイレクト先に送った");
     assert_eq!(h.requests("/logs/v1/logs/kiroscribe").len(), 1);
 }
@@ -87,7 +111,7 @@ fn the_screen_cannot_change_the_destination() {
     let saved = h.ok("save_settings", json!({ "settings": settings }));
     assert!(saved.get("logIntakeUrl").is_none() && saved.get("logIntakeToken").is_none(), "{saved}");
 
-    h.ok("submit_debug_logs", json!({}));
+    h.ok("submit_debug_logs", json!({ "requestId": "fixed-destination" }));
     assert!(h.requests("/evil/v1/logs/kiroscribe").is_empty(), "画面が書いた送り先に送った");
     let requests = h.requests("/logs/v1/logs/kiroscribe");
     assert_eq!(requests.len(), 1);

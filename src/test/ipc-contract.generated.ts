@@ -137,7 +137,7 @@ export const called = {
     [],
   ] satisfies Called<"stopRecording">[],
   submitDebugLogs: [
-    [],
+    ["…"],
   ] satisfies Called<"submitDebugLogs">[],
   takeUpdateNotice: [
     [],
@@ -295,7 +295,7 @@ export const emitted = {
     {"level":0,"speaker":"them"},
   ] satisfies Emitted<"onLevel">[],
   onLogSubmitProgress: [
-    {"sent":0,"total":0},
+    {"requestId":"…","sent":0,"total":0},
   ] satisfies Emitted<"onLogSubmitProgress">[],
   onNoteCreated: [
     {"createdAt":0,"enhancedAt":null,"enhancedNotes":null,"id":"…","title":"…","updatedAt":0,"userNotes":"…"},

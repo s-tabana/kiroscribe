@@ -133,13 +133,14 @@ fn parse_base(base: &str) -> Result<Url> {
 }
 
 /// 送り先。本番は本体に埋め込んだ入口だけを使う。
-/// E2E テスト用のビルドで作業フォルダを使っているときは、指定した手元の模擬サーバーだけに送り、指定がなければ送らない
+/// E2E テスト用のビルドでは、指定した手元の模擬サーバーだけに送る。
 pub fn intake() -> Result<Intake> {
     #[cfg(feature = "e2e")]
-    if let Some(local) = crate::e2e::log_intake() {
-        let (base, token) = local.ok_or_else(|| CoreError::Other(NOT_CONFIGURED.into()))?;
-        return Intake::local(&base, &token);
+    {
+        let (base, token) = crate::e2e::log_intake().ok_or_else(|| CoreError::Other(NOT_CONFIGURED.into()))?;
+        Intake::local(&base, &token)
     }
+    #[cfg(not(feature = "e2e"))]
     Intake::production(LOG_INTAKE_URL, LOG_INTAKE_TOKEN)
 }
 
@@ -246,9 +247,19 @@ fn send_error(err: reqwest::Error) -> CoreError {
     CoreError::Http(format!("ログを送れませんでした。{summary}（{detail}）"))
 }
 
-/// 入口が断ったときの文。入口の説明（`message`）があればそれを使い、なければ状態コードから作る
+/// 入口が断ったときの文。状態コードに応じた案内に、入口の説明があれば添える。
 pub fn rejection_message(status: u16, message: &str) -> String {
     let message: String = message.trim().chars().take(200).collect();
+    if matches!(status, 300..=499 | 501 | 505) && !matches!(status, 408 | 413 | 425 | 429) {
+        let reason = if message.is_empty() {
+            format!("ログの送り先がエラーを返しました（HTTP {status}）")
+        } else {
+            format!("ログを送れませんでした: {message}（HTTP {status}）")
+        };
+        return format!(
+            "{reason}。アプリを最新版に更新してください。提出できない場合は「デバッグ用のログを保存…」で保存して、別の方法で渡してください"
+        );
+    }
     if !message.is_empty() {
         return format!("ログを送れませんでした: {message}（HTTP {status}）");
     }
@@ -276,6 +287,15 @@ mod tests {
             rejection_message(503, ""),
             "ログの送り先がエラーを返しました（HTTP 503）。しばらく待ってから、もう一度お試しください"
         );
+        for status in [307, 400, 401, 403, 404, 410, 422] {
+            let error = rejection_message(status, "受付を終了しました");
+            assert!(error.contains("受付を終了しました"), "{error}");
+            assert!(error.contains("最新版に更新"), "{error}");
+            assert!(error.contains("デバッグ用のログを保存"), "{error}");
+        }
+        for status in [408, 425, 429, 503] {
+            assert!(rejection_message(status, "").contains("しばらく待ってから"));
+        }
         // 長い説明は切り詰める
         assert_eq!(rejection_message(400, &"あ".repeat(500)).chars().filter(|&c| c == 'あ').count(), 200);
     }
@@ -292,6 +312,9 @@ mod tests {
     // [SET-019][SEC-015]
     #[test]
     fn production_intake_is_the_embedded_https_host() {
+        #[cfg(feature = "e2e")]
+        let intake = Intake::production(LOG_INTAKE_URL, LOG_INTAKE_TOKEN).unwrap();
+        #[cfg(not(feature = "e2e"))]
         let intake = intake().unwrap();
         assert_eq!(intake.url(), "https://log-intake.seita-tabana.workers.dev/v1/logs/kiroscribe");
         assert_eq!(intake.token(), LOG_INTAKE_TOKEN);

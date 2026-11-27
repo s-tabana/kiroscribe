@@ -464,12 +464,13 @@ describe("SettingsDialog: デバッグ用のログの提出", () => {
     const confirm = vi.fn(() => true);
     const backend = createMemoryBackend({ confirm, submitLogs });
     const submit = vi.spyOn(backend, "submitDebugLogs");
-    render(
+    const dialog = (open: boolean) => (
       <BackendContext.Provider value={backend}>
-        <SettingsDialog onClose={() => undefined} />
-      </BackendContext.Provider>,
+        {open && <SettingsDialog onClose={() => undefined} />}
+      </BackendContext.Provider>
     );
-    return { backend, confirm, submit };
+    const { rerender } = render(dialog(true));
+    return { backend, confirm, submit, setOpen: (open: boolean) => rerender(dialog(open)) };
   }
 
   it("[SET-014][SEC-015] 押すと、送るもの・送らないもの・置く期間を確認し、取り消したら送らない", async () => {
@@ -483,9 +484,64 @@ describe("SettingsDialog: デバッグ用のログの提出", () => {
     expect(DEBUG_LOG_SUBMIT_CONFIRM).toContain("送るもの: アプリの動きの記録、会議の検出の記録");
     expect(DEBUG_LOG_SUBMIT_CONFIRM).toContain("送らないもの: 録音・ノート・文字起こし・議事録・AI チャットの内容と API キー");
     expect(DEBUG_LOG_SUBMIT_CONFIRM).toContain("タブの名前には、会議でないページやメールの件名も入ることがあります");
+    expect(DEBUG_LOG_SUBMIT_CONFIRM).toContain("導入ごとに作る乱数の ID");
     expect(DEBUG_LOG_SUBMIT_CONFIRM).toContain("30 日で消します");
     expect(submit).not.toHaveBeenCalled();
     expect(screen.queryByText(/ログを提出しました/)).not.toBeInTheDocument();
+  });
+
+  it("[SET-015] 確認中や送信中に設定を開き直しても提出を重ねない", async () => {
+    const user = userEvent.setup();
+    let answer: (value: boolean) => void = () => undefined;
+    let finish: (submission: LogSubmission) => void = () => undefined;
+    const { backend, submit, setOpen } = setupSubmit(() => new Promise((resolve) => { finish = resolve; }));
+    const confirm = vi.spyOn(backend, "confirm").mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+    const findButton = () => screen.findByRole("button", { name: "デバッグ用のログを提出…" });
+
+    await user.dblClick(await findButton());
+    setOpen(false);
+    setOpen(true);
+    expect(await findButton()).toBeDisabled();
+    await user.click(await findButton());
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(submit).not.toHaveBeenCalled();
+
+    await act(async () => answer(true));
+    setOpen(false);
+    setOpen(true);
+    expect(await findButton()).toBeDisabled();
+    expect(screen.getByText("ログをまとめています…")).toBeInTheDocument();
+    expect(submit).toHaveBeenCalledOnce();
+
+    await act(async () => finish({ id: "KS-20261127-7F3A", receivedAt: "2026-11-27T12:50:30.217Z" }));
+    expect(await findButton()).toBeEnabled();
+    expect(screen.getByText(/ログを提出しました/)).toBeInTheDocument();
+  });
+
+  it("[SET-015][IPC-005] 購読の登録後に提出し、提出の失敗時に解除する", async () => {
+    const user = userEvent.setup();
+    const { backend, submit } = setupSubmit();
+    const unsubscribe = vi.fn();
+    let registered: () => void = () => undefined;
+    vi.spyOn(backend, "onLogSubmitProgress").mockImplementation(
+      (report) => new Promise((resolve) => {
+        registered = () => resolve(unsubscribe);
+        submit.mockImplementationOnce(async (requestId) => {
+          report({ requestId: "other", sent: 100, total: 100 });
+          expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+          report({ requestId, sent: 1, total: 4 });
+          expect(await screen.findByRole("progressbar")).toHaveAttribute("value", "25");
+          throw new Error("模擬サーバーへの送信に失敗しました");
+        });
+      }),
+    );
+
+    await user.click(await screen.findByRole("button", { name: "デバッグ用のログを提出…" }));
+    expect(submit).not.toHaveBeenCalled();
+    act(() => registered());
+    expect(await screen.findByText("模擬サーバーへの送信に失敗しました")).toBeInTheDocument();
+    expect(submit).toHaveBeenCalledOnce();
+    expect(unsubscribe).toHaveBeenCalledOnce();
   });
 
   it("[SET-015] 送っている間は進み具合を出してボタンを押せなくし、終わったら提出の番号を出す", async () => {
@@ -541,11 +597,12 @@ describe("SettingsDialog: デバッグ用のログの提出", () => {
 
   it("[SET-016] オフラインのときは送らずに、つながっていないことを出す", async () => {
     const user = userEvent.setup();
-    const { submit } = setupSubmit();
+    const { confirm, submit } = setupSubmit();
     const online = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
     try {
       await user.click(await screen.findByRole("button", { name: "デバッグ用のログを提出…" }));
       expect(await screen.findByText(DEBUG_LOG_SUBMIT_OFFLINE)).toBeInTheDocument();
+      expect(confirm).not.toHaveBeenCalled();
       expect(submit).not.toHaveBeenCalled();
     } finally {
       online.mockRestore();
