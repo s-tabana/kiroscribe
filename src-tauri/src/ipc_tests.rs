@@ -352,10 +352,23 @@ fn mock_app(update_endpoint: &str) -> (tauri::App<MockRuntime>, WebviewWindow<Mo
     app.manage(BackgroundState::default());
     app.manage(crate::meeting_watch::MeetingState::default());
     app.manage(UpdateState::new(false, None));
+    app.manage(kiroscribe_core::debug_log::DebugLog::open(debug_log_dir()).expect("デバッグ用のログを用意できません"));
     let window = WebviewWindowBuilder::new(&app, MAIN_LABEL, Default::default())
         .build()
         .expect("模擬のウィンドウを作れません");
     (app, window)
+}
+
+/// 模擬のアプリごとの、デバッグ用のログのフォルダ（テストの実行ファイルの隣、target の中）。
+fn debug_log_dir() -> PathBuf {
+    let exe = std::env::current_exe().expect("テストの実行ファイルの場所が分かりません");
+    let base = exe
+        .parent()
+        .and_then(Path::parent)
+        .expect("target の場所が分かりません")
+        .join("ipc-debug-logs");
+    std::fs::create_dir_all(&base).unwrap();
+    tempfile::Builder::new().tempdir_in(&base).unwrap().keep()
 }
 
 /// 画面の `invoke(command, args)` と同じ経路でコマンドを呼ぶ。

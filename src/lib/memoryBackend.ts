@@ -62,6 +62,8 @@ export interface MemoryBackend extends Backend {
   /** 最後にコピー・保存した内容（テスト用） */
   readonly lastCopied: string | null;
   readonly lastSaved: { fileName: string; markdown: string } | null;
+  /** writeDebugLog で書いた出来事（テスト用） */
+  readonly debugLog: { level: "info" | "error"; event: string; fields?: Record<string, unknown> }[];
 
   /** ヘルプの内容を差し替える（既定はリポジトリの docs/guide.md と CHANGELOG.md） */
   setHelpContent(content: { guide?: string; releases?: ReleaseNote[] }): void;
@@ -226,6 +228,8 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
   let popupClosed = false;
   const recordingCheckAnswers: { noteId: string; deadline: number; keep: boolean }[] = [];
   let lastSaved: { fileName: string; markdown: string } | null = null;
+  let verboseUntil: number | null = null;
+  const debugLog: { level: "info" | "error"; event: string; fields?: Record<string, unknown> }[] = [];
 
   let appVersion = options.version ?? packageVersion;
   let helpGuide: string = bundledGuide;
@@ -705,9 +709,22 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       lastSaved = { fileName, markdown: toMarkdown(noteId, options).markdown };
       return fileName;
     },
-    async saveMeetingRecord(fileName) {
-      // プレビューには会議の検出がないので、記録は空
-      return { path: fileName, entries: 0 };
+    async getDebugLogStatus() {
+      return { verboseUntil };
+    },
+    async setDebugVerbose(enabled) {
+      verboseUntil = enabled ? Date.now() + 24 * 60 * 60 * 1000 : null;
+      return { verboseUntil };
+    },
+    async writeDebugLog(level, event, fields) {
+      debugLog.push({ level, event, fields });
+    },
+    async saveDebugBundle(fileName) {
+      // プレビューにはログのファイルがないので、名前だけ返す
+      return fileName;
+    },
+    get debugLog() {
+      return debugLog;
     },
     get lastCopied() {
       return lastCopied;

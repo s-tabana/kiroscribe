@@ -5,10 +5,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "../lib/app.mjs";
+import { ROOT, test } from "../lib/app.mjs";
 import { barButton, closeSettings, noteTitles, openSettings, pressBarButton, saveSettings, sel, settingsCheck } from "../lib/ui.mjs";
+import { ANTHROPIC_KEY, OPENAI_KEY } from "../lib/mock-server.mjs";
 import { dragWindow } from "../lib/uia.mjs";
 import { byText } from "../lib/webdriver.mjs";
+import { readZip } from "../lib/zip.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** 会議が見えなくなってから録音を止めるまでの猶予（このテストでの値。製品では 20 秒） */
@@ -260,22 +262,31 @@ test("[MTG-015] 自動録音を始められなかったときは、理由を知�
 });
 
 test(
-  "[MTG-025][MTG-026] 設定の［会議の検出の記録を保存…］で、検出の記録を JSON で保存できる",
+  "[MTG-025][MTG-026][LOG-011] 設定の［デバッグ用のログを保存…］で、ログ・会議の検出の記録・環境の情報を zip で保存できる",
   { config: { realMeetingDetection: true } },
   async (ctx) => {
     const session = await ctx.launch();
     // 検出を何回か調べるのを待つ（製品と同じく、調べた様子を記録している）
     await new Promise((resolve) => setTimeout(resolve, 1_500));
-    const out = `${ctx.work.dir}${process.platform === "win32" ? "\\" : "/"}meeting-record.json`;
+    const out = `${ctx.work.dir}${process.platform === "win32" ? "\\" : "/"}debug.zip`;
     ctx.work.answerDialogs({ savePath: out });
     await openSettings(session);
-    await session.click(byText("button", "会議の検出の記録を保存…"));
-    const shown = await session.waitForText(sel.settingsDialog, /会議の検出の記録を保存しました（\d+ 件）/);
+    await session.click(byText("button", "デバッグ用のログを保存…"));
+    const shown = await session.waitForText(sel.settingsDialog, /デバッグ用のログを保存しました: /);
     assert.ok(shown.includes(out), shown);
     const saveDialog = ctx.work.dialogs().find((d) => d.type === "save");
-    assert.match(saveDialog.options.defaultPath, /^kiroscribe-meeting-record-\d{8}-\d{4}\.json$/);
+    assert.match(saveDialog.options.defaultPath, /^kiroscribe-debug-\d{8}-\d{4}\.zip$/);
 
-    const record = JSON.parse(fs.readFileSync(out, "utf8"));
+    const files = readZip(fs.readFileSync(out));
+    const names = [...files.keys()];
+    for (const name of ["README.txt", "environment.json", "meeting-detection.json"]) {
+      assert.ok(names.includes(name), `${name} がない: ${names.join(", ")}`);
+    }
+    const logNames = names.filter((name) => /^logs\/kiroscribe-\d{8}\.log$/.test(name));
+    assert.ok(logNames.length >= 1, names.join(", "));
+
+    // 会議の検出の記録は、回帰テストの材料と同じ形で入る
+    const record = JSON.parse(files.get("meeting-detection.json").toString("utf8"));
     assert.equal(record.format, "kiroscribe-meeting-record/1");
     assert.ok(record.entries.length >= 1, JSON.stringify(record));
     assert.match(record.ownExe, /^kiroscribe(\.exe)?$/);
@@ -285,7 +296,18 @@ test(
         assert.ok(!/[\\/]/.test(user.app), `アプリのフルパスが記録に入っている: ${user.app}`);
       }
     }
-    assert.ok(!fs.readFileSync(out, "utf8").includes(path.basename(os.homedir())), "利用者のフォルダの名前が記録に入っている");
+
+    // ログには、本体の起動・会議の検出の判断と、画面の出来事が入る
+    const log = logNames.map((name) => files.get(name).toString("utf8")).join("");
+    for (const event of ["app.started", "meeting.check", "ui.loaded", "log.bundle.saving"]) {
+      assert.ok(log.includes(`"event":"${event}"`), `${event} がログにない:\n${log}`);
+    }
+    const environment = JSON.parse(files.get("environment.json").toString("utf8"));
+    assert.equal(environment.appVersion, JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version);
+
+    const all = names.map((name) => files.get(name).toString("utf8")).join("\n");
+    assert.ok(!all.includes(path.basename(os.homedir())), "利用者のフォルダの名前が zip に入っている");
+    for (const key of [OPENAI_KEY, ANTHROPIC_KEY]) assert.ok(!all.includes(key), "API キーが zip に入っている");
     await closeSettings(session);
   },
 );

@@ -59,6 +59,16 @@ pub(crate) async fn tick(app: &AppHandle, now_ms: i64) {
     let Some((step, taken)) = app.state::<RecorderState>().check(meeting_detected, now_ms, on_step).await else {
         return;
     };
+    crate::debug::info(
+        app,
+        "recording.check",
+        serde_json::json!({
+            "noteId": step.note_id,
+            "auto": step.auto,
+            "action": format!("{:?}", step.action),
+            "meetingDetected": meeting_detected,
+        }),
+    );
     if let Some(taken) = taken {
         finish_stop(app, taken).await;
         stopped_unanswered(app, &step);
@@ -105,11 +115,13 @@ pub async fn answer_recording_check(app: AppHandle, note_id: String, deadline: i
     let recorder = app.state::<RecorderState>();
     let answer = if keep {
         let withdraw = |auto: Option<MeetingApp>| withdraw_confirm_end(&app, &note_id, auto.map(MeetingApp::label));
+        crate::debug::info(&app, "recording.check.answered", serde_json::json!({ "noteId": note_id, "keep": true }));
         match recorder.keep(&note_id, deadline, now_ms(), withdraw).await {
             Answer::Applied(()) => return Ok(()),
             Answer::Stale { note_busy } => note_busy,
         }
     } else {
+        crate::debug::info(&app, "recording.check.answered", serde_json::json!({ "noteId": note_id, "keep": false }));
         match recorder.take_for_answer(&note_id, deadline).await {
             Answer::Applied(taken) => {
                 let stopped = finish_stop(&app, taken).await;

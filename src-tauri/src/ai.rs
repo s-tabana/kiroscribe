@@ -15,6 +15,7 @@ use kiroscribe_core::secrets::{require_api_key, Provider};
 use kiroscribe_core::settings::Settings;
 use kiroscribe_core::transcript::Segment;
 use serde::Serialize;
+use serde_json::json;
 use tauri::{Emitter, State};
 
 use crate::error::{CmdResult, CommandError};
@@ -125,6 +126,34 @@ fn emitter(app: &AppHandle, event: &'static str, note_id: &str) -> impl FnMut(&s
     }
 }
 
+/// AI の処理の始まりを書き、終わったら成否と時間を書く（送った内容と、返ってきた内容は書かない）。
+fn log_started(app: &AppHandle, kind: &str, note_id: &str, model: &str) -> std::time::Instant {
+    crate::debug::info(app, "ai.started", json!({ "kind": kind, "noteId": note_id, "model": model }));
+    std::time::Instant::now()
+}
+
+fn log_finished<T>(
+    app: &AppHandle,
+    kind: &str,
+    note_id: &str,
+    started: std::time::Instant,
+    cancelled: bool,
+    result: &CmdResult<T>,
+) {
+    let ms = started.elapsed().as_millis() as i64;
+    match result {
+        Ok(_) => crate::debug::info(app, "ai.finished", json!({ "kind": kind, "noteId": note_id, "ms": ms })),
+        Err(_) if cancelled => {
+            crate::debug::info(app, "ai.cancelled", json!({ "kind": kind, "noteId": note_id, "ms": ms }))
+        }
+        Err(err) => crate::debug::error(
+            app,
+            "ai.failed",
+            json!({ "kind": kind, "noteId": note_id, "ms": ms, "reason": err.0 }),
+        ),
+    }
+}
+
 /// メモと文字起こしから議事録を作り、保存したノートを返す。
 #[tauri::command]
 pub async fn enhance_note(
@@ -135,17 +164,30 @@ pub async fn enhance_note(
 ) -> CmdResult<Note> {
     let guard = ai.begin(format!("enhance:{note_id}"), "このノートの議事録を作成中です")?;
     let loaded = load(&state, &note_id)?;
+    let started = log_started(&app, "enhance", &note_id, &loaded.settings.claude_model);
+    let result = enhance(&app, &state, &guard, &loaded, &note_id).await;
+    log_finished(&app, "enhance", &note_id, started, guard.cancel.load(Ordering::SeqCst), &result);
+    result
+}
+
+async fn enhance(
+    app: &AppHandle,
+    state: &AppState,
+    guard: &RunGuard<'_>,
+    loaded: &Loaded,
+    note_id: &str,
+) -> CmdResult<Note> {
     let request = MessageRequest {
         system: ENHANCE_SYSTEM_PROMPT.to_string(),
         messages: vec![Turn {
             role: Role::User,
-            content: enhance_user_message(&context(&loaded))?,
+            content: enhance_user_message(&context(loaded))?,
         }],
         max_tokens: 64_000,
         effort: Effort::Medium,
     };
     let client = ClaudeClient::new(&loaded.api_key, &loaded.settings.claude_model);
-    let mut on_text = emitter(&app, EVENT_ENHANCE_DELTA, &note_id);
+    let mut on_text = emitter(app, EVENT_ENHANCE_DELTA, note_id);
     let result = client
         .stream(&request, &mut on_text, &guard.cancel, &RetryPolicy::default())
         .await?;
@@ -158,7 +200,7 @@ pub async fn enhance_note(
     }
     let note = state
         .db()
-        .save_enhanced_notes(&note_id, &body, title.as_deref())?;
+        .save_enhanced_notes(note_id, &body, title.as_deref())?;
     Ok(note)
 }
 
@@ -229,7 +271,9 @@ pub async fn send_chat_message(
         let question = db.add_chat_message(&note_id, Role::User, &content)?;
         (question, db.list_chat_messages(&note_id)?)
     };
+    let started = log_started(&app, "chat", &note_id, &loaded.settings.claude_model);
     let answered = answer_question(&app, &state, &guard, &loaded, &note_id, &history).await;
+    log_finished(&app, "chat", &note_id, started, guard.cancel.load(Ordering::SeqCst), &answered);
     if answered.is_err() {
         // 回答をもらえなかった質問（失敗・中止・空の回答）は、履歴に残さない。
         // 画面は質問を入力欄に戻すので、残すと、送り直したときに同じ質問が 2 つ並ぶ

@@ -56,3 +56,52 @@ describe("errorMessage", () => {
     expect(errorMessage(undefined)).toBe("不明なエラーが発生しました");
   });
 });
+
+describe("デバッグ用のログ（Tauri 上）", () => {
+  beforeEach(() => {
+    tauri.invoke.mockReset().mockResolvedValue(undefined);
+    tauri.save.mockReset();
+  });
+
+  it("[LOG-008] 本体のコマンドが失敗したら、コマンドの名前と理由をデバッグ用のログに書いてから、失敗を返す", async () => {
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === "start_recording") throw "マイクが見つかりません";
+      return undefined;
+    });
+
+    await expect(createTauriBackend().startRecording("note-1")).rejects.toBe("マイクが見つかりません");
+
+    // 引数（ノートの ID など）は書かない
+    expect(tauri.invoke).toHaveBeenLastCalledWith("write_debug_log", {
+      level: "error",
+      event: "ui.command_failed",
+      fields: { command: "start_recording", message: "マイクが見つかりません" },
+    });
+  });
+
+  it("[LOG-008] ログを書くこと自体が失敗しても、ログを書き直そうとしない", async () => {
+    tauri.invoke.mockRejectedValue("書けません");
+
+    await expect(createTauriBackend().writeDebugLog("info", "ui.loaded", { view: "main" })).rejects.toBe("書けません");
+
+    expect(tauri.invoke).toHaveBeenCalledOnce();
+  });
+
+  it("[LOG-011] 保存先のダイアログで選べる種類は ZIP（.zip）だけで、選んだ場所を本体に渡す。取り消したら何もしない", async () => {
+    tauri.save.mockResolvedValue("C:\\Users\\me\\Desktop\\debug.zip");
+
+    const saved = await createTauriBackend().saveDebugBundle("kiroscribe-debug-20261127-1904.zip");
+
+    expect(tauri.save).toHaveBeenCalledExactlyOnceWith({
+      defaultPath: "kiroscribe-debug-20261127-1904.zip",
+      filters: [{ name: "ZIP", extensions: ["zip"] }],
+    });
+    expect(tauri.invoke).toHaveBeenCalledExactlyOnceWith("save_debug_bundle", { path: "C:\\Users\\me\\Desktop\\debug.zip" });
+    expect(saved).toBe("C:\\Users\\me\\Desktop\\debug.zip");
+
+    tauri.invoke.mockClear();
+    tauri.save.mockResolvedValue(null);
+    expect(await createTauriBackend().saveDebugBundle("x.zip")).toBeNull();
+    expect(tauri.invoke).not.toHaveBeenCalled();
+  });
+});

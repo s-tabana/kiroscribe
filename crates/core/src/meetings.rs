@@ -89,7 +89,8 @@ fn packaged_app(lower_id: &str) -> Option<MeetingApp> {
     })
 }
 
-fn desktop_app(id: &str) -> Option<MeetingApp> {
+/// マイクを使ったプログラム（フルパスかパッケージ名）が、デスクトップの会議アプリなら、そのアプリ。
+pub(crate) fn desktop_app(id: &str) -> Option<MeetingApp> {
     let lower = id.to_lowercase();
     if let Some(app) = packaged_app(&lower) {
         return Some(app);
@@ -282,6 +283,129 @@ pub fn still_active(observation: &Observation, meeting: &Detection, own_exe: Opt
     }
 }
 
+/// 会議の開始・終了を確定するまでの段階（[`MeetingTracker::phase`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// 会議は見えていない
+    Idle,
+    /// 会議が見えていて、開始の確定を待っている
+    Confirming(MeetingApp),
+    /// 会議が続いている
+    Active(MeetingApp),
+    /// 会議が見えなくなり、終了の猶予の間
+    Fading(MeetingApp),
+}
+
+impl Phase {
+    /// 段階の短い名前（ログに書く）。
+    pub fn name(self) -> &'static str {
+        match self {
+            Phase::Idle => "idle",
+            Phase::Confirming(_) => "confirming",
+            Phase::Active(_) => "active",
+            Phase::Fading(_) => "fading",
+        }
+    }
+
+    pub fn app(self) -> Option<MeetingApp> {
+        match self {
+            Phase::Idle => None,
+            Phase::Confirming(app) | Phase::Active(app) | Phase::Fading(app) => Some(app),
+        }
+    }
+}
+
+/// 判定の結果の種類（[`diagnose`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Verdict {
+    /// マイクを使っているアプリがない（Kiroscribe 自身を除く）
+    NoMicUse,
+    /// マイクを使っているのは、会議アプリでもブラウザでもない
+    NoMeetingApp,
+    /// ブラウザがマイクを使っているが、そのブラウザに会議のタブが見えない
+    NoMeetingTab,
+    /// デスクトップの会議アプリがマイクを使っている
+    DesktopApp,
+    /// マイクを使っているブラウザに、会議のタブが見えている
+    BrowserTab,
+}
+
+impl Verdict {
+    /// 利用者や開発者が読む説明。
+    pub fn describe(self) -> &'static str {
+        match self {
+            Verdict::NoMicUse => "マイクを使っているアプリがない",
+            Verdict::NoMeetingApp => "マイクを使っているのは、会議アプリでもブラウザでもない",
+            Verdict::NoMeetingTab => "ブラウザがマイクを使っているが、そのブラウザに会議のタブが見えない",
+            Verdict::DesktopApp => "会議アプリがマイクを使っている",
+            Verdict::BrowserTab => "マイクを使っているブラウザに、会議のタブが見えている",
+        }
+    }
+}
+
+/// 1 回分の判定の様子（デバッグ用のログに書く）。なぜ会議とみなした・みなさなかったかを後から調べられるようにする。
+/// ウィンドウのタイトルは入れない（「詳しい記録」のときだけ、[`browser_titles`] で別に書く）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diagnosis {
+    /// いまマイクを使っているアプリ（Kiroscribe 自身を除く）。実行ファイルの名前（小文字）か、ストアアプリのパッケージ名
+    pub mic_in_use: Vec<String>,
+    /// マイクを使っているブラウザの、表示中のウィンドウの数
+    pub browser_windows: usize,
+    pub verdict: Verdict,
+    /// 会議とみなしたなら、その会議アプリ
+    pub app: Option<MeetingApp>,
+}
+
+/// 記録やログに残すアプリの名前: パスなら実行ファイルの名前だけ（利用者の名前を含むフルパスは残さない）、
+/// パッケージ名ならそのまま。
+pub fn app_name(id: &str) -> String {
+    if id.contains(['\\', '/']) {
+        exe_name(id)
+    } else {
+        id.to_string()
+    }
+}
+
+/// 判定の様子を調べる（判定そのものは [`detect`] と同じ）。
+pub fn diagnose(observation: &Observation, own_exe: Option<&str>) -> Diagnosis {
+    let active = active_mic_users(observation, own_exe);
+    let mut mic_in_use: Vec<String> = active.iter().map(|u| app_name(&u.id)).collect();
+    mic_in_use.sort();
+    mic_in_use.dedup();
+    let mic_browsers = browsers_in_use(&active);
+    let browser_windows = observation
+        .windows
+        .iter()
+        .filter(|w| mic_browsers.contains(&w.exe.to_lowercase()))
+        .count();
+    let (verdict, app) = match detect(observation, own_exe) {
+        Some(detection) if detection.via_browser => (Verdict::BrowserTab, Some(detection.app)),
+        Some(detection) => (Verdict::DesktopApp, Some(detection.app)),
+        None if active.is_empty() => (Verdict::NoMicUse, None),
+        None if mic_browsers.is_empty() => (Verdict::NoMeetingApp, None),
+        None => (Verdict::NoMeetingTab, None),
+    };
+    Diagnosis {
+        mic_in_use,
+        browser_windows,
+        verdict,
+        app,
+    }
+}
+
+/// マイクを使っているブラウザの、表示中のウィンドウのタイトル（「詳しい記録」のときだけログに書く）。
+pub fn browser_titles(observation: &Observation, own_exe: Option<&str>) -> Vec<String> {
+    let active = active_mic_users(observation, own_exe);
+    let mic_browsers = browsers_in_use(&active);
+    observation
+        .windows
+        .iter()
+        .filter(|w| mic_browsers.contains(&w.exe.to_lowercase()))
+        .map(|w| format!("{}: {}", w.exe.to_lowercase(), w.title))
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeetingEvent {
     Started(MeetingApp),
@@ -301,6 +425,8 @@ pub struct MeetingTracker {
     candidate: Option<(Detection, i64)>,
     active: Option<Detection>,
     last_seen_ms: i64,
+    /// 最後に調べた時刻
+    last_tick_ms: i64,
 }
 
 impl Default for MeetingTracker {
@@ -311,6 +437,7 @@ impl Default for MeetingTracker {
             candidate: None,
             active: None,
             last_seen_ms: 0,
+            last_tick_ms: 0,
         }
     }
 }
@@ -323,6 +450,7 @@ impl MeetingTracker {
 
     /// `detected` はいま始まりそうな会議、`continuing` は進行中の会議がまだ続いているか（[`still_active`]）。
     pub fn tick(&mut self, detected: Option<Detection>, continuing: bool, now_ms: i64) -> Option<MeetingEvent> {
+        self.last_tick_ms = now_ms;
         if let Some(active) = self.active {
             // 進行中の会議が続いている（同じアプリの会議がまた見えたときも、続きとみなす）。
             // その間に別の会議が見えても、新しい会議の開始にはしない
@@ -373,6 +501,24 @@ impl MeetingTracker {
         }
     }
 
+    /// 開始の確定を待っているなら、待ち始めた時刻（デバッグ用のログに書く）。
+    pub fn confirming_since(&self) -> Option<i64> {
+        match (self.active, self.candidate) {
+            (None, Some((_, since))) => Some(since),
+            _ => None,
+        }
+    }
+
+    /// いまの段階（デバッグ用のログに書く）。
+    pub fn phase(&self) -> Phase {
+        match (self.active, self.candidate) {
+            (Some(active), _) if self.last_seen_ms == self.last_tick_ms => Phase::Active(active.app),
+            (Some(active), _) => Phase::Fading(active.app),
+            (None, Some((candidate, _))) => Phase::Confirming(candidate.app),
+            (None, None) => Phase::Idle,
+        }
+    }
+
     /// 観測結果から 1 回分を進める。
     pub fn observe(&mut self, observation: &Observation, own_exe: Option<&str>, now_ms: i64) -> Option<MeetingEvent> {
         let detected = detect(observation, own_exe);
@@ -385,13 +531,20 @@ impl MeetingTracker {
 
 /// 現在のマイク使用状況とウィンドウを調べる。Windows 以外では何も検出しない。
 pub fn observe() -> Observation {
+    observe_detailed().0
+}
+
+/// 現在のマイク使用状況とウィンドウを調べ、マイクの使用状況の記録の生の値（デバッグ用のログに書く）も返す。
+/// Windows 以外では、何も検出せず、記録もない（`None`）。
+pub fn observe_detailed() -> (Observation, Option<crate::mic_store::MicStore>) {
     #[cfg(windows)]
     {
-        windows_observer::observe()
+        let (observation, store) = windows_observer::observe_detailed();
+        (observation, Some(store))
     }
     #[cfg(not(windows))]
     {
-        Observation::default()
+        (Observation::default(), None)
     }
 }
 
@@ -403,23 +556,26 @@ pub mod windows_observer {
     use winreg::RegKey;
 
     use super::{exe_name, MicUser, Observation, WindowInfo};
+    use crate::mic_store::{MicEntry, MicStore};
 
     pub const CONSENT_STORE: &str =
         r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
 
-    fn in_use(key: &RegKey) -> bool {
-        let start: u64 = key.get_value("LastUsedTimeStart").unwrap_or(0);
-        let stop: u64 = key.get_value("LastUsedTimeStop").unwrap_or(1);
-        // 使用中は終了時刻が 0 のまま
-        start > 0 && stop == 0
+    /// 記録 1 件の生の値を読む。
+    fn entry(id: String, key: &RegKey) -> MicEntry {
+        MicEntry {
+            id,
+            last_start: key.get_value("LastUsedTimeStart").unwrap_or(0),
+            last_stop: key.get_value("LastUsedTimeStop").ok(),
+        }
     }
 
-    /// `root\path` 以下のマイク使用記録を読む（テストでは別のキーを渡す）。
-    pub fn read_mic_users(root: &RegKey, path: &str) -> Vec<MicUser> {
+    /// `root\path` 以下のマイク使用記録を、生の値のまま読む（テストでは別のキーを渡す）。
+    pub fn read_mic_store(root: &RegKey, path: &str) -> MicStore {
         let Ok(base) = root.open_subkey(path) else {
-            return Vec::new();
+            return MicStore::default();
         };
-        let mut users = Vec::new();
+        let mut entries = Vec::new();
         for name in base.enum_keys().flatten() {
             let Ok(key) = base.open_subkey(&name) else {
                 continue;
@@ -428,20 +584,27 @@ pub mod windows_observer {
                 // 通常のデスクトップアプリ。キー名はパスの「\」を「#」に置き換えたもの
                 for app in key.enum_keys().flatten() {
                     if let Ok(app_key) = key.open_subkey(&app) {
-                        users.push(MicUser {
-                            id: app.replace('#', "\\"),
-                            in_use: in_use(&app_key),
-                        });
+                        entries.push(entry(app.replace('#', "\\"), &app_key));
                     }
                 }
             } else {
-                users.push(MicUser {
-                    in_use: in_use(&key),
-                    id: name,
-                });
+                entries.push(entry(name, &key));
             }
         }
-        users
+        MicStore { opened: true, entries }
+    }
+
+    /// `root\path` 以下のマイク使用記録を読む（テストでは別のキーを渡す）。
+    /// 使用中は、使用を始めていて、終了の時刻が 0 のまま（[`MicEntry::in_use`]）。
+    pub fn read_mic_users(root: &RegKey, path: &str) -> Vec<MicUser> {
+        read_mic_store(root, path)
+            .entries
+            .into_iter()
+            .map(|entry| MicUser {
+                in_use: entry.in_use(),
+                id: entry.id,
+            })
+            .collect()
     }
 
     fn process_exe(pid: u32, cache: &mut HashMap<u32, String>) -> String {
@@ -512,15 +675,27 @@ pub mod windows_observer {
     }
 
     pub fn observe() -> Observation {
+        observe_detailed().0
+    }
+
+    pub fn observe_detailed() -> (Observation, MicStore) {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let mic_users = read_mic_users(&hkcu, CONSENT_STORE);
+        let store = read_mic_store(&hkcu, CONSENT_STORE);
+        let mic_users: Vec<MicUser> = store
+            .entries
+            .iter()
+            .map(|entry| MicUser {
+                id: entry.id.clone(),
+                in_use: entry.in_use(),
+            })
+            .collect();
         // ウィンドウを列挙するのは、ブラウザがマイクを使っているときだけ
         let windows = if mic_users.iter().any(|u| u.in_use) {
             list_windows()
         } else {
             Vec::new()
         };
-        Observation { mic_users, windows }
+        (Observation { mic_users, windows }, store)
     }
 
     #[cfg(test)]
@@ -530,8 +705,8 @@ pub mod windows_observer {
 
         use super::*;
 
-        /// 本物と同じ形のキーをテスト用の場所に作って読む
-        // [MTG-020]
+        /// 本物と同じ形のキーをテスト用の場所に作って読む。デバッグ用のログに書く生の値（Stop の値と、開けたか）も読める
+        // [MTG-020][LOG-005]
         #[test]
         fn reads_consent_store_layout() {
             let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -550,7 +725,12 @@ pub mod windows_observer {
 
             let mut users = read_mic_users(&hkcu, &path);
             users.sort_by(|a, b| a.id.cmp(&b.id));
+            let store = read_mic_store(&hkcu, &path);
             hkcu.delete_subkey_all(path.rsplit_once('\\').unwrap().0).unwrap();
+            assert!(store.opened);
+            let chrome_entry = store.entries.iter().find(|e| e.id.ends_with("chrome.exe")).unwrap();
+            assert_eq!(chrome_entry.last_stop, Some(133_000_000_000_100_000));
+            assert!(!read_mic_store(&hkcu, &path).opened, "消したキーは開けない");
 
             assert_eq!(users.len(), 3);
             let slack = users.iter().find(|u| u.id.ends_with("slack.exe")).unwrap();
@@ -600,6 +780,66 @@ mod tests {
         } else {
             Detection::desktop(app)
         })
+    }
+
+    /// 判定の様子: なぜ会議とみなさなかったかを、理由の種類と、マイクを使っているアプリの名前で分かるようにする。
+    /// フルパス（利用者の名前を含む）とウィンドウのタイトルは入れない。
+    // [LOG-005]
+    #[test]
+    fn diagnosis_tells_why_a_meeting_was_or_was_not_detected() {
+        let own = r"C:\Users\山田\AppData\Local\Kiroscribe\kiroscribe.exe";
+        let none = diagnose(&Observation { mic_users: vec![mic(own, true)], windows: vec![] }, Some(own));
+        assert_eq!(none.verdict, Verdict::NoMicUse);
+        assert!(none.mic_in_use.is_empty(), "Kiroscribe 自身は入れない");
+
+        let other = diagnose(
+            &Observation { mic_users: vec![mic(r"C:\Users\山田\Apps\Audacity.exe", true)], windows: vec![] },
+            None,
+        );
+        assert_eq!((other.verdict, other.mic_in_use.clone()), (Verdict::NoMeetingApp, vec!["audacity.exe".to_string()]));
+
+        let tabs = Observation {
+            mic_users: vec![mic(CHROME, true)],
+            windows: vec![win("chrome.exe", "受信トレイ - 山田 - Gmail - Google Chrome"), win("msedge.exe", "Meet - abc")],
+        };
+        let no_tab = diagnose(&tabs, None);
+        assert_eq!(no_tab.verdict, Verdict::NoMeetingTab);
+        assert_eq!(no_tab.browser_windows, 1, "マイクを使っているブラウザのウィンドウだけを数える");
+        assert_eq!(no_tab.app, None);
+        assert!(!format!("{no_tab:?}").contains("Gmail"), "タイトルは入れない");
+        assert_eq!(browser_titles(&tabs, None), vec!["chrome.exe: 受信トレイ - 山田 - Gmail - Google Chrome".to_string()]);
+
+        let meet = Observation {
+            mic_users: vec![mic(CHROME, true)],
+            windows: vec![win("chrome.exe", "Meet - abc-defg-hij - Google Chrome")],
+        };
+        let found = diagnose(&meet, None);
+        assert_eq!((found.verdict, found.app), (Verdict::BrowserTab, Some(MeetingApp::GoogleMeet)));
+
+        let slack = diagnose(
+            &Observation { mic_users: vec![mic("com.tinyspeck.slackdesktop_8yrtsj140pw4g", true)], windows: vec![] },
+            None,
+        );
+        assert_eq!((slack.verdict, slack.app), (Verdict::DesktopApp, Some(MeetingApp::SlackHuddle)));
+        assert_eq!(slack.mic_in_use, vec!["com.tinyspeck.slackdesktop_8yrtsj140pw4g".to_string()]);
+        assert!(!Verdict::NoMeetingTab.describe().is_empty());
+    }
+
+    /// 開始の確定待ち・続いている・猶予の間を、段階として読める。
+    // [LOG-005]
+    #[test]
+    fn tracker_phase_follows_the_detection() {
+        let mut tracker = MeetingTracker::default();
+        assert_eq!(tracker.phase(), Phase::Idle);
+        tracker.tick(found(MeetingApp::Zoom, false), false, 0);
+        assert_eq!(tracker.phase(), Phase::Confirming(MeetingApp::Zoom));
+        tracker.tick(found(MeetingApp::Zoom, false), false, 4_000);
+        assert_eq!(tracker.phase(), Phase::Active(MeetingApp::Zoom));
+        tracker.tick(None, false, 6_000);
+        assert_eq!(tracker.phase(), Phase::Fading(MeetingApp::Zoom));
+        assert_eq!(tracker.phase().name(), "fading");
+        tracker.tick(None, true, 8_000);
+        assert_eq!(tracker.phase(), Phase::Active(MeetingApp::Zoom));
     }
 
     // [MTG-001][MTG-003]

@@ -279,16 +279,27 @@ fn ipc_contract_matches_the_frontend() {
         .unwrap_err();
     assert!(refused.contains(".md / .markdown / .txt"), "{refused}");
 
-    // ---- 会議の検出の記録（このテストでは検出を模擬しているので、記録は空）[MTG-026] ----
-    let record_path = fixture.dir.join("会議の検出の記録.json");
-    let entries = s.ok("save_meeting_record", json!({ "path": record_path }));
-    assert_eq!(entries, json!(0));
-    let record: Value = serde_json::from_str(&std::fs::read_to_string(&record_path).unwrap()).unwrap();
-    assert_eq!(record["format"], kiroscribe_core::meeting_record::FORMAT);
+    // ---- デバッグ用のログ（詳しい記録の切り替え・画面の出来事・zip の保存）[LOG-010][LOG-011][MTG-026] ----
+    let status = s.ok("get_debug_log_status", json!({}));
+    assert_eq!(status["verboseUntil"], Value::Null);
+    let on = s.ok("set_debug_verbose", json!({ "enabled": true }));
+    assert!(on["verboseUntil"].as_i64().unwrap() > kiroscribe_core::time::now_ms());
+    let off = s.ok("set_debug_verbose", json!({ "enabled": false }));
+    assert_eq!(off["verboseUntil"], Value::Null);
+    let written = s.ok(
+        "write_debug_log",
+        json!({ "level": "error", "event": "ui.command_failed", "fields": { "command": "x", "message": "y" } }),
+    );
+    assert_eq!(written, Value::Null);
+    let bundle_path = fixture.dir.join("デバッグ用のログ.zip");
+    let files = s.ok("save_debug_bundle", json!({ "path": bundle_path }));
+    assert!(files.as_u64().unwrap() >= 4, "{files}");
+    let bundle = std::fs::read(&bundle_path).unwrap();
+    assert!(bundle.starts_with(b"PK"), "zip になっていない");
     let refused = s
-        .call("save_meeting_record", json!({ "path": fixture.dir.join("記録.txt") }))
+        .call("save_debug_bundle", json!({ "path": fixture.dir.join("ログ.json") }))
         .unwrap_err();
-    assert_eq!(refused, "保存できるのは .json ファイルだけです");
+    assert_eq!(refused, "保存できるのは .zip ファイルだけです");
 
     // ---- 文字起こし API がキーを拒否したら、画面に知らせる ----
     *fixture.api.transcription_status.lock().unwrap() = Some(401);

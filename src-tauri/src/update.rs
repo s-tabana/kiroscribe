@@ -438,7 +438,27 @@ async fn check(app: &AppHandle) -> tauri_plugin_updater::Result<UpdateStatus> {
             return Ok(tracker.status());
         }
     }
-    let found = build_updater(app)?.check().await?;
+    let current = app.package_info().version.to_string();
+    let found = match build_updater(app) {
+        Ok(updater) => updater.check().await,
+        Err(err) => Err(err),
+    };
+    let found = match found {
+        Ok(found) => found,
+        Err(err) => {
+            crate::debug::error(
+                app,
+                "update.check_failed",
+                serde_json::json!({ "current": current, "reason": err.to_string() }),
+            );
+            return Err(err);
+        }
+    };
+    crate::debug::info(
+        app,
+        "update.checked",
+        serde_json::json!({ "current": current, "available": found.as_ref().map(|update| update.version.clone()) }),
+    );
     let status = state
         .lock()
         .record_check(found.map(|update| (describe(&update), update)), now_ms());
@@ -501,6 +521,7 @@ async fn auto_update_step(app: &AppHandle) {
             Ok(package) => state.lock().finish_background_download(package),
             Err(err) => {
                 eprintln!("更新をダウンロードできませんでした: {err}");
+                crate::debug::error(app, "update.download_failed", serde_json::json!({ "reason": err.to_string() }));
                 state.lock().fail_auto()
             }
         };
@@ -516,11 +537,17 @@ async fn auto_update_step(app: &AppHandle) {
     };
     emit_status(app, &state.lock().status());
     let current_version = app.package_info().version.to_string();
+    crate::debug::info(
+        app,
+        "update.installing",
+        serde_json::json!({ "auto": true, "from": current_version, "to": update.version }),
+    );
     mark_auto_restart(&app.state::<AppState>().db(), &current_version, &update.version, now_ms());
     // `install` は、渡したファイルの署名をもう一度確かめてからインストーラを起動する
     if let Err(err) = update.install(package.as_slice()) {
         clear_restart_markers(&app.state::<AppState>().db());
         eprintln!("更新を自動でインストールできませんでした: {err}");
+        crate::debug::error(app, "update.install_failed", serde_json::json!({ "auto": true, "reason": err.to_string() }));
         let status = state.lock().fail_auto();
         emit_status(app, &status);
         return;
@@ -757,7 +784,13 @@ pub async fn install_update(app: AppHandle) -> CmdResult<()> {
     update.timeout = Some(DOWNLOAD_TIMEOUT);
     emit_status(&app, &updates.lock().status());
 
+    crate::debug::info(
+        &app,
+        "update.installing",
+        serde_json::json!({ "auto": false, "from": app.package_info().version.to_string(), "to": update.version }),
+    );
     if let Err(err) = download_and_install(&app, &update, package).await {
+        crate::debug::error(&app, "update.install_failed", serde_json::json!({ "auto": false, "reason": err.0 }));
         let status = updates.lock().abort_install();
         emit_status(&app, &status);
         return Err(err);
