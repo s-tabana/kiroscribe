@@ -117,6 +117,8 @@ mod tests {
         db.set_value(FOLDERS_KEY, r#"[{"path":"/x","place":{"real":null,"volume":"x","file":"1"}}]"#).unwrap();
         let loaded = db.load_search_folders().unwrap();
         assert_eq!((loaded[0].place.clone(), loaded[0].path.as_str()), (None, "/x"), "読めない値は、記録していないものとして読む");
+        db.set_value(FOLDERS_KEY, r#"[{"path":"/x","place":{"real":null,"volume":"1","file":"1","born":"5"}}]"#).unwrap();
+        assert_eq!(db.load_search_folders().unwrap()[0].place, None, "実際の場所を記録していない値は、選び直すまで読まない");
     }
 
     /// リンクのフォルダ・フォルダでないものは、足せない。

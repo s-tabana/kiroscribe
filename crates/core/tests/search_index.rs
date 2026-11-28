@@ -951,3 +951,141 @@ fn when_rows_cannot_even_be_hidden_the_index_is_recreated() {
     assert_eq!(stored_rows(&f.index_path, &f.root), 0, "索引のファイルを作り直した");
     assert!(search(&f, "経費").is_empty());
 }
+
+/// 消去待ちでない索引に、検索に出す行として `term` を含む資料が入ったか（索引を作り直している途中でも、読み取りだけで確かめる。
+/// [`SearchIndex::open`] は、開けないと索引のファイルを作り直すので、作業用のスレッドが作っている途中には使わない）。
+#[cfg(unix)]
+fn readable_hit(index_path: &Path, term: &str) -> bool {
+    if kiroscribe_core::search::store::erase_marker(index_path).exists() {
+        return false;
+    }
+    let Ok(conn) = rusqlite::Connection::open_with_flags(index_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT COUNT(*) FROM docs WHERE instr(body, ?1) > 0 AND folder IN (SELECT folder FROM bindings)",
+        [term],
+        |row| row.get::<_, i64>(0),
+    )
+    .is_ok_and(|count| count > 0)
+}
+
+/// 索引のフォルダを読み取りだけにする（中のファイルを消せず、消去待ちの記録も作れない）。
+/// 書き込みを禁じられない（管理者で動かしている）ときは、戻して false。
+#[cfg(unix)]
+fn lock_data_folder(data: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(data, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(data.join("probe"), "").is_ok() {
+        let _ = std::fs::remove_file(data.join("probe"));
+        unlock_data_folder(data);
+        eprintln!("書き込みを禁じられない（管理者で動かしている）ため、確かめません");
+        return false;
+    }
+    true
+}
+
+#[cfg(unix)]
+fn unlock_data_folder(data: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(data, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// 出どころを確かめられない行を検索から外せず、索引を空にも消しもできず、消去待ちも記録できないときは、
+/// 検索を止める（選び直しても再開しない）。書き込めるようになったら、消去待ちを記録してから索引を消し、
+/// 消し終えてから検索を再開して、いまの中身を読み直す。
+// [IDX-027]
+#[cfg(unix)]
+#[test]
+fn an_index_that_cannot_be_invalidated_is_not_searched_until_it_is_erased() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("共有資料");
+    write(&root.join("a.txt"), "経費");
+    let index_path = dir.path().join("data").join(INDEX_FILE);
+    let data = index_path.parent().unwrap().to_path_buf();
+    let intervals = Intervals { purge_retry: Duration::from_millis(200), ..Intervals::default() };
+    let indexer = Indexer::spawn_with_intervals(index_path.clone(), Limits::default(), intervals, |_| {});
+    let registered = folder(&root);
+    let settled = |after: u64| {
+        wait_until("索引", Duration::from_secs(20), || {
+            let status = indexer.status();
+            status.state == IndexState::Ready && status.revision > after
+        });
+    };
+    indexer.enable(vec![registered.clone()]);
+    wait_until("索引", Duration::from_secs(20), || indexer.status().files == 1);
+    block_deletes(&index_path, "docs", true);
+    block_deletes(&index_path, "bindings", true);
+    overwrite_keeping_stamp(&root.join("a.txt"), "予算");
+    if !lock_data_folder(&data) {
+        return;
+    }
+
+    let returned = indexer.set_folders(vec![SearchFolder { place: None, ..registered.clone() }]);
+    settled(returned.revision);
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(stored_rows(&index_path, &root), 1, "行を消せていない");
+    assert!(search_at(&index_path, "経費").is_empty(), "外せない行は、検索を止めて出さない");
+    assert!(!kiroscribe_core::search::store::erase_marker(&index_path).exists(), "消去待ちを記録できない状態");
+
+    // 選び直しても、消し終えるまでは検索しない
+    let returned = indexer.set_folders(vec![registered.clone()]);
+    settled(returned.revision);
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(search_at(&index_path, "経費").is_empty());
+
+    unlock_data_folder(&data);
+    wait_until("消し直したあとの読み直し", Duration::from_secs(20), || readable_hit(&index_path, "予算"));
+    assert_eq!(search_at(&index_path, "予算"), ["a.txt"]);
+    assert!(search_at(&index_path, "経費").is_empty(), "前の中身を残さない");
+    assert!(!kiroscribe_core::search::store::erase_marker(&index_path).exists(), "消し終えたら、消去待ちを解く");
+    assert!(indexer.shutdown_and_wait(Duration::from_secs(5)));
+}
+
+/// 前回の起動で消し終えられなかった索引（消去待ちの記録が残っている）は、起動し直したあとも、消し終えるまで検索しない。
+/// 消せるようになったら消し直し、消去待ちを解いてから、いまの中身を読み直す。
+// [IDX-027]
+#[cfg(unix)]
+#[test]
+fn an_index_waiting_to_be_erased_stays_out_of_search_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("共有資料");
+    write(&root.join("a.txt"), "経費");
+    let index_path = dir.path().join("data").join(INDEX_FILE);
+    let data = index_path.parent().unwrap().to_path_buf();
+    let intervals = Intervals { purge_retry: Duration::from_millis(200), ..Intervals::default() };
+    let registered = folder(&root);
+    {
+        let first = Indexer::spawn_with_intervals(index_path.clone(), Limits::default(), intervals, |_| {});
+        first.enable(vec![registered.clone()]);
+        wait_until("索引", Duration::from_secs(20), || first.status().files == 1);
+        assert!(first.shutdown_and_wait(Duration::from_secs(5)));
+    }
+    // 前回の起動が、索引を検索から外せないまま終わった（消去待ちの記録だけが残っている）
+    std::fs::write(kiroscribe_core::search::store::erase_marker(&index_path), "").unwrap();
+    block_deletes(&index_path, "docs", true);
+    block_deletes(&index_path, "bindings", true);
+    overwrite_keeping_stamp(&root.join("a.txt"), "予算");
+    // 読み取りだけのフォルダでも索引を開けるように、接続を開いたままにする（書き込みの途中の内容のファイルを残す）
+    let held = SearchIndex::open(&index_path).unwrap();
+    if !lock_data_folder(&data) {
+        return;
+    }
+
+    let second = Indexer::spawn_with_intervals(index_path.clone(), Limits::default(), intervals, |_| {});
+    second.enable(vec![registered]);
+    wait_until("索引", Duration::from_secs(20), || second.status().state == IndexState::Ready);
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(held.stored_rows(&root).unwrap(), 1, "行を消せていない");
+    assert!(held.search(&["経費".to_string()], 8).unwrap().is_empty(), "消去待ちのあいだは検索しない");
+    assert!(search_at(&index_path, "経費").is_empty());
+    assert!(kiroscribe_core::search::store::erase_marker(&index_path).exists());
+
+    drop(held);
+    unlock_data_folder(&data);
+    wait_until("消し直したあとの読み直し", Duration::from_secs(20), || readable_hit(&index_path, "予算"));
+    assert_eq!(search_at(&index_path, "予算"), ["a.txt"]);
+    assert!(search_at(&index_path, "経費").is_empty(), "前の中身を残さない");
+    assert!(!kiroscribe_core::search::store::erase_marker(&index_path).exists());
+    assert!(second.shutdown_and_wait(Duration::from_secs(5)));
+}

@@ -63,6 +63,8 @@ pub struct Hit {
 
 pub struct SearchIndex {
     conn: Connection,
+    /// 索引のファイルのパス（メモリの中の索引は None）。消去待ちのあいだは検索しない（[`is_search_suspended`]）
+    path: Option<PathBuf>,
 }
 
 /// 探すフォルダの行を、どの実体から読んだか: 足したときの実体（設定に保存したもの）と、読んだときに開いたフォルダの識別子。
@@ -95,6 +97,51 @@ pub fn index_files(path: &Path) -> [PathBuf; 3] {
     })
 }
 
+/// 消去待ちの記録のファイル（索引の中の資料を検索から外せなかったときに作り、消し終えるまで残す）。
+pub fn erase_marker(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push("-erase");
+    PathBuf::from(name)
+}
+
+/// 消去待ちの記録を作れなかった索引（同じプロセスのあいだ、検索しない）。
+static SUSPENDED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// 索引を消去待ちにして、検索を止める。記録のファイルに残せたら Ok（アプリを起動し直しても、消し終えるまで検索しない）。
+/// 残せなくても、このプロセスのあいだは検索しない。
+pub fn suspend_search(path: &Path) -> std::io::Result<()> {
+    {
+        let mut suspended = SUSPENDED.lock().unwrap_or_else(|e| e.into_inner());
+        if !suspended.iter().any(|p| p == path) {
+            suspended.push(path.to_path_buf());
+        }
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let marker = erase_marker(path);
+    std::fs::write(&marker, b"erase\n")?;
+    std::fs::File::open(&marker)?.sync_all()
+}
+
+/// 消し終えた索引の消去待ちを解き、検索を再開する。記録のファイルを消せなければエラー（検索は止めたまま）。
+pub fn resume_search(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(erase_marker(path)) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
+        _ => {}
+    }
+    SUSPENDED.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| p != path);
+    Ok(())
+}
+
+/// 索引が消去待ちか（記録のファイルがある・あるかを確かめられない・このプロセスで記録を作れなかった）。
+pub fn is_search_suspended(path: &Path) -> bool {
+    if SUSPENDED.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|p| p == path) {
+        return true;
+    }
+    !matches!(std::fs::symlink_metadata(erase_marker(path)), Err(err) if err.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// 索引のファイルをすべて消す（もともとないファイルは、消せたものとみなす）。
 pub fn remove_index_files(path: &Path) -> std::io::Result<()> {
     let mut result = Ok(());
@@ -123,7 +170,7 @@ impl SearchIndex {
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, None)
     }
 
     fn try_open(path: &Path) -> Result<Self> {
@@ -133,10 +180,10 @@ impl SearchIndex {
             return Err(crate::CoreError::Other("索引が壊れています".into()));
         }
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        Self::init(conn)
+        Self::init(conn, Some(path.to_path_buf()))
     }
 
-    fn init(conn: Connection) -> Result<Self> {
+    fn init(conn: Connection, path: Option<PathBuf>) -> Result<Self> {
         // 消した行の中身を、ファイルの空き領域に残さない
         conn.execute_batch("PRAGMA secure_delete = ON;")?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -146,7 +193,7 @@ impl SearchIndex {
             conn.execute_batch(SCHEMA)?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
-        Ok(Self { conn })
+        Ok(Self { conn, path })
     }
 
     /// ファイルを索引に入れる（あれば置き換える）。
@@ -294,7 +341,11 @@ impl SearchIndex {
     /// 検索語のどれかを、題名・ファイル名・中身に含む資料を、よく一致する順に `limit` 件まで返す。
     /// 並びは、一致した検索語の数、題名かファイル名に一致したか、更新日時の新しさの順。
     /// どの実体から読んだかの記録がないフォルダの行（出どころを確かめられない行）は返さない。
+    /// 消去待ちの索引（[`suspend_search`]）からは、何も返さない。
     pub fn search(&self, terms: &[String], limit: usize) -> Result<Vec<Hit>> {
+        if self.path.as_deref().is_some_and(is_search_suspended) {
+            return Ok(Vec::new());
+        }
         let mut terms: Vec<String> = terms.iter().map(|t| normalize(t.trim())).filter(|t| !t.is_empty()).collect();
         terms.sort();
         terms.dedup();
@@ -528,6 +579,38 @@ mod tests {
         index.unbind(folder).unwrap();
         assert!(index.search(&terms(&["経費"]), 8).unwrap().is_empty(), "記録を外すと、検索に出さない");
         assert_eq!(index.stored_rows(folder).unwrap(), 1, "行は残る（あとで消す）");
+    }
+
+    /// 消去待ちの索引からは検索しない。記録のファイルが残っていれば、別のプロセス（起動し直したあと）でも検索しない。
+    /// 消去待ちを解くと、検索を再開する。
+    // [IDX-027]
+    #[test]
+    fn a_suspended_index_is_not_searched_until_resumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data").join(INDEX_FILE);
+        let index = SearchIndex::open(&path).unwrap();
+        bound(&index, "/r");
+        index.upsert(Path::new("/r"), &entry("/r/a.txt", 1), &content(None, "経費")).unwrap();
+        assert_eq!(index.search(&terms(&["経費"]), 8).unwrap().len(), 1);
+
+        suspend_search(&path).unwrap();
+        assert!(erase_marker(&path).exists(), "消去待ちを記録する");
+        assert!(index.search(&terms(&["経費"]), 8).unwrap().is_empty(), "開いていた接続からも検索しない");
+        // 起動し直したあと（このプロセスの記憶がない）も、記録のファイルがあれば検索しない
+        SUSPENDED.lock().unwrap().retain(|p| p != &path);
+        assert!(is_search_suspended(&path));
+        assert!(SearchIndex::open(&path).unwrap().search(&terms(&["経費"]), 8).unwrap().is_empty());
+        remove_index_files(&path).unwrap();
+        assert!(erase_marker(&path).exists(), "索引のファイルを消しても、記録は消さない");
+
+        resume_search(&path).unwrap();
+        assert!(!is_search_suspended(&path));
+        assert!(!erase_marker(&path).exists());
+        let reopened = SearchIndex::open(&path).unwrap();
+        bound(&reopened, "/r");
+        reopened.upsert(Path::new("/r"), &entry("/r/a.txt", 1), &content(None, "経費")).unwrap();
+        assert_eq!(reopened.search(&terms(&["経費"]), 8).unwrap().len(), 1, "消去待ちを解いたら検索する");
+        assert_eq!(SearchIndex::open_in_memory().unwrap().path, None, "メモリの中の索引は、消去待ちにしない");
     }
 
     // [IDX-012][DAT-001]
