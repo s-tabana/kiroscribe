@@ -156,7 +156,8 @@ jobs:
               'ブラウザの録音のセッション'       = '(?m)^\s*録音 active msedge\.exe'
               '会議のページの窓と印'             = '(?m)^\s*窓 msedge\.exe 0x[0-9a-f]+ クラス=Chrome_WidgetWin_1 表示 題「Meet - abc-defg-hij.*印: .*Google Meet の退出ボタン（強）'
               '退出のボタン'                     = '(?m)^\s*窓 msedge\.exe 0x[0-9a-f]+ の部品: \d+ 個を調べた。.*Leave call（Button）'
-              'Meet の開始の確定'               = '★ 会議の開始を確定: Google Meet（強い印（msedge\.exe の窓）: 退出ボタン'
+              # 先に Slack ハドルが会議中になると、Meet は「ほかの会議」になり、開始は知らせない（MTG-010）
+              'Meet の参加中の判定'             = '(?m)^\s*Google Meet: 参加中（msedge\.exe の窓） 退出ボタン（強）'
               'Slack の退出のボタン'             = '(?m)^\s*Slack ハドル: 参加中（slack\.exe の窓） 退出ボタン（強）'
               '2 つの会議の段階'                 = '(?m)^\s*段階: 会議中（.+）、ほかの会議: (Google Meet|Slack ハドル)'
               '目印'                             = '(?m)^\[\d\d:\d\d:\d\d\] ◆ 目印 1: ci 目印'
