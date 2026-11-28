@@ -7,7 +7,8 @@
 //! ```
 //!
 //! 出すのは、実行ファイルの名前・パッケージファミリー名・状態・音の大きさの数値・判定表の印の名前と、判定の結果だけ。
-//! 窓の題と部品の名前は `--titles` のときだけ出す。フルパス・音声は出さない。出力は、画面とファイル
+//! 窓の題と部品の名前は `--titles` のときだけ出す。フルパス・音声は出さない。目印を含め、出す行は、API キーの形の文字列・
+//! URL のクエリ・利用者のフォルダの名前を伏せる（[`mask_text`]）。出力は、画面とファイル
 //! （既定は exe と同じ場所の probe-output.txt）の両方に書く。引数は `--help`（[`HELP`]）、測り方は docs/meeting-detection-check.md。
 
 mod lines;
@@ -18,6 +19,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use kiroscribe_core::audio_sessions::Flow;
+use kiroscribe_core::debug_log::mask_text;
+use kiroscribe_core::meeting_rules::Rules;
 use kiroscribe_core::meetings::{Browsers, MeetingApp, MeetingDetector, Step};
 use kiroscribe_core::time::now_ms;
 
@@ -36,12 +39,15 @@ Kiroscribe 会議の検出の確認用の道具（meeting_probe）
 Enter で区切った 1 行（例: discord 入った）は、時刻つきの目印として記録します。Ctrl+C で終わります。
 
 引数:
-  --titles              窓の題と部品の名前も出す（チャンネル名・参加者名が含まれうるので、人に渡す前に確かめる）
+  --titles              窓の題・ページのサイト・印に当たった部品の名前も出す（チャンネル名・参加者名が含まれうるので、
+                        人に渡す前に確かめる）
   --output <ファイル>   書き出す先（既定は exe と同じフォルダの probe-output.txt。追記する）
   --interval <秒>       調べる間隔（既定は 2 秒。製品と同じ）
   --once                1 回だけ調べて終わる
   --require-sessions    --once で、録音のセッションの一覧を取れなければ終了コード 1
   --expect <アプリ>     --once で、その会議の開始を確定しなければ終了コード 1（zoom・slack・teams・discord・meet）
+  --site <アプリ>=<ホスト>  そのホストのページも、その会議のサイトとして扱う（手元のサーバーで開いた模擬の会議のページで
+                        確かめるときだけ。例: meet=127.0.0.1）
   --help                この説明を出す
 
 測り方は docs/meeting-detection-check.md（サービスごとの操作と、期待する判定）。
@@ -54,6 +60,7 @@ struct Options {
     require_sessions: bool,
     expect: Option<MeetingApp>,
     output: Option<PathBuf>,
+    sites: Vec<(MeetingApp, String)>,
     help: bool,
 }
 
@@ -76,6 +83,7 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
         require_sessions: false,
         expect: None,
         output: None,
+        sites: Vec::new(),
         help: false,
     };
     let mut args = args.into_iter();
@@ -92,6 +100,16 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
                     .and_then(|value| expected_app(&value))
                     .ok_or("--expect には zoom・slack・teams・discord・meet のどれかを指定してください")?;
                 options.expect = Some(app);
+            }
+            "--site" => {
+                let site = args
+                    .next()
+                    .and_then(|value| {
+                        let (app, host) = value.split_once('=')?;
+                        Some((expected_app(app)?, host.trim().to_lowercase())).filter(|(_, host)| !host.is_empty())
+                    })
+                    .ok_or("--site には <アプリ>=<ホスト>（例: meet=127.0.0.1）を指定してください")?;
+                options.sites.push(site);
             }
             "--interval" => {
                 options.interval = args
@@ -116,17 +134,22 @@ struct Out {
 }
 
 impl Out {
+    /// 画面とファイルに書く。どちらにも、秘密になりうる値を伏せた形で書く。
     fn line(&mut self, text: &str) {
+        let text = mask_text(text);
         println!("{text}");
-        self.to_file(text);
+        self.to_file(&text);
     }
 
     fn error(&mut self, text: &str) {
+        let text = mask_text(text);
         eprintln!("{text}");
-        self.to_file(text);
+        self.to_file(&text);
     }
 
+    /// ファイルに書く（人に渡すファイルなので、ここでも伏せる）。
     fn to_file(&mut self, text: &str) {
+        let text = mask_text(text);
         if let Some(file) = &mut self.file {
             if writeln!(file, "{text}").is_err() {
                 eprintln!("書き出す先に書けなくなりました。以降は画面だけに出します");
@@ -186,7 +209,7 @@ fn step_lines(detector: &MeetingDetector, step: &Step, titles: bool) -> Vec<line
     let mut all = lines::judge_lines(&detector.judge);
     all.extend(lines::session_lines(Flow::Capture, &step.facts.capture, rules, browsers));
     all.extend(lines::session_lines(Flow::Render, &step.facts.render, rules, browsers));
-    all.extend(lines::window_lines(&step.facts, &step.evaluation, titles));
+    all.extend(lines::window_lines(rules, &step.facts, &step.evaluation, titles));
     all.extend(lines::scan_line(&step.facts));
     all
 }
@@ -249,7 +272,12 @@ fn main() {
         Some(path) => println!("  書き出す先: {}", path.display()),
         None => println!("  書き出す先: なし（画面だけ）"),
     }
-    let mut detector = MeetingDetector::new(Browsers::builtin());
+    let mut rules = Rules::builtin().clone();
+    for (app, site) in &options.sites {
+        rules = rules.with_site(*app, site);
+        out.line(&format!("  {} のサイトに {site} を足した（模擬のページで確かめる）", app.label()));
+    }
+    let mut detector = MeetingDetector::with_rules(Box::leak(Box::new(rules)), Browsers::builtin());
     out.line(&format!("  判定表の版: {}", detector.rules().version));
     let markers = (!options.once).then(markers);
     let mut marker_count = 0;
@@ -305,7 +333,14 @@ mod tests {
         assert_eq!(options.expect, Some(MeetingApp::Zoom));
         let mut detector = MeetingDetector::new(Browsers::builtin());
         let zoom = Facts {
-            windows: vec![WindowFact { hwnd: 1, exe: "zoom.exe".into(), class: "ZPContentViewWndClass".into(), title: "Zoom".into(), visible: true }],
+            windows: vec![WindowFact {
+                hwnd: 1,
+                exe: "zoom.exe".into(),
+                class: "ZPContentViewWndClass".into(),
+                title: "Zoom".into(),
+                visible: true,
+                site: None,
+            }],
             capture: summarize(vec![]),
             ..Default::default()
         };
@@ -330,6 +365,29 @@ mod tests {
         assert!(options(["--output"].map(String::from)).is_err());
         assert!(options(["--expect", "zoom"].map(String::from)).is_err(), "--expect は --once と組み合わせる");
         assert!(options(["--rules", "x.toml"].map(String::from)).is_err(), "判定表は製品に組み込み");
+        let parsed = options(["--site", "meet=127.0.0.1"].map(String::from)).unwrap();
+        assert_eq!(parsed.sites, vec![(MeetingApp::GoogleMeet, "127.0.0.1".to_string())]);
+        assert!(options(["--site", "meet"].map(String::from)).is_err());
+    }
+
+    /// 目印も、ファイルに書く前に、URL のクエリ・API キーの形の文字列を伏せる。
+    #[test]
+    fn markers_are_masked_in_the_file() {
+        let dir = std::env::temp_dir().join(format!("meeting-probe-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.txt");
+        let mut out = Out { file: Some(std::fs::File::create(&path).unwrap()) };
+        let (sender, receiver) = mpsc::channel();
+        sender.send("https://meet.google.com/abc?authuser=SECRETQUERY sk-proj-SECRETKEY123 入った".to_string()).unwrap();
+        drop(sender);
+        let mut count = 0;
+        wait(Duration::from_millis(10), &receiver, &mut count, &mut out);
+        drop(out);
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(count, 1);
+        assert!(written.contains("目印 1") && written.contains("入った"), "{written}");
+        assert!(!written.contains("SECRETQUERY") && !written.contains("SECRETKEY"), "{written}");
     }
 
     #[test]

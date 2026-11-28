@@ -1,11 +1,12 @@
 {
-  "format": "kiroscribe-meeting-record/2",
+  "format": "kiroscribe-meeting-record/3",
   "appVersion": "0.4.3",
   "rulesVersion": 1,
   "entries": [
     {
       "at": 1795000000000,
       "until": 1795000028000,
+      "count": 15,
       "services": [
         {
           "app": "slackHuddle",
@@ -27,6 +28,8 @@
     },
     {
       "at": 1795000030000,
+      "until": 1795000050000,
+      "count": 11,
       "services": []
     }
   ],

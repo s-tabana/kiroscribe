@@ -65,7 +65,9 @@ jobs:
 
   # 判定表の印が実際に読めて、製品と同じ判定になることを確かめる。
   # hold_mic を Slack.exe の名前で動かし（マイクを使い、既定の再生のデバイスに小さな音を流し、「退出」のボタンのある窓を出す）、
-  # Edge で模擬の Google Meet のページ（参加中: 退出のボタン。待機画面: 参加のボタン）を開く。
+  # Edge の通常の窓で、手元のサーバー（127.0.0.1）から模擬の Google Meet のページ（参加中: 退出のボタン。待機画面: 参加のボタン）を開く。
+  # 製品はアドレスバーが示すサイトが会議のサービスのときだけ数えるので、確認用の道具に --site meet=127.0.0.1 を渡す。
+  # 同じページを別のホスト名（localhost）で開いたときは、会議のサイトでないので Meet にならないことも確かめる。
   # マイクの許可の確認は、起動の引数（--use-fake-ui-for-media-stream）で自動で通す
   rules:
     name: 判定表の印と判定（Windows）
@@ -127,9 +129,12 @@ jobs:
           </body></html>
           '@ | Set-Content -Encoding UTF8 $waiting
           $edge = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
-          function Start-Edge([string]$target) {
+          $port = 8765
+          $server = Start-Process -FilePath python -ArgumentList '-m', 'http.server', "$port", '--bind', '127.0.0.1', '--directory', $work -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 2
+          function Start-Edge([string]$page, [string]$hostName = '127.0.0.1') {
             $userData = Join-Path $work ("edge-" + [guid]::NewGuid())
-            $edgeArgs = @('--no-first-run', '--no-default-browser-check', '--use-fake-ui-for-media-stream', "--user-data-dir=$userData", '--new-window', "file:///$($target -replace '\\', '/')")
+            $edgeArgs = @('--no-first-run', '--no-default-browser-check', '--use-fake-ui-for-media-stream', "--user-data-dir=$userData", '--new-window', "http://${hostName}:$port/$page")
             Start-Process -FilePath $edge -ArgumentList $edgeArgs | Out-Null
           }
           # 確認用の道具を、決めた秒数だけ動かして、書き出したものを返す（製品と同じく、2 回以上調べたあとの判定を見る）
@@ -138,7 +143,7 @@ jobs:
             $file = Join-Path $work ("probe-" + [guid]::NewGuid() + ".txt")
             $stdin = Join-Path $work 'stdin.txt'
             "ci 目印 $label" | Set-Content -Encoding UTF8 $stdin
-            $running = Start-Process -FilePath $probe -ArgumentList '--titles', '--output', $file -RedirectStandardInput $stdin -RedirectStandardOutput (Join-Path $work 'stdout.txt') -PassThru -WindowStyle Hidden
+            $running = Start-Process -FilePath $probe -ArgumentList '--titles', '--site', 'meet=127.0.0.1', '--output', $file -RedirectStandardInput $stdin -RedirectStandardOutput (Join-Path $work 'stdout.txt') -PassThru -WindowStyle Hidden
             Start-Sleep -Seconds $seconds
             Stop-Process -Id $running.Id -Force -ErrorAction SilentlyContinue
             $output = Get-Content -Raw -Encoding UTF8 $file
@@ -148,13 +153,13 @@ jobs:
           $hold = Start-Process -FilePath $slack -ArgumentList '120', '--play', '--window', 'HoldMicSlackWindow', '--button', 'ハドルから退出する' -PassThru
           $failures = @()
           try {
-            Start-Edge $joined
+            Start-Edge 'meet.html'
             $output = Invoke-Probe '参加中の Meet のページと、Slack の名前のプログラム' 20
             $checks = [ordered]@{
               '録音のセッション'                 = '(?m)^\s*録音 active slack\.exe'
               '再生のセッション（音あり）'       = '(?m)^\s*再生 active slack\.exe 音あり（ピーク \d\.\d{3}）'
               'ブラウザの録音のセッション'       = '(?m)^\s*録音 active msedge\.exe'
-              '会議のページの窓と印'             = '(?m)^\s*窓 msedge\.exe 0x[0-9a-f]+ クラス=Chrome_WidgetWin_1 表示 題「Meet - abc-defg-hij.*印: .*Google Meet の退出ボタン（強）'
+              '会議のページの窓と印'             = '(?m)^\s*窓 msedge\.exe 0x[0-9a-f]+ クラス=Chrome_WidgetWin_1 表示 題「Meet - abc-defg-hij.*サイト=127\.0\.0\.1 印: .*Google Meet の退出ボタン（強）'
               '退出のボタン'                     = '(?m)^\s*窓 msedge\.exe 0x[0-9a-f]+ の部品: \d+ 個を調べた。.*Leave call（Button）'
               # 先に Slack ハドルが会議中になると、Meet は「ほかの会議」になり、開始は知らせない（MTG-010）
               'Meet の参加中の判定'             = '(?m)^\s*Google Meet: 参加中（msedge\.exe の窓） 退出ボタン（強）'
@@ -171,13 +176,22 @@ jobs:
             Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue
             Stop-Process -Id $hold.Id -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 2
-            Start-Edge $waiting
+            Start-Edge 'meet-wait.html'
             $output = Invoke-Probe 'Meet の待機画面' 20
             $ok = ($output -match '(?m)^\s*Google Meet: 待機（msedge\.exe の窓） .*待機画面の参加ボタン（打ち消し）') -and ($output -notmatch '会議の開始を確定: Google Meet')
             "確認: 待機画面は参加中にしない → $ok"
             if (-not $ok) { $failures += '待機画面' }
+            # 会議のサイトでないページ（同じ題と退出のボタンを、別のホスト名で開く）では、マイクを使っていても Meet にしない
+            Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            Start-Edge 'meet.html' 'localhost'
+            $output = Invoke-Probe '会議のサイトでないページ' 20
+            $ok = ($output -match '(?m)^\s*窓 msedge\.exe 0x[0-9a-f]+ .*題「Meet - abc-defg-hij.*サイト=localhost 印: なし') -and ($output -notmatch 'Google Meet: ') -and ($output -notmatch '会議の開始を確定: Google Meet')
+            "確認: 会議のサイトでないページは Meet にしない → $ok"
+            if (-not $ok) { $failures += '会議のサイトでないページ' }
           } finally {
             Stop-Process -Id $hold.Id -Force -ErrorAction SilentlyContinue
             Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
           }
           if ($failures.Count -gt 0) { throw "確かめられなかったこと: $($failures -join '、')" }

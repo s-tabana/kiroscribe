@@ -275,6 +275,7 @@ mod tests {
                 class: "Chrome_WidgetWin_1".into(),
                 title: "https://meet.google.com/abc-defg-hij?authuser=SECRETQUERY - Google Chrome".into(),
                 visible: true,
+                site: Some("meet.google.com".into()),
             }],
             ..Default::default()
         };

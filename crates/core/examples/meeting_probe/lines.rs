@@ -1,13 +1,14 @@
 //! 確認用の道具の表示（OS によらない部分）: 判定の様子と、読んだ PC の様子を行にし、前回から変わった行だけを出す。
 //!
-//! 窓の題と部品の名前は、`--titles` のときだけ出す（会議の名前・参加者の名前・メールの件名が含まれうるため）。
+//! 窓の題・部品の名前・ページのサイトは、`--titles` のときだけ出す（会議の名前・参加者の名前・メールの件名が含まれうるため）。
+//! 部品の名前は、立っている印に実際に当たった部品だけを出し、文字（Text）の部品は本文ではなく当たった判定表の語を出す（製品のログと同じ）。
 
 use std::collections::HashMap;
 
 use kiroscribe_core::audio_sessions::{AudioSessions, Flow};
 use kiroscribe_core::debug_log::mask_text;
 use kiroscribe_core::meeting_facts::Facts;
-use kiroscribe_core::meeting_rules::{Evaluation, Rules};
+use kiroscribe_core::meeting_rules::{matched_controls, Evaluation, Rules};
 use kiroscribe_core::meetings::{Browsers, Decision, Judge, MeetingEvent, Phase, ServiceState};
 
 /// 表示する行 1 つ。`key` が同じ行どうしを前回と比べ、`compare` が変わったときだけ `text` を出す。
@@ -117,9 +118,10 @@ pub fn session_lines(flow: Flow, sessions: &AudioSessions, rules: &Rules, browse
     lines
 }
 
-/// 対象のアプリの窓と、その中の部品の行。立っている印を添える。`titles` のときだけ、題と部品の名前を出す。
+/// 対象のアプリの窓と、その中の部品の行。立っている印を添える。`titles` のときだけ、題・サイト・当たった部品の名前を出す。
 /// 題と部品の名前は、人に渡すファイルにも書くので、API キーの形の文字列・URL のクエリ・利用者のフォルダの名前を伏せる。
-pub fn window_lines(facts: &Facts, evaluation: &Evaluation, titles: bool) -> Vec<Line> {
+pub fn window_lines(rules: &Rules, facts: &Facts, evaluation: &Evaluation, titles: bool) -> Vec<Line> {
+    let matched = matched_controls(rules, facts, evaluation);
     let mut lines = Vec::new();
     for window in &facts.windows {
         let mut signals: Vec<String> = Vec::new();
@@ -133,19 +135,31 @@ pub fn window_lines(facts: &Facts, evaluation: &Evaluation, titles: bool) -> Vec
         let shown = if window.visible { "表示" } else { "見えない" };
         let signals = if signals.is_empty() { "なし".to_string() } else { signals.join("・") };
         let title = if titles { format!(" 題「{}」", mask_text(&window.title)) } else { String::new() };
+        let site = match (&window.site, titles) {
+            (Some(site), true) => format!(" サイト={site}"),
+            _ => String::new(),
+        };
         let label = format!("窓 {} 0x{:x}", window.exe, window.hwnd);
         lines.push(Line::new(
             format!("窓/{:x}", window.hwnd),
-            format!("  {label} クラス={} {shown}{title} 印: {signals}", window.class),
+            format!("  {label} クラス={} {shown}{title}{site} 印: {signals}", window.class),
         ));
         if let Some(scanned) = facts.scan.as_ref().and_then(|scan| scan.windows.iter().find(|w| w.hwnd == window.hwnd)) {
             let found = match (&scanned.error, titles) {
                 (Some(error), _) => format!("調べられない（{error}）"),
                 (None, true) => {
-                    let names: Vec<String> = scanned.controls.iter().map(|c| format!("{}（{}）", mask_text(&c.name), c.kind.name())).collect();
-                    if names.is_empty() { "なし".into() } else { names.join("・") }
+                    let names: Vec<String> = matched
+                        .iter()
+                        .filter(|control| control.window == window.hwnd)
+                        .map(|control| format!("{}（{}）", mask_text(&control.name), control.kind.name()))
+                        .collect();
+                    if names.is_empty() { "印に当たったものなし".into() } else { names.join("・") }
                 }
                 (None, false) => format!("判定表の名前に当たるもの {} 個", scanned.controls.len()),
+            };
+            let found = match &scanned.incomplete {
+                Some(reason) => format!("{found}（一部を読めない: {reason}）"),
+                None => found,
             };
             lines.push(Line::new(
                 format!("部品/{:x}", window.hwnd),
@@ -193,6 +207,7 @@ mod tests {
                 class: "Chrome_WidgetWin_1".into(),
                 title: "Meet - abc-defg-hij - 山田 - Google Chrome".into(),
                 visible: true,
+                site: Some("meet.google.com".into()),
             }],
             capture: AudioSessions {
                 available: true,
@@ -207,6 +222,7 @@ mod tests {
                     controls: vec![ControlFact { kind: ControlType::Button, name: "通話から退出".into() }],
                     seen: 30,
                     error: None,
+                    incomplete: None,
                 }],
                 elapsed_ms: 40,
                 error: None,
@@ -227,12 +243,14 @@ mod tests {
         let text: Vec<String> = judge_lines(&judge).into_iter().map(|line| line.text).collect();
         assert_eq!(text[0], "  段階: 会議中（Google Meet）、ほかの会議: なし");
         assert!(text[1].starts_with("  Google Meet: 参加中（chrome.exe の窓） 退出ボタン（強）"), "{}", text[1]);
-        let hidden: Vec<String> = window_lines(&facts, &evaluation, false).into_iter().map(|line| line.text).collect();
+        let hidden: Vec<String> = window_lines(rules, &facts, &evaluation, false).into_iter().map(|line| line.text).collect();
         let joined = hidden.join("\n");
         assert!(!joined.contains("山田") && !joined.contains("通話から退出"), "{joined}");
         assert!(joined.contains("印: Google Meet の退出ボタン（強）"), "{joined}");
-        let shown = window_lines(&facts, &evaluation, true).into_iter().map(|line| line.text).collect::<Vec<_>>().join("\n");
+        let shown = window_lines(rules, &facts, &evaluation, true).into_iter().map(|line| line.text).collect::<Vec<_>>().join("\n");
         assert!(shown.contains("題「Meet - abc-defg-hij - 山田 - Google Chrome」") && shown.contains("通話から退出（Button）"), "{shown}");
+        assert!(shown.contains("サイト=meet.google.com"), "{shown}");
+        assert!(!hidden.join("\n").contains("meet.google.com"), "サイトも --titles のときだけ");
         let capture = session_lines(Flow::Capture, &facts.capture, rules, &browsers);
         assert_eq!(capture[1].text, "  録音 active chrome.exe");
         assert_eq!(session_lines(Flow::Render, &facts.render, rules, &browsers)[0].text, "  再生のセッション: 取れない（Windows 以外）");
@@ -246,11 +264,28 @@ mod tests {
         facts.windows[0].title = r"Meet - https://meet.google.com/abc?authuser=SECRETQUERY sk-proj-SECRETKEY123 - Google Chrome".into();
         facts.scan.as_mut().unwrap().windows[0].controls[0].name = r"C:\Users\山田 太郎\x 通話から退出".into();
         let evaluation = evaluate(Rules::builtin(), &facts, &Browsers::builtin());
-        let shown = window_lines(&facts, &evaluation, true).into_iter().map(|line| line.text).collect::<Vec<_>>().join("\n");
+        let shown = window_lines(Rules::builtin(), &facts, &evaluation, true).into_iter().map(|line| line.text).collect::<Vec<_>>().join("\n");
         for (label, secret) in [("URL のクエリ", "SECRETQUERY"), ("API キー", "SECRETKEY"), ("利用者の名前", "山田")] {
             assert!(!shown.contains(secret), "{label}が残っている");
         }
         assert!(shown.contains("通話から退出（Button）"));
+    }
+
+    /// --titles でも、部品の名前は立っている印に実際に当たったものだけを出す。文字の部品は本文ではなく、当たった語を出す
+    /// （ほかのサービスの語を含むだけのチャットの本文や、退出後の画面の語を含む会議中のチャットは出さない）。
+    #[test]
+    fn titles_show_only_the_controls_that_hold_a_signal() {
+        let mut facts = facts();
+        facts.scan.as_mut().unwrap().windows[0].controls = vec![
+            ControlFact { kind: ControlType::Button, name: "通話から退出".into() },
+            ControlFact { kind: ControlType::Text, name: "山田: 明日また再参加します".into() },
+            ControlFact { kind: ControlType::Text, name: "Acme の会議に参加（Join meeting）".into() },
+        ];
+        let evaluation = evaluate(Rules::builtin(), &facts, &Browsers::builtin());
+        let lines = window_lines(Rules::builtin(), &facts, &evaluation, true);
+        let shown = &lines.iter().find(|line| line.key.starts_with("部品/")).unwrap().text;
+        assert!(shown.contains("通話から退出（Button）"), "{shown}");
+        assert!(!shown.contains("山田") && !shown.contains("再参加") && !shown.contains("Acme"), "{shown}");
     }
 
     /// 前回から変わった行と、消えた行だけを出す。

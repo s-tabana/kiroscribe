@@ -1,5 +1,5 @@
 {
-  "format": "kiroscribe-meeting-record/2",
+  "format": "kiroscribe-meeting-record/3",
   "appVersion": "0.4.3",
   "rulesVersion": 1,
   "entries": [
@@ -33,6 +33,7 @@
     {
       "at": 1795000002000,
       "until": 1795000028000,
+      "count": 14,
       "services": [
         {
           "app": "googleMeet",
@@ -66,6 +67,7 @@
     {
       "at": 1795000030000,
       "until": 1795000118000,
+      "count": 45,
       "services": [
         {
           "app": "googleMeet",
@@ -99,6 +101,7 @@
     {
       "at": 1795000120000,
       "until": 1795000148000,
+      "count": 15,
       "services": [
         {
           "app": "googleMeet",

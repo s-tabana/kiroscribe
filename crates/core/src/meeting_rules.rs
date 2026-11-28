@@ -71,6 +71,8 @@ struct RawRules {
 #[serde(deny_unknown_fields)]
 struct RawService {
     app: MeetingApp,
+    #[serde(default)]
+    sites: Vec<String>,
     #[serde(rename = "signal")]
     signals: Vec<RawSignal>,
 }
@@ -119,7 +121,17 @@ pub struct Rules {
 #[derive(Debug, Clone)]
 pub struct Service {
     pub app: MeetingApp,
+    /// ブラウザ版のサイト（ホスト名。小文字）。そのホストか、そのサブドメインのページでだけ、ブラウザの窓・部品の印が立つ
+    pub sites: Vec<String>,
     pub signals: Vec<Signal>,
+}
+
+impl Service {
+    /// 表示中のページのホスト名が、このサービスのサイトか。
+    pub fn is_site(&self, host: &str) -> bool {
+        let host = host.trim_end_matches('.').to_lowercase();
+        self.sites.iter().any(|site| host == *site || host.strip_suffix(site.as_str()).is_some_and(|rest| rest.ends_with('.')))
+    }
 }
 
 /// 印 1 つ。
@@ -161,6 +173,8 @@ pub struct Patterns(Vec<Pattern>);
 
 #[derive(Debug, Clone)]
 enum Pattern {
+    /// `^語$`: その語だけ（前後の空白と、前の未読の印を除いて比べる）
+    Exact(String),
     /// `^語`: その語で始まる（前の未読の印を除いて比べる）
     Prefix(String),
     /// `語$`: その語で終わる（最後の区切りより後ろを除いても比べる）
@@ -208,14 +222,17 @@ impl Pattern {
     fn parse(raw: &str) -> Result<Self, String> {
         let text = normalize(raw);
         let pattern = if let Some(rest) = text.strip_prefix('^') {
-            Pattern::Prefix(rest.to_string())
+            match rest.strip_suffix('$') {
+                Some(word) => Pattern::Exact(word.to_string()),
+                None => Pattern::Prefix(rest.to_string()),
+            }
         } else if let Some(rest) = text.strip_suffix('$') {
             Pattern::Suffix(rest.to_string())
         } else {
             Pattern::All(text.split(" + ").map(str::to_string).collect())
         };
         let empty = match &pattern {
-            Pattern::Prefix(word) | Pattern::Suffix(word) => word.trim().is_empty(),
+            Pattern::Exact(word) | Pattern::Prefix(word) | Pattern::Suffix(word) => word.trim().is_empty(),
             Pattern::All(words) => words.iter().any(|word| word.trim().is_empty()),
         };
         if empty {
@@ -226,6 +243,7 @@ impl Pattern {
 
     fn matches(&self, text: &str) -> bool {
         match self {
+            Pattern::Exact(word) => without_unread(text).trim_end() == word.as_str(),
             Pattern::Prefix(word) => without_unread(text).starts_with(word.as_str()),
             Pattern::Suffix(word) => {
                 let text = text.trim_end();
@@ -239,9 +257,10 @@ impl Pattern {
 }
 
 impl Pattern {
-    /// ログに書く、判定表の語の形（例: 「^meet - 」「再参加」「slack + ハドル」）。
+    /// ログに書く、判定表の語の形（例: 「^meet - 」「再参加」「slack + ハドル」。名前全体と比べる語は、語だけ）。
     fn word(&self) -> String {
         match self {
+            Pattern::Exact(word) => word.clone(),
             Pattern::Prefix(word) => format!("^{word}"),
             Pattern::Suffix(word) => format!("{word}$"),
             Pattern::All(words) => words.join(" + "),
@@ -299,15 +318,22 @@ impl Rules {
                 return Err(format!("{} が 2 回あります", service.app.label()));
             }
             let mut signals: Vec<Signal> = Vec::new();
+            let sites: Vec<String> = service.sites.iter().map(|site| site.trim().trim_end_matches('.').to_lowercase()).collect();
+            if sites.iter().any(|site| site.is_empty() || site.contains(['/', ':', ' ', '*'])) {
+                return Err(format!("{} の sites には、ホスト名だけを書いてください", service.app.label()));
+            }
             for signal in service.signals {
                 let place = format!("{} の「{}」", service.app.label(), signal.name);
                 if signals.iter().any(|known| known.name == signal.name) {
                     return Err(format!("{place}: 同じ名前の印が 2 つあります"));
                 }
                 let compiled = compile(signal, &raw.words).map_err(|reason| format!("{place}: {reason}"))?;
+                if compiled.apps.browser && compiled.kind != Kind::Session && sites.is_empty() {
+                    return Err(format!("{place}: ブラウザの窓・部品の印には、サービスの sites が要ります"));
+                }
                 signals.push(compiled);
             }
-            services.push(Service { app: service.app, signals });
+            services.push(Service { app: service.app, sites, signals });
         }
         Ok(Rules {
             version: raw.version,
@@ -327,6 +353,15 @@ impl Rules {
 
     pub fn service(&self, app: MeetingApp) -> Option<&Service> {
         self.services.iter().find(|service| service.app == app)
+    }
+
+    /// サービスのサイトを足した判定表（手元のサーバーで開いた模擬の会議のページで確かめるテストと、確認用の道具のためだけ）。
+    pub fn with_site(&self, app: MeetingApp, site: &str) -> Self {
+        let mut rules = self.clone();
+        if let Some(service) = rules.services.iter_mut().find(|service| service.app == app) {
+            service.sites.push(site.trim().to_lowercase());
+        }
+        rules
     }
 
     fn signals(&self) -> impl Iterator<Item = &Signal> {
@@ -508,9 +543,13 @@ fn session_holds(signal: &Signal, exe: &str, facts: &Facts, audible_peak: f32) -
     })
 }
 
-/// 窓の印・部品の印が、その窓で立っているか。
-fn window_holds(signal: &Signal, window: &WindowFact, facts: &Facts) -> bool {
+/// 窓の印・部品の印が、その窓で立っているか。ブラウザの窓では、表示中のページがサービスのサイトのときだけ
+/// （ほかのサイトのページの題や部品では立たない）。「開始のあとだけ」の印は、背面のタブを見るものなので、サイトを問わない。
+fn window_holds(service: &Service, signal: &Signal, window: &WindowFact, facts: &Facts, browsers: &Browsers) -> bool {
     if !window.visible || !(signal.title.is_empty() || signal.title.matches(&window.title)) {
+        return false;
+    }
+    if browsers.contains(&window.exe) && !signal.after_start && !window.site.as_deref().is_some_and(|site| service.is_site(site)) {
         return false;
     }
     match signal.kind {
@@ -586,7 +625,7 @@ pub fn evaluate(rules: &Rules, facts: &Facts, browsers: &Browsers) -> Evaluation
                 .iter()
                 .filter(|signal| match signal.kind {
                     Kind::Session => session_holds(signal, &window.exe, facts, rules.audible_peak),
-                    _ => window_holds(signal, window, facts),
+                    _ => window_holds(service, signal, window, facts, browsers),
                 })
                 .map(|signal| held(signal))
                 .collect();

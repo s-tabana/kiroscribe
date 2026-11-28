@@ -10,8 +10,10 @@ const CHROME: &str = "Chrome_WidgetWin_1";
 const FIREFOX: &str = "MozillaWindowClass";
 
 fn window(hwnd: u64, exe: &str, class: &str, title: &str) -> WindowFact {
-    WindowFact { hwnd, exe: exe.into(), class: class.into(), title: title.into(), visible: true }
+    WindowFact { hwnd, exe: exe.into(), class: class.into(), title: title.into(), visible: true, site: None }
 }
+
+const MEET_SITE: &str = "meet.google.com";
 
 fn hidden(hwnd: u64, exe: &str, class: &str, title: &str) -> WindowFact {
     WindowFact { visible: false, ..window(hwnd, exe, class, title) }
@@ -51,7 +53,7 @@ impl Pc {
     fn window(mut self, window: WindowFact, controls: Vec<ControlFact>) -> Self {
         if let Some(scan) = &mut self.scan {
             if window.visible {
-                scan.push(ScannedWindow { hwnd: window.hwnd, controls, seen: 10, error: None });
+                scan.push(ScannedWindow { hwnd: window.hwnd, controls, seen: 10, error: None, incomplete: None });
             }
         }
         self.windows.push(window);
@@ -127,7 +129,7 @@ const MEET: MeetingApp = MeetingApp::GoogleMeet;
 const SLACK: MeetingApp = MeetingApp::SlackHuddle;
 
 fn meet_in_chrome(controls: Vec<ControlFact>) -> Pc {
-    Pc::new().window(window(10, "chrome.exe", CHROME, "Meet - abc-defg-hij - Google Chrome"), controls)
+    Pc::new().window(window(10, "chrome.exe", CHROME, "Meet - abc-defg-hij - Google Chrome").at_site(MEET_SITE), controls)
 }
 
 /// デスクトップの会議アプリは、実行ファイルの名前（大文字小文字は区別しない）の窓・部品・セッションで判定する。
@@ -166,7 +168,7 @@ fn meet_is_detected_in_every_listed_browser() {
         ("brave.exe", CHROME, "Google Meet - Brave"),
     ] {
         let mut run = Run::new();
-        let pc = Pc::new().window(window(5, exe, class, title), vec![button("通話から退出")]);
+        let pc = Pc::new().window(window(5, exe, class, title).at_site(MEET_SITE), vec![button("通話から退出")]);
         assert_eq!(run.tick(&pc), started(MEET), "{exe}");
     }
     // 一覧にないアプリは、ブラウザとして扱わない
@@ -182,7 +184,7 @@ fn meet_is_detected_in_every_listed_browser() {
 #[test]
 fn other_apps_microphones_and_sounds_are_not_meeting_signals() {
     let stale_meet = Pc::new()
-        .window(window(10, "zen.exe", FIREFOX, "Meet – abc-defg-hij — Zen Browser"), vec![])
+        .window(window(10, "zen.exe", FIREFOX, "Meet – abc-defg-hij — Zen Browser").at_site(MEET_SITE), vec![])
         .window(window(11, "thunderbird.exe", FIREFOX, "受信トレイ - Mozilla Thunderbird"), vec![])
         .mic("aquawindowsbridge.exe")
         .sound("thunderbird.exe", 0.4)
@@ -191,7 +193,7 @@ fn other_apps_microphones_and_sounds_are_not_meeting_signals() {
     assert!(run.hold(&stale_meet, 60).is_empty());
     assert_eq!(run.state(MEET), ServiceState::Waiting, "題だけ（中が 1 つ）");
 
-    let only_mic = Pc::new().window(window(12, "chrome.exe", CHROME, "受信トレイ - Gmail - Google Chrome"), vec![]).mic("chrome.exe").sound("chrome.exe", 0.3);
+    let only_mic = Pc::new().window(window(12, "chrome.exe", CHROME, "受信トレイ - Gmail - Google Chrome").at_site("mail.google.com"), vec![]).mic("chrome.exe").sound("chrome.exe", 0.3);
     let mut run = Run::new();
     assert!(run.hold(&only_mic, 30).is_empty(), "会議のタブのない窓の、ブラウザのマイクと再生の音");
     assert_eq!(run.state(MEET), ServiceState::None);
@@ -206,18 +208,18 @@ fn other_apps_microphones_and_sounds_are_not_meeting_signals() {
 #[test]
 fn signals_and_vetoes_combine_only_within_one_window() {
     let waiting = Pc::new()
-        .window(window(20, "zen.exe", FIREFOX, "Meet – abc-defg-hij — Zen Browser"), vec![button("今すぐ参加")])
+        .window(window(20, "zen.exe", FIREFOX, "Meet – abc-defg-hij — Zen Browser").at_site(MEET_SITE), vec![button("今すぐ参加")])
         .window(window(21, "zen.exe", FIREFOX, "設定 — Zen Browser"), vec![button("退出")])
         .mic("zen.exe");
     let mut run = Run::new();
     assert!(run.hold(&waiting, 20).is_empty(), "別の窓の退出ボタン");
 
-    let joined_in_zen = Pc::new().window(window(20, "zen.exe", FIREFOX, "Meet – abc-defg-hij — Zen Browser"), vec![button("通話から退出")]).mic("zen.exe");
+    let joined_in_zen = Pc::new().window(window(20, "zen.exe", FIREFOX, "Meet – abc-defg-hij — Zen Browser").at_site(MEET_SITE), vec![button("通話から退出")]).mic("zen.exe");
     let mut run = Run::new();
     assert_eq!(run.tick(&joined_in_zen), started(MEET));
     let edge_waiting = joined_in_zen
         .clone()
-        .window(window(30, "msedge.exe", CHROME, "Meet - xyz-abcd-efg - Microsoft\u{200b} Edge"), vec![button("参加をリクエスト")]);
+        .window(window(30, "msedge.exe", CHROME, "Meet - xyz-abcd-efg - Microsoft\u{200b} Edge").at_site(MEET_SITE), vec![button("参加をリクエスト")]);
     assert!(run.hold(&edge_waiting, 60).is_empty(), "Edge の待機画面で、Zen の会議を終えない");
     assert_eq!(run.judge.phase(), Phase::Active(MEET));
 }
@@ -371,7 +373,7 @@ fn a_browser_meeting_continues_in_a_background_tab() {
     let joined = meet_in_chrome(vec![button("通話から退出"), control(ControlType::TabItem, "Meet - abc-defg-hij")]).mic("chrome.exe");
     let docs = |mic: bool| {
         let pc = Pc::new().window(
-            window(10, "chrome.exe", CHROME, "企画書 - Google ドキュメント - Google Chrome"),
+            window(10, "chrome.exe", CHROME, "企画書 - Google ドキュメント - Google Chrome").at_site("docs.google.com"),
             vec![control(ControlType::TabItem, "企画書 - Google ドキュメント"), control(ControlType::TabItem, "Meet - abc-defg-hij - マイクを使用中")],
         );
         if mic { pc.mic("chrome.exe") } else { pc }
@@ -393,7 +395,7 @@ fn overlapping_meetings_switch_to_the_one_still_going() {
     let slack = |leave: bool| {
         Pc::new().window(window(60, "slack.exe", CHROME, "Huddle: 山田 - Acme - Slack"), if leave { vec![button("退出")] } else { vec![] })
     };
-    let with_meet = |pc: Pc| pc.window(window(10, "chrome.exe", CHROME, "Meet - abc-defg-hij - Google Chrome"), vec![button("通話から退出")]);
+    let with_meet = |pc: Pc| pc.window(window(10, "chrome.exe", CHROME, "Meet - abc-defg-hij - Google Chrome").at_site(MEET_SITE), vec![button("通話から退出")]);
     let mut run = Run::new();
     assert_eq!(run.tick(&slack(true)), started(SLACK));
     assert!(run.hold(&with_meet(slack(true)), 10).is_empty(), "あとの会議の開始は知らせない");
@@ -485,4 +487,117 @@ fn decisions_tell_which_signals_started_and_ended_a_meeting() {
     judge.tick(&combination.evaluation(), 2_000);
     let decisions = judge.tick(&combination.evaluation(), 4_000);
     assert_eq!(decisions[0].reason.describe(), "中・弱い印の組み合わせ（discord.exe（アプリ））: Discord のマイク・Discord の再生の音");
+}
+
+/// ブラウザの窓・部品の印は、アドレスバーが示すサイトがそのサービスのときだけ立つ。会議のサイトでないページ
+/// （同じ題と「Leave call」のボタンを置いたページ・サイトを読めなかった窓）では、マイクを使っていても始めない。
+/// 判定表にサイトを足せば（模擬のページで確かめるテスト）、そのページで始める。
+// [MTG-031]
+#[test]
+fn browser_signals_need_the_service_site() {
+    let page = |site: Option<&str>| {
+        let mut tab = window(10, "msedge.exe", CHROME, "Meet - abc-defg-hij - Microsoft\u{200b} Edge");
+        tab.site = site.map(String::from);
+        Pc::new().window(tab, vec![button("Leave call")]).mic("msedge.exe").sound("msedge.exe", 0.3)
+    };
+    for (label, site) in [("ほかのサイト", Some("127.0.0.1")), ("似た名前のサイト", Some("meet.google.com.example.net")), ("サイトを読めない", None)] {
+        let mut run = Run::new();
+        assert!(run.hold(&page(site), 30).is_empty(), "{label}");
+        assert_eq!(run.state(MEET), ServiceState::None, "{label}");
+    }
+    let mut run = Run::new();
+    assert_eq!(run.tick(&page(Some("meet.google.com"))), started(MEET));
+
+    let rules = Rules::builtin().with_site(MEET, "127.0.0.1");
+    let evaluation = evaluate(&rules, &page(Some("127.0.0.1")).facts(), &Browsers::builtin());
+    let mut judge = Judge::new(&rules);
+    assert_eq!(judge.tick(&evaluation, 0).iter().map(|d| d.event).collect::<Vec<_>>(), started(MEET));
+
+    // サブドメインも、そのサービスのサイト
+    let slack = Pc::new()
+        .window(window(11, "chrome.exe", CHROME, "ハドル: #dev - Acme - Slack - Google Chrome").at_site("acme.slack.com"), vec![button("ハドルから退出する")]);
+    let mut run = Run::new();
+    assert_eq!(run.tick(&slack), started(SLACK));
+}
+
+fn discord_web(site: &str, controls: Vec<ControlFact>) -> Pc {
+    Pc::new().window(window(30, "chrome.exe", CHROME, "#general | Acme - Discord - Google Chrome").at_site(site), controls)
+}
+
+/// ブラウザ版 Discord のタブの題はチャンネルの名前なので、題とマイクだけでは始めない（切断ボタンで始める）。
+/// 切断したあと、別のタブで音楽が流れていても（ブラウザの再生の音）、20 秒で終える。
+// [MTG-008][MTG-032]
+#[test]
+fn discord_in_a_browser_needs_the_call_itself() {
+    let mut run = Run::new();
+    assert!(run.hold(&discord_web("discord.com", vec![]).mic("chrome.exe").sound("chrome.exe", 0.3), 30).is_empty(), "題とマイクと再生の音");
+
+    let mut run = Run::new();
+    assert_eq!(run.tick(&discord_web("discord.com", vec![button("Disconnect")]).mic("chrome.exe")), started(MeetingApp::Discord));
+    // 通話中は、切断ボタンが読めない回があっても、題とマイクで続く
+    assert!(run.hold(&discord_web("discord.com", vec![]).mic("chrome.exe"), 30).is_empty());
+    // 切断した: チャンネルの画面のまま、別のタブで音楽が流れている
+    let left = discord_web("discord.com", vec![]).sound("chrome.exe", 0.4);
+    assert!(run.hold(&left, 20).is_empty());
+    assert_eq!(run.tick(&left), ended(MeetingApp::Discord), "切断から 20 秒");
+    assert!(run.hold(&left, 30).is_empty());
+}
+
+/// 窓の中の部品の一部を読めなかった回（部品の数・部品・名前の取得の失敗）は、組み合わせの開始に要る調べた回に数えない。
+/// 読めた部品の強い印では始める。
+// [MTG-007]
+#[test]
+fn a_partly_read_window_does_not_count_as_a_scan() {
+    let partly = |controls: Vec<ControlFact>| {
+        let mut facts = meet_in_chrome(controls).mic("chrome.exe").facts();
+        facts.scan.as_mut().unwrap().windows[0].incomplete = Some("3 個の部品を読めない（0x80040201）".into());
+        facts
+    };
+    let evaluation = evaluate(Rules::builtin(), &partly(vec![]), &Browsers::builtin());
+    let mut judge = Judge::new(Rules::builtin());
+    let events: Vec<MeetingEvent> = (0..15).flat_map(|i| judge.tick(&evaluation, i * POLL_MS)).map(|d| d.event).collect();
+    assert!(events.is_empty(), "{events:?}");
+    assert_eq!(judge.phase(), Phase::Confirming(MEET), "調べ切れるまで確定を待つ");
+
+    let evaluation = evaluate(Rules::builtin(), &partly(vec![button("通話から退出")]), &Browsers::builtin());
+    let mut judge = Judge::new(Rules::builtin());
+    assert_eq!(judge.tick(&evaluation, 0).iter().map(|d| d.event).collect::<Vec<_>>(), started(MEET));
+}
+
+/// Meet の会議中に、チャットの本文（文字の部品）に「再参加」や退出後の画面の見出しを含む文が見えても、退出ボタンがあれば続く。
+/// 退出後の画面は、見出しの文字の部品そのものか、退出後の画面のボタンで見分ける。
+// [MTG-008]
+#[test]
+fn meeting_chat_text_does_not_end_a_meet_call() {
+    let mut run = Run::new();
+    assert_eq!(run.tick(&meet_in_chrome(vec![button("通話から退出")]).mic("chrome.exe")), started(MEET));
+    let chatting = meet_in_chrome(vec![
+        button("通話から退出"),
+        control(ControlType::Text, "後で再参加します"),
+        control(ControlType::Text, "山田さんはミーティングから退出しました"),
+        control(ControlType::Text, "you left the meeting early?"),
+    ])
+    .mic("chrome.exe");
+    assert!(run.hold(&chatting, 60).is_empty());
+    assert_eq!(run.judge.phase(), Phase::Active(MEET));
+    let left = meet_in_chrome(vec![control(ControlType::Text, "ミーティングから退出しました")]);
+    assert_eq!(run.tick(&left), ended(MEET));
+}
+
+/// 会議アプリの窓をすべてトレイに隠したとき（窓が見えない）: 最初から隠していれば、マイクと再生の音がそろっても始めない
+/// （窓の中を調べられないため）。始まったあとに隠したときは、マイクと再生の音がある間は続き、マイクだけになると 20 秒で終える。
+// [MTG-033]
+#[test]
+fn meeting_apps_hidden_in_the_tray() {
+    let tray = || Pc::new().window(hidden(60, "slack.exe", CHROME, "Huddle: 山田 - Acme - Slack"), vec![]);
+    let mut run = Run::new();
+    assert!(run.hold(&tray().mic("slack.exe").sound("slack.exe", 0.3), 60).is_empty(), "最初から隠していると始めない");
+
+    let mut run = Run::new();
+    let shown = Pc::new().window(window(60, "slack.exe", CHROME, "Huddle: 山田 - Acme - Slack"), vec![button("退出")]).mic("slack.exe");
+    assert_eq!(run.tick(&shown), started(SLACK));
+    assert!(run.hold(&tray().mic("slack.exe").sound("slack.exe", 0.3), 60).is_empty(), "マイクと再生の音で続く");
+    let silent = tray().mic("slack.exe");
+    assert!(run.hold(&silent, 20).is_empty());
+    assert_eq!(run.tick(&silent), ended(SLACK), "マイクだけ（弱い印 1 つ）になってから 20 秒");
 }

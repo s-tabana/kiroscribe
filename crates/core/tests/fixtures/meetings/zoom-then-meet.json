@@ -1,11 +1,12 @@
 {
-  "format": "kiroscribe-meeting-record/2",
+  "format": "kiroscribe-meeting-record/3",
   "appVersion": "0.4.3",
   "rulesVersion": 1,
   "entries": [
     {
       "at": 1795000000000,
       "until": 1795000058000,
+      "count": 30,
       "services": [
         {
           "app": "zoom",
@@ -29,11 +30,13 @@
     {
       "at": 1795000060000,
       "until": 1795000064000,
+      "count": 3,
       "services": []
     },
     {
       "at": 1795000066000,
       "until": 1795000128000,
+      "count": 32,
       "services": [
         {
           "app": "googleMeet",
@@ -61,6 +64,8 @@
     },
     {
       "at": 1795000130000,
+      "until": 1795000150000,
+      "count": 11,
       "services": []
     }
   ],

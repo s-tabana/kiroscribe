@@ -87,6 +87,9 @@ pub struct Config {
     /// 会議の検出を `meeting.txt` で模擬せず、製品と同じく Windows のマイクの使用状況とウィンドウのタイトルから行う
     /// （マイクを使うプログラムやブラウザを本当に動かして確かめるテスト用）
     pub real_meeting_detection: bool,
+    /// 会議のサイトとして足すホスト名（会議アプリごと。例: `{"googleMeet": ["127.0.0.1"]}`）。
+    /// 手元のサーバーで開いた模擬の会議のページを、製品と同じくアドレスバーのサイトで確かめるテスト用
+    pub meeting_sites: std::collections::HashMap<MeetingApp, Vec<String>>,
     pub audio: AudioConfig,
     pub timing: Timing,
 }
@@ -282,6 +285,20 @@ pub fn simulated_meeting() -> Option<Option<MeetingApp>> {
     }
     let path = file(MEETING_FILE)?;
     Some(std::fs::read_to_string(path).ok().and_then(|text| parse_meeting(&text)))
+}
+
+/// 会議の検出に使う判定表。`config.json` の `meetingSites` があれば、組み込みの判定表にそのサイトを足したもの。
+pub fn meeting_rules() -> &'static crate::meeting_rules::Rules {
+    static RULES: OnceLock<crate::meeting_rules::Rules> = OnceLock::new();
+    RULES.get_or_init(|| {
+        let mut rules = crate::meeting_rules::Rules::builtin().clone();
+        for (app, sites) in &config().meeting_sites {
+            for site in sites {
+                rules = rules.with_site(*app, site);
+            }
+        }
+        rules
+    })
 }
 
 /// `meeting.txt` の内容（`googleMeet`・`slackHuddle`・`zoom`・`teams`・`discord`）を読む。

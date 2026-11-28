@@ -1,11 +1,12 @@
 {
-  "format": "kiroscribe-meeting-record/2",
+  "format": "kiroscribe-meeting-record/3",
   "appVersion": "0.4.3",
   "rulesVersion": 1,
   "entries": [
     {
       "at": 1795000000000,
       "until": 1795000178000,
+      "count": 90,
       "services": [
         {
           "app": "discord",
@@ -39,6 +40,8 @@
     },
     {
       "at": 1795000180000,
+      "until": 1795000200000,
+      "count": 11,
       "services": []
     }
   ],

@@ -8,7 +8,8 @@
 //! - 書き出す（保存する・提出する）ときは、[`MeetingRecord::redacted`] で題の API キーの形の文字列・URL のクエリ・
 //!   利用者のフォルダの名前を伏せる
 //!
-//! 書き出したファイル（[`MeetingRecord`]）は、[`replay`] で製品と同じ間隔・同じ判定のまま再生できる。
+//! 書き出したファイル（[`MeetingRecord`]）は、[`replay`] で製品と同じ判定のまま、実際に調べた時刻だけで再生できる。
+//! 旧い形式の記録は、[`replay_json`] で形式を先に読み、その形式の判定と再生のしかたで再生する。
 //! `expected` に起きるはずの出来事を書き足して `crates/core/tests/fixtures/meetings/` に置くと、回帰テストになる。
 
 use std::collections::VecDeque;
@@ -19,8 +20,11 @@ use crate::meeting_facts::Facts;
 use crate::meeting_rules::{Evaluation, Rules, ServiceEvaluation};
 use crate::meetings::{Decision, Judge, MeetingEvent, POLL_MS};
 
-/// 書き出すファイルの形式の名前。形を変えたら、末尾の番号を上げる。
-pub const FORMAT: &str = "kiroscribe-meeting-record/2";
+/// 書き出すファイルの形式の名前。形か再生のしかたを変えたら、末尾の番号を上げる。
+pub const FORMAT: &str = "kiroscribe-meeting-record/3";
+/// 1 つ前の形式（記録 1 件の `at` から `until` まで 2 秒ごとに調べ、次の記録までの間は、窓の中を調べずに同じ印が
+/// 続いていたものとして再生する。最後の記録のあとも、終了の猶予がたつまで進める）。
+pub const FORMAT_V2: &str = "kiroscribe-meeting-record/2";
 /// メモリーに残す件数（古いものから捨てる）。
 pub const CAPACITY: usize = 300;
 
@@ -51,6 +55,9 @@ pub struct RecordEntry {
     /// 同じ様子を続けて調べた最後の時刻（UNIX ミリ秒。`at` の 1 回だけなら無し）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<i64>,
+    /// `at` から `until` までに調べた回数（`at` の 1 回だけなら無し）
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub count: u32,
     /// 判定表の当てはめの結果（印の立っている文脈のあるサービスだけ）
     pub services: Vec<ServiceEvaluation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -58,6 +65,14 @@ pub struct RecordEntry {
     /// そのときに確定した出来事
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<RecordedDecision>,
+}
+
+fn one() -> u32 {
+    1
+}
+
+fn is_one(count: &u32) -> bool {
+    *count == 1
 }
 
 /// 書き出すファイルの中身。
@@ -127,6 +142,7 @@ impl MeetingRecorder {
         if decisions.is_empty() {
             if let Some(last) = self.entries.back_mut().filter(|last| last.services == evaluation.services && last.titles == titles) {
                 last.until = Some(at);
+                last.count += 1;
                 return;
             }
         }
@@ -136,6 +152,7 @@ impl MeetingRecorder {
         self.entries.push_back(RecordEntry {
             at,
             until: None,
+            count: 1,
             services: evaluation.services.clone(),
             titles,
             decisions: decisions
@@ -166,11 +183,37 @@ impl MeetingRecorder {
     }
 }
 
-/// 記録を、製品と同じ間隔（[`POLL_MS`]）・同じ判定（組み込みの判定表の時間と回数）で再生し、確定した出来事を順に返す。
-/// 記録 1 件は、`at` から `until` まで [`POLL_MS`] ごとに調べたものとして進める。そのあと次の記録までの時刻（と、
-/// 最後の記録のあと、会議の終わりの猶予がたつまで）は、同じ印のまま、窓の中は調べなかったものとして進める
-/// （実際に調べていない時刻で、組み合わせの開始に要る調べた回数を増やさない）。
+/// 記録を、製品と同じ判定（組み込みの判定表の時間と回数）で再生し、確定した出来事を順に返す。
+/// 判定を進めるのは、実際に調べた時刻だけ: 記録 1 件の `at` から `until` までの `count` 回を、その間に等しい間隔で並べる。
+/// 調べていない時刻（記録のあいだと、最後の記録のあと）には進めない（調べていない時刻の様子で、開始・終了を決めない）。
+/// 形式が [`FORMAT_V2`] の記録は、その形式の再生のしかたで再生する。
 pub fn replay(record: &MeetingRecord) -> Vec<String> {
+    if record.format == FORMAT_V2 {
+        return replay_v2(record);
+    }
+    let mut judge = Judge::new(Rules::builtin());
+    let mut events = Vec::new();
+    for entry in &record.entries {
+        let evaluation = Evaluation { services: entry.services.clone() };
+        for now in observed_times(entry) {
+            events.extend(judge.tick(&evaluation, now).into_iter().map(|decision| event_name(decision.event)));
+        }
+    }
+    events
+}
+
+/// 記録 1 件の、調べた時刻。
+fn observed_times(entry: &RecordEntry) -> Vec<i64> {
+    let until = entry.until.unwrap_or(entry.at).max(entry.at);
+    let count = i64::from(entry.count.max(1));
+    if count == 1 {
+        return vec![entry.at];
+    }
+    (0..count).map(|i| entry.at + (until - entry.at) * i / (count - 1)).collect()
+}
+
+/// [`FORMAT_V2`] の記録の再生。
+fn replay_v2(record: &MeetingRecord) -> Vec<String> {
     let Some(last) = record.entries.last() else {
         return Vec::new();
     };
@@ -206,6 +249,35 @@ fn without_scans(services: &[ServiceEvaluation]) -> Vec<ServiceEvaluation> {
     services
 }
 
+/// 形式を問わず読んだ記録を再生した結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replayed {
+    pub format: String,
+    pub description: String,
+    pub expected: Vec<String>,
+    pub events: Vec<String>,
+}
+
+/// 書き出した記録（JSON）を、まず形式を読み、その形式の判定と再生のしかたで再生する。
+/// - [`FORMAT`]・[`FORMAT_V2`]: 判定表の当てはめの結果を、いまの判定で再生する（[`replay`]）
+/// - [`crate::meeting_record_v1::FORMAT`]: マイクの使用と窓の題を、その記録を書いた版の判定で再生する
+pub fn replay_json(text: &str) -> Result<Replayed, String> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|err| format!("JSON として読めません: {err}"))?;
+    let format = value.get("format").and_then(|format| format.as_str()).ok_or("format がありません")?.to_string();
+    if format == FORMAT || format == FORMAT_V2 {
+        let record: MeetingRecord = serde_json::from_value(value).map_err(|err| format!("{format} として読めません: {err}"))?;
+        let events = replay(&record);
+        return Ok(Replayed { format, description: record.description, expected: record.expected, events });
+    }
+    if format == crate::meeting_record_v1::FORMAT {
+        let record: crate::meeting_record_v1::Record =
+            serde_json::from_value(value).map_err(|err| format!("{format} として読めません: {err}"))?;
+        let events = crate::meeting_record_v1::replay(&record).into_iter().map(event_name).collect();
+        return Ok(Replayed { format, description: record.description, expected: record.expected, events });
+    }
+    Err(format!("知らない形式です: {format}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,7 +310,14 @@ mod tests {
 
     fn facts_with_title(title: &str) -> Facts {
         Facts {
-            windows: vec![WindowFact { hwnd: 42, exe: "chrome.exe".into(), class: "Chrome_WidgetWin_1".into(), title: title.into(), visible: true }],
+            windows: vec![WindowFact {
+                hwnd: 42,
+                exe: "chrome.exe".into(),
+                class: "Chrome_WidgetWin_1".into(),
+                title: title.into(),
+                visible: true,
+                site: Some("meet.google.com".into()),
+            }],
             ..Default::default()
         }
     }
@@ -288,6 +367,7 @@ mod tests {
     }
 
     /// 書き出した記録を読み直して再生すると、製品と同じ判定で、同じ出来事が起きる。
+    /// 最後の記録のあとは進めないので、終了は、終了の猶予がたつまで調べ続けた記録でだけ起きる。
     // [MTG-025]
     #[test]
     fn a_record_replays_with_the_product_timing() {
@@ -297,9 +377,51 @@ mod tests {
         recorder.record(10_000, &meet_tab(), &facts, &[], false);
         recorder.record(60_000, &Evaluation::default(), &facts, &[], false); // 会議を抜けた
         let record = recorder.export("0.4.4");
+        assert_eq!(replay(&record), vec!["started:googleMeet"], "抜けたあと 1 回しか調べていない");
+        for at in (62_000..=80_000).step_by(2_000) {
+            recorder.record(at, &Evaluation::default(), &facts, &[], false);
+        }
+        let record = recorder.export("0.4.4");
+        assert_eq!((record.entries[2].until, record.entries[2].count), (Some(80_000), 11));
         let json = serde_json::to_string_pretty(&record).unwrap();
         let read: MeetingRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(replay(&read), vec!["started:googleMeet", "ended:googleMeet"]);
+        assert_eq!(replay_json(&json).unwrap().events, vec!["started:googleMeet", "ended:googleMeet"]);
+    }
+
+    /// 再生では、調べた時刻だけで判定する。0 秒と 2.3 秒に組み合わせを調べ、4.6 秒に印がなければ、製品と同じく始めない。
+    // [MTG-007][MTG-025]
+    #[test]
+    fn replay_judges_only_at_the_observed_times() {
+        let entry = |at, until, count, services: Evaluation| RecordEntry { at, until, count, services: services.services, titles: vec![], decisions: vec![] };
+        let record = MeetingRecord {
+            entries: vec![entry(0, Some(2_300), 2, meet_combination()), entry(4_600, None, 1, Evaluation::default())],
+            ..MeetingRecorder::default().export("0.4.4")
+        };
+        assert!(replay(&record).is_empty());
+        assert_eq!(observed_times(&record.entries[0]), vec![0, 2_300]);
+        // 同じ様子を 3 回（0・2.3・4.6 秒）調べていれば、4.6 秒で始める
+        let longer = MeetingRecord { entries: vec![entry(0, Some(4_600), 3, meet_combination())], ..record };
+        assert_eq!(replay(&longer), vec!["started:googleMeet"]);
+    }
+
+    /// 1 つ前の形式（/2）の記録は、形式を先に読み、その形式の再生のしかた（記録のあいだは調べずに同じ印が続き、
+    /// 最後の記録のあとも終了の猶予がたつまで進める）で再生する。知らない形式は、理由を返す。
+    // [MTG-025]
+    #[test]
+    fn older_formats_replay_in_their_own_way() {
+        let entry = |at, until| RecordEntry { at, until, count: 1, services: meet_tab().services, titles: vec![], decisions: vec![] };
+        let v2 = MeetingRecord {
+            format: FORMAT_V2.into(),
+            entries: vec![entry(0, Some(10_000)), RecordEntry { services: vec![], ..entry(12_000, None) }],
+            ..MeetingRecorder::default().export("0.4.4")
+        };
+        let json = serde_json::to_string(&v2).unwrap();
+        let replayed = replay_json(&json).unwrap();
+        assert_eq!(replayed.format, FORMAT_V2);
+        assert_eq!(replayed.events, vec!["started:googleMeet", "ended:googleMeet"]);
+        assert!(replay_json(r#"{"format":"kiroscribe-meeting-record/9","entries":[]}"#).unwrap_err().contains("知らない形式"));
+        assert!(replay_json(r#"{"entries":[]}"#).unwrap_err().contains("format"));
     }
 
     fn meet_combination() -> Evaluation {
@@ -314,7 +436,14 @@ mod tests {
     #[test]
     fn replay_counts_only_the_recorded_scans() {
         // 0 秒に組み合わせを 1 回だけ調べ、次に調べた 5 秒には印がない（製品では始めない）
-        let entry = |at, until, services: Evaluation| RecordEntry { at, until, services: services.services, titles: vec![], decisions: vec![] };
+        let entry = |at, until: Option<i64>, services: Evaluation| RecordEntry {
+            at,
+            until,
+            count: until.map_or(1, |until| ((until - at) / POLL_MS + 1) as u32),
+            services: services.services,
+            titles: vec![],
+            decisions: vec![],
+        };
         let once = MeetingRecord {
             entries: vec![entry(0, None, meet_combination()), entry(5_000, None, Evaluation::default())],
             ..MeetingRecorder::default().export("0.4.4")
@@ -325,7 +454,7 @@ mod tests {
             entries: vec![entry(0, Some(6_000), meet_combination()), entry(8_000, None, Evaluation::default())],
             ..once
         };
-        assert_eq!(replay(&kept), vec!["started:googleMeet", "ended:googleMeet"]);
+        assert_eq!(replay(&kept), vec!["started:googleMeet"]);
 
         // 記録するときは、同じ様子が続いた最後の時刻を残す
         let mut recorder = MeetingRecorder::default();
@@ -344,7 +473,9 @@ mod tests {
         let secret = facts_with_title(r"https://meet.google.com/abc-defg-hij?authuser=SECRETQUERY C:\Users\山田 太郎\x sk-proj-SECRETKEY123 - Google Chrome");
         recorder.record(0, &Evaluation::default(), &Facts::default(), &[], true);
         recorder.record(10_000, &meet_tab(), &secret, &[], true);
-        recorder.record(40_000, &Evaluation::default(), &Facts::default(), &[], true);
+        for at in (40_000..=62_000).step_by(2_000) {
+            recorder.record(at, &Evaluation::default(), &Facts::default(), &[], true);
+        }
         let record = recorder.export("0.4.4");
         let redacted = record.redacted();
         let json = serde_json::to_string(&redacted).unwrap();

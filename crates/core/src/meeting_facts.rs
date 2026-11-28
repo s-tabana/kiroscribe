@@ -3,6 +3,7 @@
 //! 読むのは、判定表（[`crate::meeting_rules`]）の対象のアプリ（会議アプリとブラウザ）のものだけ。
 //! - 窓: トップレベルの窓の題・クラス名・見えているか
 //! - 部品: UI Automation で、判定表が使う種類（Button・TabItem・Text）の部品の名前と種類。調べる窓は [`scan_targets`]
+//! - サイト: 調べるブラウザの窓のアドレスバー（ブラウザ自身の部品）に表示中のページのホスト名。パスとクエリは読んだその場で捨てる
 //! - オーディオのセッション: [`crate::audio_sessions`]
 //!
 //! 画面の画像や音声そのものは読まない（SEC-013）。Windows 以外では、何も読まない。
@@ -24,6 +25,40 @@ pub struct WindowFact {
     pub title: String,
     /// 見えているか（最小化した窓も見えているとする）
     pub visible: bool,
+    /// ブラウザの窓なら、表示中のページのホスト名（小文字。アドレスバーから読む）。読めなかった・ブラウザでないときは `None`
+    pub site: Option<String>,
+}
+
+impl WindowFact {
+    /// 表示中のページのホスト名を添える。
+    pub fn at_site(mut self, site: &str) -> Self {
+        self.site = Some(site.to_string());
+        self
+    }
+}
+
+/// アドレスバーの値（`https://meet.google.com/abc?x=1` や、スキームを省いた `meet.google.com/abc`）からホスト名を取り出す。
+/// ホスト名の形でないもの（検索語の入力中など）は `None`。
+pub fn host_of(address: &str) -> Option<String> {
+    let text = address.trim();
+    let rest = match text.find("://") {
+        Some(at) => &text[at + 3..],
+        None => text,
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    // 利用者名の部分（user@host）は捨てる
+    let authority = authority.rsplit('@').next().unwrap_or_default();
+    let host = match authority.strip_prefix('[') {
+        // IPv6 のアドレス
+        Some(inner) => inner.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    let host = host.trim_end_matches('.').to_lowercase();
+    let valid = !host.is_empty()
+        && !host.contains(char::is_whitespace)
+        && (host.contains('.') || host.contains(':') || host == "localhost")
+        && host.chars().all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | ':'));
+    valid.then_some(host)
 }
 
 /// 部品の種類（UI Automation の ControlType のうち、判定表が使うもの）。
@@ -65,6 +100,9 @@ pub struct ScannedWindow {
     pub seen: usize,
     /// 調べられなかった理由（HRESULT・応答のない窓など）
     pub error: Option<String>,
+    /// 一部の部品を読めなかったときの理由（部品の数・部品・種類・名前の取得の失敗）。読めた部品の印は立つが、
+    /// 打ち消しの印を読み損ねたかもしれないので、組み合わせの開始に要る調べた回には数えない（MTG-007）
+    pub incomplete: Option<String>,
 }
 
 /// 窓の中の部品を調べた 1 回分。
@@ -96,10 +134,11 @@ impl Facts {
         self.scan.as_ref()?.windows.iter().find(|window| window.hwnd == hwnd && window.error.is_none())
     }
 
-    /// この回に、その窓の中を調べられたか。UI Automation そのものを使えないときと、その窓を調べられなかったときは、
-    /// 調べたものとして扱わない（待機画面の参加ボタンを読めないまま、組み合わせで始めない。MTG-007）。
+    /// この回に、その窓の中を調べ切れたか。UI Automation そのものを使えないとき、その窓を調べられなかったとき、
+    /// 一部の部品を読めなかったときは、調べたものとして扱わない（待機画面の参加ボタンを読めないまま、組み合わせで始めない。MTG-007）。
     pub fn scan_covers(&self, hwnd: u64) -> bool {
-        self.scan.as_ref().is_some_and(|scan| scan.error.is_none()) && self.scanned_window(hwnd).is_some()
+        self.scan.as_ref().is_some_and(|scan| scan.error.is_none())
+            && self.scanned_window(hwnd).is_some_and(|scanned| scanned.incomplete.is_none())
     }
 }
 
@@ -163,14 +202,16 @@ mod win {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
     use windows::Win32::System::Variant::{VARIANT, VT_I4};
+    use windows::core::BSTR;
     use windows::Win32::UI::Accessibility::{
         AccessibleObjectFromWindow, CUIAutomation, IAccessible, IUIAutomation, IUIAutomation2, IUIAutomationCacheRequest,
-        IUIAutomationCondition, TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_CheckBoxControlTypeId,
-        UIA_ControlTypePropertyId, UIA_MenuItemControlTypeId, UIA_NamePropertyId, UIA_TabItemControlTypeId,
-        UIA_TextControlTypeId, UIA_CONTROLTYPE_ID,
+        IUIAutomationCondition, TreeScope_Descendants, UIA_AutomationIdPropertyId, UIA_ButtonControlTypeId,
+        UIA_CheckBoxControlTypeId, UIA_ClassNamePropertyId, UIA_ControlTypePropertyId, UIA_EditControlTypeId,
+        UIA_MenuItemControlTypeId, UIA_NamePropertyId, UIA_TabItemControlTypeId, UIA_TextControlTypeId,
+        UIA_ValueValuePropertyId, UIA_CONTROLTYPE_ID,
     };
 
-    use super::{scan_targets, ControlFact, ControlScan, ControlType, Facts, ScannedWindow, WindowFact};
+    use super::{host_of, scan_targets, ControlFact, ControlScan, ControlType, Facts, ScannedWindow, WindowFact};
     use crate::audio_sessions::{self, hresult, Flow};
     use crate::meeting_rules::Rules;
     use crate::meetings::{exe_name, Browsers};
@@ -182,6 +223,11 @@ mod win {
     const NUDGE_INTERVAL: Duration = Duration::from_secs(60);
     /// 1 つの窓の中で問い合わせる子の窓の数の上限。
     const NUDGE_CHILDREN: usize = 4;
+    /// UI Automation を使えなかったあと、作り直すまでの間隔。
+    const RETRY_INTERVAL: Duration = Duration::from_secs(30);
+    /// ブラウザのアドレスバーの部品: Chromium 系はクラス名、Firefox 系は AutomationId で見分ける（ページの中の入力欄は読まない）。
+    const CHROMIUM_ADDRESS_BAR: &str = "OmniboxViewViews";
+    const FIREFOX_ADDRESS_BAR: &str = "urlbar-input";
 
     fn code(err: &windows::core::Error) -> String {
         hresult(err.code().0)
@@ -219,6 +265,9 @@ mod win {
         automation: IUIAutomation,
         cache: IUIAutomationCacheRequest,
         condition: Option<(Vec<ControlType>, IUIAutomationCondition)>,
+        /// アドレスバーの値を読むための、取り置く値と条件
+        site_cache: IUIAutomationCacheRequest,
+        site_condition: IUIAutomationCondition,
     }
 
     impl Uia {
@@ -234,8 +283,32 @@ mod win {
                 let cache = automation.CreateCacheRequest().map_err(|err| code(&err))?;
                 cache.AddProperty(UIA_NamePropertyId).map_err(|err| code(&err))?;
                 cache.AddProperty(UIA_ControlTypePropertyId).map_err(|err| code(&err))?;
-                Ok(Uia { automation, cache, condition: None })
+                let site_cache = automation.CreateCacheRequest().map_err(|err| code(&err))?;
+                site_cache.AddProperty(UIA_ValueValuePropertyId).map_err(|err| code(&err))?;
+                let edit = automation
+                    .CreatePropertyCondition(UIA_ControlTypePropertyId, &variant_i32(UIA_EditControlTypeId.0))
+                    .map_err(|err| code(&err))?;
+                let chromium = automation
+                    .CreatePropertyCondition(UIA_ClassNamePropertyId, &VARIANT::from(CHROMIUM_ADDRESS_BAR))
+                    .map_err(|err| code(&err))?;
+                let firefox = automation
+                    .CreatePropertyCondition(UIA_AutomationIdPropertyId, &VARIANT::from(FIREFOX_ADDRESS_BAR))
+                    .map_err(|err| code(&err))?;
+                let bar = automation.CreateOrCondition(&chromium, &firefox).map_err(|err| code(&err))?;
+                let site_condition = automation.CreateAndCondition(&edit, &bar).map_err(|err| code(&err))?;
+                Ok(Uia { automation, cache, condition: None, site_cache, site_condition })
             }
+        }
+
+        /// ブラウザの窓のアドレスバーに表示中のページのホスト名。アドレスバーがない（アプリの窓など）・読めないときは `None`。
+        /// 値（URL）は、ホスト名を取り出したらその場で捨てる。
+        fn site(&self, hwnd: u64) -> Option<String> {
+            let value = unsafe {
+                let element = self.automation.ElementFromHandle(HWND(hwnd as usize as *mut _)).ok()?;
+                let bar = element.FindFirstBuildCache(TreeScope_Descendants, &self.site_condition, &self.site_cache).ok()?;
+                bar.GetCachedPropertyValue(UIA_ValueValuePropertyId).ok()?
+            };
+            host_of(&BSTR::try_from(&value).ok()?.to_string())
         }
 
         /// 読む部品の種類の条件（種類が変わったときだけ作り直す）。
@@ -276,15 +349,50 @@ mod win {
                     return result;
                 }
             };
-            let count = unsafe { found.Length() }.unwrap_or(0);
+            let count = match unsafe { found.Length() } {
+                Ok(count) => count,
+                Err(err) => {
+                    result.error = Some(code(&err));
+                    return result;
+                }
+            };
+            // 読めなかった部品の数と、最初の理由（読めた部品の印は立てるが、調べ切れなかった回として扱う）
+            let mut missed = 0usize;
+            let mut first: Option<String> = None;
+            let mut miss = |err: windows::core::Error| {
+                missed += 1;
+                first.get_or_insert_with(|| code(&err));
+            };
             for at in 0..count {
-                let Ok(element) = (unsafe { found.GetElement(at) }) else { continue };
+                let element = match unsafe { found.GetElement(at) } {
+                    Ok(element) => element,
+                    Err(err) => {
+                        miss(err);
+                        continue;
+                    }
+                };
                 result.seen += 1;
-                let Some(kind) = unsafe { element.CachedControlType() }.ok().and_then(control_type) else { continue };
-                let name = unsafe { element.CachedName() }.map(|name| name.to_string()).unwrap_or_default();
+                let kind = match unsafe { element.CachedControlType() } {
+                    Ok(id) => control_type(id),
+                    Err(err) => {
+                        miss(err);
+                        continue;
+                    }
+                };
+                let Some(kind) = kind else { continue };
+                let name = match unsafe { element.CachedName() } {
+                    Ok(name) => name.to_string(),
+                    Err(err) => {
+                        miss(err);
+                        continue;
+                    }
+                };
                 if rules.keeps_control(kind, &name) {
                     result.controls.push(ControlFact { kind, name });
                 }
+            }
+            if missed > 0 {
+                result.incomplete = Some(format!("{missed} 個の部品を読めない（{}）", first.unwrap_or_default()));
             }
             result
         }
@@ -292,8 +400,12 @@ mod win {
 
     pub struct Observer {
         com: bool,
-        uia: Option<Result<Uia, String>>,
+        uia: Option<Uia>,
+        /// UI Automation を最後に使えなかった時刻と理由（[`RETRY_INTERVAL`] たつまでは作り直さない）
+        failed: Option<(Instant, String)>,
         nudged: HashMap<u64, Instant>,
+        /// ブラウザの窓ごとに、前にサイトを読んだときの題と、読んだサイト
+        sites: HashMap<u64, (String, Option<String>)>,
         own_pid: u32,
     }
 
@@ -301,11 +413,18 @@ mod win {
         pub fn new() -> Self {
             // UI Automation の部品を持ち続けるので、このスレッドの COM は、この道具を捨てるまで初期化したままにする
             let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
-            Observer { com, uia: None, nudged: HashMap::new(), own_pid: std::process::id() }
+            Observer {
+                com,
+                uia: None,
+                failed: None,
+                nudged: HashMap::new(),
+                sites: HashMap::new(),
+                own_pid: std::process::id(),
+            }
         }
 
         pub fn observe(&mut self, rules: &Rules, browsers: &Browsers, meeting_windows: &[u64], scan: bool) -> Facts {
-            let windows = list_windows(self.own_pid, &|exe| rules.is_target(exe, browsers));
+            let mut windows = list_windows(self.own_pid, &|exe| rules.is_target(exe, browsers));
             let own = self.own_pid;
             let without_own = |mut sessions: audio_sessions::AudioSessions| {
                 sessions.sessions.retain(|session| session.pid != own);
@@ -313,27 +432,67 @@ mod win {
             };
             let capture = without_own(audio_sessions::read(Flow::Capture, &|_| false));
             let render = without_own(audio_sessions::read(Flow::Render, &|exe| rules.wants_peak(exe, browsers)));
+            let mut read_sites: Vec<u64> = Vec::new();
             let scan = scan.then(|| {
                 let targets = scan_targets(rules, browsers, &windows, meeting_windows);
-                self.scan(rules, &windows, &targets)
+                self.scan(rules, browsers, &mut windows, &targets, &mut read_sites)
             });
+            // この回にサイトを読まなかったブラウザの窓は、題が変わっていなければ、前に読んだサイトのまま
+            for window in windows.iter_mut().filter(|window| browsers.contains(&window.exe) && !read_sites.contains(&window.hwnd)) {
+                if let Some((title, site)) = self.sites.get(&window.hwnd) {
+                    if *title == window.title {
+                        window.site = site.clone();
+                    }
+                }
+            }
+            self.sites.retain(|hwnd, _| windows.iter().any(|window| window.hwnd == *hwnd));
             Facts { windows, capture, render, scan }
         }
 
-        fn scan(&mut self, rules: &Rules, windows: &[WindowFact], targets: &[u64]) -> ControlScan {
+        /// UI Automation の道具。作れなかったときは、間隔を置いて作り直す（一時的な失敗から、起動し直さずに戻る）。
+        fn ensure_uia(&mut self) -> Result<(), String> {
+            if self.uia.is_some() {
+                return Ok(());
+            }
+            if let Some((at, error)) = &self.failed {
+                if at.elapsed() < RETRY_INTERVAL {
+                    return Err(error.clone());
+                }
+            }
+            match Uia::new() {
+                Ok(uia) => {
+                    self.uia = Some(uia);
+                    self.failed = None;
+                    Ok(())
+                }
+                Err(error) => {
+                    self.failed = Some((Instant::now(), error.clone()));
+                    Err(error)
+                }
+            }
+        }
+
+        fn scan(
+            &mut self,
+            rules: &Rules,
+            browsers: &Browsers,
+            windows: &mut [WindowFact],
+            targets: &[u64],
+            read_sites: &mut Vec<u64>,
+        ) -> ControlScan {
             let started = Instant::now();
-            let uia = self.uia.get_or_insert_with(Uia::new);
-            let uia = match uia {
-                Ok(uia) => uia,
-                Err(error) => return ControlScan { error: Some(error.clone()), ..Default::default() },
-            };
+            if let Err(error) = self.ensure_uia() {
+                return ControlScan { error: Some(error), ..Default::default() };
+            }
+            let Some(uia) = self.uia.as_mut() else { return ControlScan::default() };
             let condition = match uia.condition(&rules.control_types()) {
                 Ok(condition) => condition,
                 Err(error) => return ControlScan { error: Some(error), ..Default::default() },
             };
+            let uia = &*uia;
             let mut scanned = Vec::new();
             for hwnd in targets {
-                let Some(window) = windows.iter().find(|window| window.hwnd == *hwnd) else { continue };
+                let Some(window) = windows.iter_mut().find(|window| window.hwnd == *hwnd) else { continue };
                 if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsHungAppWindow(*hwnd as usize as _) } != 0 {
                     scanned.push(ScannedWindow { hwnd: *hwnd, error: Some("応答のない窓".into()), ..Default::default() });
                     continue;
@@ -344,6 +503,11 @@ mod win {
                         unsafe { nudge_chromium(*hwnd) };
                         self.nudged.insert(*hwnd, Instant::now());
                     }
+                }
+                if browsers.contains(&window.exe) {
+                    window.site = uia.site(*hwnd);
+                    self.sites.insert(*hwnd, (window.title.clone(), window.site.clone()));
+                    read_sites.push(*hwnd);
                 }
                 scanned.push(uia.scan_window(*hwnd, &condition, rules));
             }
@@ -447,7 +611,7 @@ mod win {
         }
         let mut class = [0u16; 256];
         let class_len = GetClassNameW(handle, class.as_mut_ptr(), class.len() as i32);
-        Some(WindowFact { hwnd: hwnd as u64, exe, class: utf16(&class, class_len), title, visible })
+        Some(WindowFact { hwnd: hwnd as u64, exe, class: utf16(&class, class_len), title, visible, site: None })
     }
 
     /// プロセスの実行ファイルの名前（小文字）。読めなければ空。
@@ -497,7 +661,21 @@ mod tests {
     use super::*;
 
     fn window(hwnd: u64, exe: &str, title: &str, visible: bool) -> WindowFact {
-        WindowFact { hwnd, exe: exe.into(), class: "Chrome_WidgetWin_1".into(), title: title.into(), visible }
+        WindowFact { hwnd, exe: exe.into(), class: "Chrome_WidgetWin_1".into(), title: title.into(), visible, site: None }
+    }
+
+    /// アドレスバーの値からは、ホスト名だけを取り出す（パス・クエリ・ポート・利用者名は捨てる）。検索語の入力中は取り出さない。
+    // [MTG-031]
+    #[test]
+    fn only_the_host_is_taken_from_the_address_bar() {
+        assert_eq!(host_of("https://meet.google.com/abc-defg-hij?authuser=1").as_deref(), Some("meet.google.com"));
+        assert_eq!(host_of("meet.google.com/abc-defg-hij").as_deref(), Some("meet.google.com"), "Chromium はスキームを省く");
+        assert_eq!(host_of("http://127.0.0.1:8080/").as_deref(), Some("127.0.0.1"));
+        assert_eq!(host_of("https://user@App.Slack.com/client").as_deref(), Some("app.slack.com"));
+        assert_eq!(host_of("http://[::1]:3000/").as_deref(), Some("::1"));
+        assert_eq!(host_of("meet google"), None);
+        assert_eq!(host_of(""), None);
+        assert_eq!(host_of("会議"), None);
     }
 
     /// 窓の中を調べるのは、会議アプリの見えている窓と、題がサービスに当たるブラウザの窓と、続いている会議の窓だけ。

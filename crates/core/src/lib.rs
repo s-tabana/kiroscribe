@@ -19,6 +19,7 @@ pub mod log_submit;
 pub mod meeting_facts;
 pub mod meeting_judge;
 pub mod meeting_record;
+pub mod meeting_record_v1;
 pub mod meeting_rules;
 pub mod meetings;
 pub mod notes;

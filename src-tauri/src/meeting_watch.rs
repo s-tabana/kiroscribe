@@ -102,8 +102,13 @@ pub fn spawn(app: AppHandle) {
         .name("kiroscribe-meetings".into())
         .spawn(move || {
             // 検出の道具（UI Automation の部品を含む）は、このスレッドで作り、このスレッドだけで使う
+            // E2E テスト用のビルドでだけ、模擬の会議のページのサイト（手元のサーバー）を判定表に足す（src/e2e.rs）
+            #[cfg(feature = "e2e")]
+            let rules = kiroscribe_core::e2e::meeting_rules();
+            #[cfg(not(feature = "e2e"))]
+            let rules = Rules::builtin();
             #[allow(unused_mut)]
-            let mut detector = MeetingDetector::new(Browsers::builtin());
+            let mut detector = MeetingDetector::with_rules(rules, Browsers::builtin());
             // 判定の様子を、変わったときと、一定の間隔ごとに書く
             let mut check_log = CheckLog::default();
             // E2E テスト用のビルドでだけ、待ち時間を縮め、実際の検出の代わりにテストが決めた状態を使う（src/e2e.rs）
@@ -528,6 +533,7 @@ mod tests {
                 class: "Chrome_WidgetWin_1".into(),
                 title: "Meet - abc-defg-hij - yamada@example.com - Google Chrome".into(),
                 visible: true,
+                site: Some("meet.google.com".into()),
             }],
             capture: AudioSessions {
                 available: true,
@@ -550,6 +556,7 @@ mod tests {
                     controls: vec![ControlFact { kind: ControlType::Button, name: "通話から退出".into() }],
                     seen: 120,
                     error: None,
+                    incomplete: None,
                 }],
                 elapsed_ms: 85,
                 error: None,
@@ -599,7 +606,14 @@ mod tests {
     #[test]
     fn verbose_control_names_are_only_the_matched_parts() {
         let slack = Facts {
-            windows: vec![WindowFact { hwnd: 5, exe: "slack.exe".into(), class: "Chrome_WidgetWin_1".into(), title: "ハドル: #dev - Slack".into(), visible: true }],
+            windows: vec![WindowFact {
+                hwnd: 5,
+                exe: "slack.exe".into(),
+                class: "Chrome_WidgetWin_1".into(),
+                title: "ハドル: #dev - Slack".into(),
+                visible: true,
+                site: None,
+            }],
             scan: Some(ControlScan {
                 windows: vec![ScannedWindow {
                     hwnd: 5,
@@ -610,6 +624,7 @@ mod tests {
                     ],
                     seen: 40,
                     error: None,
+                    incomplete: None,
                 }],
                 elapsed_ms: 10,
                 error: None,
@@ -623,8 +638,11 @@ mod tests {
         assert_eq!(fields["controlNames"], json!(["slack.exe: ハドルから退出する（Button）"]));
 
         let mut left = meeting_facts(0.2);
-        left.scan.as_mut().unwrap().windows[0].controls =
-            vec![ControlFact { kind: ControlType::Text, name: "山田さん、ミーティングから退出しました".into() }];
+        left.scan.as_mut().unwrap().windows[0].controls = vec![
+            ControlFact { kind: ControlType::Text, name: "ミーティングから退出しました".into() },
+            // 会議のチャットの本文は、退出後の画面の見出しと同じ語を含んでも当たらない
+            ControlFact { kind: ControlType::Text, name: "山田さん、ミーティングから退出しました".into() },
+        ];
         let mut judge = Judge::new(Rules::builtin());
         let left_step = step(left, &mut judge, 0);
         let fields = check_fields(&check_of(&left_step, &judge, &browsers, true), Some(1_000));

@@ -133,7 +133,11 @@ pub struct MeetingDetector {
 
 impl MeetingDetector {
     pub fn new(browsers: Browsers) -> Self {
-        let rules = Rules::builtin();
+        Self::with_rules(Rules::builtin(), browsers)
+    }
+
+    /// 組み込みの判定表の代わりに、`rules` で判定する（模擬の会議のページのサイトを足したテストと、確認用の道具のため）。
+    pub fn with_rules(rules: &'static Rules, browsers: Browsers) -> Self {
         MeetingDetector { rules, browsers, judge: Judge::new(rules), observer: Observer::new(), ticks: 0 }
     }
 

@@ -4,7 +4,9 @@
 // ほかのテストは meeting.txt で会議中かどうかを決めるが、ここでは検出を模擬せず（config の realMeetingDetection）、
 // - デスクトップの会議アプリ: マイクを開いたまま待つだけのプログラム（crates/core/examples/hold_mic.rs）を
 //   「Zoom.exe」「Discord.exe」の名前で動かす
-// - ブラウザの会議: Edge で「Meet - …」の題のページを開き、そのページがマイクを使う
+// - ブラウザの会議: Edge の通常の窓で「Meet - …」の題のページを手元のサーバーから開き、そのページがマイクを使う。
+//   製品はアドレスバーが示すサイトが会議のサービスのときだけ数えるので、このテストのビルドでは、
+//   手元のサーバー（127.0.0.1）を Google Meet のサイトとして足す（config の meetingSites。E2E テスト用のビルドだけ）
 // ことで、実際に Windows のオーディオのセッションを作り、アプリがそれを読んで録音を始め・止めることを確かめる。
 // 実際のサービス（Zoom などそのもの）がいつマイクを使うかは、ここでは確かめない（リリース前のチェックリスト）。
 // 環境変数 KIROSCRIBE_E2E_REAL_AUDIO=1 のときだけ走る。
@@ -30,7 +32,12 @@ const GRACE_MS = 3_000;
 const options = {
   skip,
   timeout: 240_000,
-  config: { audio: { mic: null, system: null }, realMeetingDetection: true, timing: { meetingEndGraceMs: GRACE_MS } },
+  config: {
+    audio: { mic: null, system: null },
+    realMeetingDetection: true,
+    meetingSites: { googleMeet: ["127.0.0.1"] },
+    timing: { meetingEndGraceMs: GRACE_MS },
+  },
 };
 
 /** 子プロセスを、その子孫ごと止める（終わるまで待つ） */
@@ -58,7 +65,7 @@ function startFakeApp(ctx, exeName, windowArgs) {
 
 /** 検出に失敗した時点の判定・窓・部品・セッション（確認用の道具の表示）と、テスト用プロセスの出力。 */
 function detectionDiagnostics(ctx) {
-  const probe = spawnSync(MEETING_PROBE, ["--once", "--titles"], { encoding: "utf8", windowsHide: true, timeout: 20_000 });
+  const probe = spawnSync(MEETING_PROBE, ["--once", "--titles", "--site", "meet=127.0.0.1"], { encoding: "utf8", windowsHide: true, timeout: 20_000 });
   const probeLog = [probe.stdout, probe.stderr, probe.error?.message].filter(Boolean).join("\n");
   fs.writeFileSync(ctx.work.file("meeting-probe.log"), probeLog);
   const logs = fs
@@ -120,7 +127,7 @@ for (const [exeName, label, windowArgs] of [
   });
 }
 
-test("[MTG-002][MTG-020][MTG-024] ブラウザ（Edge）で「Meet - …」の会議のページを開くと録音を始め、閉じると止める", { ...options, skip: options.skip || (!EDGE && "Edge がない") }, async (ctx) => {
+test("[MTG-002][MTG-020][MTG-024][MTG-031] ブラウザ（Edge）で「Meet - …」の会議のページを開くと録音を始め、閉じると止める", { ...options, skip: options.skip || (!EDGE && "Edge がない") }, async (ctx) => {
   // 退出ボタンがあり、マイクを使うページ（localhost は安全な場所として扱われ、マイクを使える）
   const page = `<!doctype html><meta charset="utf-8"><title>Meet - abc-defg-hij</title>
 <p id="state">マイクを準備しています</p>
@@ -141,7 +148,8 @@ navigator.mediaDevices.getUserMedia({ audio: true })
   ctx.work.closeWindow("main");
   await session.waitUntil(async () => !(await ctx.app.isMainVisible()), { message: "メインウィンドウが隠れる" });
 
-  // 使い捨てのプロファイルで、マイクの許可を自動で与えて開く（本物のマイク＝仮想のケーブルを使う）
+  // 使い捨てのプロファイルで、マイクの許可を自動で与えて開く（本物のマイク＝仮想のケーブルを使う）。
+  // アプリの窓（--app）にはアドレスバーがないので、通常の窓で開く
   const profile = path.join(ctx.work.dir, "edge-profile");
   const edge = spawn(
     EDGE,
@@ -151,7 +159,8 @@ navigator.mediaDevices.getUserMedia({ audio: true })
       "--no-default-browser-check",
       "--disable-features=msEdgeWelcomePage",
       "--use-fake-ui-for-media-stream",
-      `--app=${url}`,
+      "--new-window",
+      url,
     ],
     { stdio: "ignore" },
   );
