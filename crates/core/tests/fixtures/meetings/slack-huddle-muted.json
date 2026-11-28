@@ -9,6 +9,7 @@
     },
     {
       "at": 1795000002000,
+      "until": 1795000008000,
       "services": [
         {
           "app": "slackHuddle",
@@ -52,6 +53,7 @@
     },
     {
       "at": 1795000010000,
+      "until": 1795000158000,
       "services": [
         {
           "app": "slackHuddle",

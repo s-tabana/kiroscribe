@@ -222,7 +222,7 @@ jobs:
               $code = $LASTEXITCODE
               "--- $attempt 回目（終了コード $code）"
               $output
-              if ($code -eq 0 -and $output -match '(?m)^\s*録音 active zoom\.exe' -and $output -match 'Zoom の会議の開始を確定') {
+              if ($code -eq 0 -and $output -match '(?m)^\s*録音 active zoom\.exe' -and $output -match '会議の開始を確定: Zoom（') {
                 $passed = $true
                 break
               }

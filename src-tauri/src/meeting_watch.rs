@@ -7,7 +7,7 @@ use chrono::Local;
 use kiroscribe_core::audio_sessions;
 use kiroscribe_core::debug_log::MAX_VALUES;
 use kiroscribe_core::meeting_record::{self, MeetingRecord, MeetingRecorder};
-use kiroscribe_core::meeting_rules::Rules;
+use kiroscribe_core::meeting_rules::{self, Rules};
 use kiroscribe_core::meetings::{
     simulated_evaluation, Browsers, Decision, Judge, MeetingApp, MeetingDetector, MeetingEvent, ServiceState, Step,
 };
@@ -230,14 +230,12 @@ pub(crate) fn check_fields(check: &Check<'_>, now: Option<i64>) -> Value {
     if check.verbose {
         let titles = meeting_record::titles(&check.step.evaluation, facts);
         fields["windowTitles"] = json!(titles.iter().map(|title| format!("{}: {}", title.app, title.title)).collect::<Vec<_>>());
-        let names: Vec<String> = facts
-            .scan
-            .iter()
-            .flat_map(|scan| scan.windows.iter())
-            .filter(|scanned| titles.iter().any(|title| title.window == scanned.hwnd))
-            .flat_map(|scanned| {
-                let exe = facts.windows.iter().find(|w| w.hwnd == scanned.hwnd).map(|w| w.exe.clone()).unwrap_or_default();
-                scanned.controls.iter().map(move |control| format!("{exe}: {}（{}）", control.name, control.kind.name()))
+        // 立っている印に実際に当たった部品だけを書く（文字の部品は、本文ではなく当たった語を書く。LOG-010）
+        let names: Vec<String> = meeting_rules::matched_controls(check.rules, facts, &check.step.evaluation)
+            .into_iter()
+            .map(|control| {
+                let exe = facts.windows.iter().find(|w| w.hwnd == control.window).map(|w| w.exe.clone()).unwrap_or_default();
+                format!("{exe}: {}（{}）", control.name, control.kind.name())
             })
             .collect();
         fields["controlNames"] = json!(names);
@@ -594,6 +592,43 @@ mod tests {
         let verbose = check_fields(&check(true), Some(1_000));
         assert_eq!(verbose["windowTitles"], json!(["chrome.exe: Meet - abc-defg-hij - yamada@example.com - Google Chrome"]));
         assert_eq!(verbose["controlNames"], json!(["chrome.exe: 通話から退出（Button）"]));
+    }
+
+    /// 詳しい記録の部品の名前は、その窓で立っている印に当たった部品だけ。文字の部品は、本文ではなく当たった語を書く。
+    // [LOG-010]
+    #[test]
+    fn verbose_control_names_are_only_the_matched_parts() {
+        let slack = Facts {
+            windows: vec![WindowFact { hwnd: 5, exe: "slack.exe".into(), class: "Chrome_WidgetWin_1".into(), title: "ハドル: #dev - Slack".into(), visible: true }],
+            scan: Some(ControlScan {
+                windows: vec![ScannedWindow {
+                    hwnd: 5,
+                    controls: vec![
+                        ControlFact { kind: ControlType::Button, name: "ハドルから退出する".into() },
+                        // Meet の退出後の画面の語（再参加）に当たる、Slack のメッセージの本文
+                        ControlFact { kind: ControlType::Text, name: "山田: 明日また再参加します".into() },
+                    ],
+                    seen: 40,
+                    error: None,
+                }],
+                elapsed_ms: 10,
+                error: None,
+            }),
+            ..Default::default()
+        };
+        let mut judge = Judge::new(Rules::builtin());
+        let slack_step = step(slack, &mut judge, 0);
+        let browsers = Browsers::builtin();
+        let fields = check_fields(&check_of(&slack_step, &judge, &browsers, true), Some(1_000));
+        assert_eq!(fields["controlNames"], json!(["slack.exe: ハドルから退出する（Button）"]));
+
+        let mut left = meeting_facts(0.2);
+        left.scan.as_mut().unwrap().windows[0].controls =
+            vec![ControlFact { kind: ControlType::Text, name: "山田さん、ミーティングから退出しました".into() }];
+        let mut judge = Judge::new(Rules::builtin());
+        let left_step = step(left, &mut judge, 0);
+        let fields = check_fields(&check_of(&left_step, &judge, &browsers, true), Some(1_000));
+        assert_eq!(fields["controlNames"], json!(["chrome.exe: ミーティングから退出しました（Text）"]));
     }
 
     /// 組み合わせで開始の確定を待っている間は、待ち始めてからのミリ秒を書く。

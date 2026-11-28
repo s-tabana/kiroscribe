@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use kiroscribe_core::audio_sessions::{AudioSessions, Flow};
+use kiroscribe_core::debug_log::mask_text;
 use kiroscribe_core::meeting_facts::Facts;
 use kiroscribe_core::meeting_rules::{Evaluation, Rules};
 use kiroscribe_core::meetings::{Browsers, Decision, Judge, MeetingEvent, Phase, ServiceState};
@@ -117,6 +118,7 @@ pub fn session_lines(flow: Flow, sessions: &AudioSessions, rules: &Rules, browse
 }
 
 /// 対象のアプリの窓と、その中の部品の行。立っている印を添える。`titles` のときだけ、題と部品の名前を出す。
+/// 題と部品の名前は、人に渡すファイルにも書くので、API キーの形の文字列・URL のクエリ・利用者のフォルダの名前を伏せる。
 pub fn window_lines(facts: &Facts, evaluation: &Evaluation, titles: bool) -> Vec<Line> {
     let mut lines = Vec::new();
     for window in &facts.windows {
@@ -130,7 +132,7 @@ pub fn window_lines(facts: &Facts, evaluation: &Evaluation, titles: bool) -> Vec
         }
         let shown = if window.visible { "表示" } else { "見えない" };
         let signals = if signals.is_empty() { "なし".to_string() } else { signals.join("・") };
-        let title = if titles { format!(" 題「{}」", window.title) } else { String::new() };
+        let title = if titles { format!(" 題「{}」", mask_text(&window.title)) } else { String::new() };
         let label = format!("窓 {} 0x{:x}", window.exe, window.hwnd);
         lines.push(Line::new(
             format!("窓/{:x}", window.hwnd),
@@ -140,7 +142,7 @@ pub fn window_lines(facts: &Facts, evaluation: &Evaluation, titles: bool) -> Vec
             let found = match (&scanned.error, titles) {
                 (Some(error), _) => format!("調べられない（{error}）"),
                 (None, true) => {
-                    let names: Vec<String> = scanned.controls.iter().map(|c| format!("{}（{}）", c.name, c.kind.name())).collect();
+                    let names: Vec<String> = scanned.controls.iter().map(|c| format!("{}（{}）", mask_text(&c.name), c.kind.name())).collect();
                     if names.is_empty() { "なし".into() } else { names.join("・") }
                 }
                 (None, false) => format!("判定表の名前に当たるもの {} 個", scanned.controls.len()),
@@ -235,6 +237,20 @@ mod tests {
         assert_eq!(capture[1].text, "  録音 active chrome.exe");
         assert_eq!(session_lines(Flow::Render, &facts.render, rules, &browsers)[0].text, "  再生のセッション: 取れない（Windows 以外）");
         assert_eq!(scan_line(&facts).unwrap().text, "  窓の中の部品: 1 個の窓を 40 ミリ秒で調べた");
+    }
+
+    /// --titles でも、題と部品の名前の API キーの形の文字列・URL のクエリ・利用者のフォルダの名前は伏せる。
+    #[test]
+    fn titles_hide_secrets() {
+        let mut facts = facts();
+        facts.windows[0].title = r"Meet - https://meet.google.com/abc?authuser=SECRETQUERY sk-proj-SECRETKEY123 - Google Chrome".into();
+        facts.scan.as_mut().unwrap().windows[0].controls[0].name = r"C:\Users\山田 太郎\x 通話から退出".into();
+        let evaluation = evaluate(Rules::builtin(), &facts, &Browsers::builtin());
+        let shown = window_lines(&facts, &evaluation, true).into_iter().map(|line| line.text).collect::<Vec<_>>().join("\n");
+        for (label, secret) in [("URL のクエリ", "SECRETQUERY"), ("API キー", "SECRETKEY"), ("利用者の名前", "山田")] {
+            assert!(!shown.contains(secret), "{label}が残っている");
+        }
+        assert!(shown.contains("通話から退出（Button）"));
     }
 
     /// 前回から変わった行と、消えた行だけを出す。

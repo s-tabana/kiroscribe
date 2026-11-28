@@ -1,7 +1,8 @@
 //! 会議の開始・継続・終了を決める（判定表を当てはめた結果 [`Evaluation`] を、2 秒ごとに受け取る）。
 //!
 //! サービスごとに、次の決まりで「参加中」かを決める（MTG-007〜MTG-010）。
-//! - 開始: 強い印が 1 つ立っている文脈があれば、その回に。強い印がなく、中・弱い印が合わせて 2 つ立っている文脈があれば、
+//! - 開始: 強い印が 1 つ立っている文脈があれば、その回に。強い印がなく、中・弱い印が合わせて 2 つ立っている文脈があれば
+//!   （窓の印と部品の印は、合わせて 1 つと数える）、
 //!   その組み合わせが [`JudgeConfig::combination_ms`] 続き、その間に窓の中の部品を [`JudgeConfig::combination_scans`] 回以上
 //!   調べたとき。打ち消しの印のある文脈では始めない
 //! - 継続: 強い印か組み合わせ（開始のあとは「開始のあとだけ」の印も数える）がある間
@@ -204,9 +205,14 @@ impl Candidate<'_> {
         self.veto.is_none() && self.counted.iter().any(|held| held.strength == Strength::Strong)
     }
 
+    /// 中・弱い印の組み合わせ。窓の印と部品の印（タブの題とタブの名前）は同じ題から立つので、合わせて 1 つと数える
+    /// （退出したあとも、窓の題とタブの名前だけで続けない。MTG-008）。録音・再生の印は、それぞれ 1 つと数える。
     fn combination(&self) -> bool {
-        self.veto.is_none()
-            && self.counted.iter().filter(|held| matches!(held.strength, Strength::Medium | Strength::Weak)).count() >= 2
+        let weak: Vec<&&Held> =
+            self.counted.iter().filter(|held| matches!(held.strength, Strength::Medium | Strength::Weak)).collect();
+        let sessions = weak.iter().filter(|held| held.kind == Kind::Session).count();
+        let titles = usize::from(weak.iter().any(|held| held.kind != Kind::Session));
+        self.veto.is_none() && sessions + titles >= 2
     }
 
     fn names(&self, pick: &dyn Fn(Strength) -> bool) -> Vec<String> {
@@ -455,6 +461,36 @@ mod tests {
 
     fn events(decisions: Vec<Decision>) -> Vec<MeetingEvent> {
         decisions.into_iter().map(|d| d.event).collect()
+    }
+
+    fn discord_tab(signals: Vec<Held>) -> Evaluation {
+        evaluation(vec![(MeetingApp::Discord, vec![window("chrome.exe", 9, signals)])])
+    }
+
+    /// ブラウザ版 Discord で切断したあと、タブの題とタブの名前だけが残っても、続けずに 20 秒で終える。
+    // [MTG-008][MTG-009]
+    #[test]
+    fn a_title_and_a_tab_name_alone_do_not_keep_a_meeting() {
+        let mut judge = Judge::new(Rules::builtin());
+        let tab = held("Discord のタブの題", Strength::Medium, Kind::Window);
+        let tab_item = Held { after_start: true, ..held("背面を含む Discord のタブ", Strength::Weak, Kind::Control) };
+        let mic = held("ブラウザのマイク", Strength::Weak, Kind::Session);
+        let joined = discord_tab(vec![held("ブラウザ版の切断ボタン", Strength::Strong, Kind::Control), tab.clone(), mic.clone()]);
+        assert_eq!(events(judge.tick(&joined, 0)), vec![MeetingEvent::Started(MeetingApp::Discord)]);
+        // 背面のタブでも、マイクを使っている間は続く
+        let background = discord_tab(vec![tab_item.clone(), mic]);
+        assert!(judge.tick(&background, 2_000).is_empty());
+        assert_eq!(judge.phase(), Phase::Active(MeetingApp::Discord));
+        // 切断したあと、題とタブの名前だけが残る
+        let left = discord_tab(vec![tab, tab_item]);
+        let mut now = 4_000;
+        let mut ended = Vec::new();
+        while ended.is_empty() && now <= 40_000 {
+            ended = events(judge.tick(&left, now));
+            now += 2_000;
+        }
+        assert_eq!(ended, vec![MeetingEvent::Ended(MeetingApp::Discord)]);
+        assert_eq!(now - 2_000, 24_000, "残った題とタブの名前では猶予を延ばさない（20 秒後に終える）");
     }
 
     /// 開始の確定待ち・続いている・猶予の間を、段階として読める。

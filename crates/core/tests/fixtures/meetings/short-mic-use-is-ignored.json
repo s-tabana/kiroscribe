@@ -5,6 +5,7 @@
   "entries": [
     {
       "at": 1795000000000,
+      "until": 1795000028000,
       "services": [
         {
           "app": "slackHuddle",

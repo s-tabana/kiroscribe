@@ -222,7 +222,21 @@ fn main() {
         return;
     }
     let path = options.output.clone().or_else(default_output);
-    let file = path.as_ref().and_then(|path| std::fs::OpenOptions::new().create(true).append(true).open(path).ok());
+    let opened = path.as_ref().map(|path| std::fs::OpenOptions::new().create(true).append(true).open(path));
+    let file = match opened {
+        Some(Ok(file)) => Some(file),
+        Some(Err(err)) => {
+            let shown = path.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
+            eprintln!("書き出す先を開けません（{shown}）: {err}");
+            // 指定した書き出す先に書けないなら、提出する記録が残らないので、続けない
+            if options.output.is_some() {
+                std::process::exit(1);
+            }
+            None
+        }
+        None => None,
+    };
+    let written = file.is_some();
     let mut out = Out { file };
     out.line(&format!(
         "=== meeting_probe {}（{}）{} ===",
@@ -230,9 +244,10 @@ fn main() {
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
         if options.titles { " 題と部品の名前も出す" } else { "" }
     ));
-    match &path {
-        Some(path) => out.line(&format!("  書き出す先: {}", path.display())),
-        None => out.line("  書き出す先: なし（画面だけ）"),
+    // フルパスには利用者のフォルダの名前が入るので、人に渡すファイルには書かず、画面にだけ出す
+    match path.as_ref().filter(|_| written) {
+        Some(path) => println!("  書き出す先: {}", path.display()),
+        None => println!("  書き出す先: なし（画面だけ）"),
     }
     let mut detector = MeetingDetector::new(Browsers::builtin());
     out.line(&format!("  判定表の版: {}", detector.rules().version));

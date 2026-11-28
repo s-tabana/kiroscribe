@@ -238,6 +238,17 @@ impl Pattern {
     }
 }
 
+impl Pattern {
+    /// ログに書く、判定表の語の形（例: 「^meet - 」「再参加」「slack + ハドル」）。
+    fn word(&self) -> String {
+        match self {
+            Pattern::Prefix(word) => format!("^{word}"),
+            Pattern::Suffix(word) => format!("{word}$"),
+            Pattern::All(words) => words.join(" + "),
+        }
+    }
+}
+
 impl Patterns {
     fn parse(raw: &[String], words: &HashMap<String, Vec<String>>) -> Result<Self, String> {
         let mut patterns = Vec::new();
@@ -266,6 +277,12 @@ impl Patterns {
     pub fn matches(&self, text: &str) -> bool {
         let text = normalize(text);
         self.0.iter().any(|pattern| pattern.matches(&text))
+    }
+
+    /// 題か名前が当たった語（比べる前に [`normalize`] で整える）。
+    fn matched_word(&self, text: &str) -> Option<String> {
+        let text = normalize(text);
+        self.0.iter().find(|pattern| pattern.matches(&text)).map(Pattern::word)
     }
 }
 
@@ -507,6 +524,44 @@ fn window_holds(signal: &Signal, window: &WindowFact, facts: &Facts) -> bool {
     }
 }
 
+/// 窓の中の部品のうち、その窓で立っている部品の印に当たったもの 1 つ（詳しい記録に書く）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchedControl {
+    pub window: u64,
+    pub kind: ControlType,
+    /// 部品の名前。文字（Text）の部品は、本文が入りうるので、当たった判定表の語
+    pub name: String,
+}
+
+/// 当てはめの結果で立っている部品の印に、実際に当たった部品（印の立たないサービスの語に当たっただけの部品は含めない）。
+pub fn matched_controls(rules: &Rules, facts: &Facts, evaluation: &Evaluation) -> Vec<MatchedControl> {
+    let mut found: Vec<MatchedControl> = Vec::new();
+    for service in &evaluation.services {
+        let Some(table) = rules.service(service.app) else { continue };
+        for context in &service.contexts {
+            let Some(scanned) = context.window.and_then(|hwnd| facts.scanned_window(hwnd)) else { continue };
+            for held in context.signals.iter().filter(|held| held.kind == Kind::Control) {
+                let Some(signal) = table.signals.iter().find(|signal| signal.name == held.name) else { continue };
+                for control in &scanned.controls {
+                    if !signal.types.contains(&control.kind) || signal.exclude.matches(&control.name) {
+                        continue;
+                    }
+                    let name = match control.kind {
+                        ControlType::Text => signal.names.matched_word(&control.name),
+                        _ => signal.names.matches(&control.name).then(|| control.name.clone()),
+                    };
+                    let Some(name) = name else { continue };
+                    let matched = MatchedControl { window: scanned.hwnd, kind: control.kind, name };
+                    if !found.contains(&matched) {
+                        found.push(matched);
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
 fn held(signal: &Signal) -> Held {
     Held { name: signal.name.clone(), strength: signal.strength, kind: signal.kind, after_start: signal.after_start }
 }
@@ -567,7 +622,12 @@ pub fn evaluate(rules: &Rules, facts: &Facts, browsers: &Browsers) -> Evaluation
         if !held_app.is_empty() {
             apps.sort_unstable();
             held_app.extend(desktop_vetoes);
-            contexts.push(Context { app: apps.join("・"), window: None, scanned: facts.scan.is_some(), signals: held_app });
+            // そのアプリの窓のどれかの中を、この回に調べられたときだけ、調べた回に数える
+            let scanned = facts
+                .windows
+                .iter()
+                .any(|window| apps.contains(&window.exe.as_str()) && facts.scan_covers(window.hwnd));
+            contexts.push(Context { app: apps.join("・"), window: None, scanned, signals: held_app });
         }
         if !contexts.is_empty() {
             services.push(ServiceEvaluation { app: service.app, contexts });

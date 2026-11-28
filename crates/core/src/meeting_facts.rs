@@ -96,14 +96,10 @@ impl Facts {
         self.scan.as_ref()?.windows.iter().find(|window| window.hwnd == hwnd && window.error.is_none())
     }
 
-    /// この回に、その窓の中を調べたか。UI Automation そのものを使えないときは、調べたものとして扱う
-    /// （組み合わせでの開始を、いつまでも止めないため）。
+    /// この回に、その窓の中を調べられたか。UI Automation そのものを使えないときと、その窓を調べられなかったときは、
+    /// 調べたものとして扱わない（待機画面の参加ボタンを読めないまま、組み合わせで始めない。MTG-007）。
     pub fn scan_covers(&self, hwnd: u64) -> bool {
-        match &self.scan {
-            Some(scan) if scan.error.is_some() => true,
-            Some(_) => self.scanned_window(hwnd).is_some(),
-            None => false,
-        }
+        self.scan.as_ref().is_some_and(|scan| scan.error.is_none()) && self.scanned_window(hwnd).is_some()
     }
 }
 

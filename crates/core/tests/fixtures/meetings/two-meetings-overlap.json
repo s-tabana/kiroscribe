@@ -5,6 +5,7 @@
   "entries": [
     {
       "at": 1795000000000,
+      "until": 1795000018000,
       "services": [
         {
           "app": "slackHuddle",
@@ -27,6 +28,7 @@
     },
     {
       "at": 1795000020000,
+      "until": 1795000058000,
       "services": [
         {
           "app": "googleMeet",
@@ -71,6 +73,7 @@
     },
     {
       "at": 1795000060000,
+      "until": 1795000118000,
       "services": [
         {
           "app": "googleMeet",

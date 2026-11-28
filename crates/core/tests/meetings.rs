@@ -287,6 +287,49 @@ fn a_combination_waits_for_two_scans_and_a_strong_signal_starts_at_once() {
     assert!(run.hold(&Pc::new().mic("slack.exe"), 60).is_empty());
 }
 
+/// 窓の中を調べられなかった回は、組み合わせの開始に要る調べた回に数えない。UI Automation を使えないとき、
+/// 対象の窓をどれも調べられなかったとき、ほかのサービスの窓だけを調べられたときは、組み合わせで始めない。
+// [MTG-007]
+#[test]
+fn a_combination_does_not_start_when_the_windows_cannot_be_read() {
+    let teams = || Pc::new().window(window(90, "ms-teams.exe", CHROME, "会議 | Microsoft Teams"), vec![]).mic("ms-teams.exe");
+    let failed = |pc: Pc, uia: Option<&str>, window_error: bool| {
+        let mut facts = pc.facts();
+        let scan = facts.scan.as_mut().unwrap();
+        scan.error = uia.map(String::from);
+        if uia.is_some() {
+            scan.windows.clear();
+        }
+        for scanned in scan.windows.iter_mut().filter(|scanned| scanned.hwnd == 90 && window_error) {
+            scanned.error = Some("0x80004005".into());
+        }
+        facts
+    };
+    let cases = [
+        ("UI Automation を使えない", failed(teams(), Some("0x80040154"), false)),
+        ("対象の窓をどれも調べられない", failed(teams(), None, true)),
+        (
+            "ほかのサービスの窓だけを調べられた",
+            failed(teams().window(window(60, "slack.exe", CHROME, "#dev - Acme - Slack"), vec![]), None, true),
+        ),
+        ("Meet のタブを調べられない", {
+            let mut facts = meet_in_chrome(vec![]).mic("chrome.exe").facts();
+            facts.scan.as_mut().unwrap().error = Some("0x80040154".into());
+            facts.scan.as_mut().unwrap().windows.clear();
+            facts
+        }),
+    ];
+    for (label, facts) in cases {
+        let evaluation = evaluate(Rules::builtin(), &facts, &Browsers::builtin());
+        let mut judge = Judge::new(Rules::builtin());
+        let events: Vec<MeetingEvent> = (0..15).flat_map(|i| judge.tick(&evaluation, i * POLL_MS)).map(|d| d.event).collect();
+        assert!(events.is_empty(), "{label}: {events:?}");
+    }
+    // 窓を調べられれば、組み合わせで始める
+    let mut run = Run::new();
+    assert_eq!(run.hold(&teams(), 6), started(MeetingApp::Teams));
+}
+
 /// 強い印も組み合わせもない状態が 20 秒続いたら終了。戻れば続き。Meet の退出後の画面（打ち消し）が出たら、すぐ終了。
 /// 退出したあともタブの題が残るだけでは、続いているとみなさない。
 // [MTG-008]
@@ -376,10 +419,11 @@ fn overlapping_meetings_switch_to_the_one_still_going() {
 // [MTG-020]
 #[test]
 fn sound_needs_a_level_above_the_floor_and_missing_sessions_do_not_stop_judging() {
+    let discord = || Pc::new().window(window(70, "discord.exe", CHROME, "#一般 | 開発 - Discord"), vec![]);
     let mut run = Run::new();
-    assert!(run.hold(&Pc::new().mic("discord.exe").sound("discord.exe", 0.001), 20).is_empty());
+    assert!(run.hold(&discord().mic("discord.exe").sound("discord.exe", 0.001), 20).is_empty());
     let mut run = Run::new();
-    assert_eq!(run.hold(&Pc::new().mic("discord.exe").sound("discord.exe", 0.05), 6), started(MeetingApp::Discord));
+    assert_eq!(run.hold(&discord().mic("discord.exe").sound("discord.exe", 0.05), 6), started(MeetingApp::Discord));
 
     let pc = Pc::new().window(window(70, "discord.exe", CHROME, "#一般 | 開発 - Discord"), vec![button("切断")]);
     let mut facts = pc.facts();
@@ -436,7 +480,7 @@ fn decisions_tell_which_signals_started_and_ended_a_meeting() {
     assert_eq!(decisions[0].reason.describe(), "強い印も組み合わせもない状態が 20 秒続いた");
 
     let mut judge = Judge::new(Rules::builtin());
-    let combination = Pc::new().mic("discord.exe").sound("discord.exe", 0.3);
+    let combination = Pc::new().window(window(70, "discord.exe", CHROME, "#一般 | 開発 - Discord"), vec![]).mic("discord.exe").sound("discord.exe", 0.3);
     judge.tick(&combination.evaluation(), 0);
     judge.tick(&combination.evaluation(), 2_000);
     let decisions = judge.tick(&combination.evaluation(), 4_000);
