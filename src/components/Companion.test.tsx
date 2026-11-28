@@ -61,6 +61,26 @@ describe("会議の相棒の設定", () => {
     );
   });
 
+  it("[IDX-016][CMP-036] 「Kiroscribe の過去のノート」は初期値でオン。送るものを表示し、切り替えは「設定を保存」で保存する", async () => {
+    const user = userEvent.setup();
+    const { backend } = setup();
+    const area = await section();
+    const notes = within(area).getByLabelText(/Kiroscribe の過去のノート/);
+    expect(notes).toBeChecked();
+    expect(within(area).getByText(/見つかったノートの題名・作成日時と抜粋は、相棒が資料を選ぶときに Anthropic へ送られます/)).toBeInTheDocument();
+    expect(within(area).getByLabelText("会議の相棒が PC の外に送るもの")).toHaveTextContent("過去のノートで見つかったノートの題名・作成日時と抜粋");
+
+    const confirm = vi.spyOn(backend, "confirm");
+    await user.click(notes);
+    expect(confirm).not.toHaveBeenCalled();
+    expect((await backend.getSettings()).companionNotes).toBe(true);
+    expect(within(area).getByLabelText("会議の相棒が PC の外に送るもの")).not.toHaveTextContent("過去のノート");
+    // 判定には、過去のノートをオフにしても、録音中のノートの題名を送る
+    expect(within(area).getByLabelText("会議の相棒が PC の外に送るもの")).toHaveTextContent("録音中のノートの題名");
+    await user.click(screen.getByRole("button", { name: "設定を保存" }));
+    await waitFor(async () => expect((await backend.getSettings()).companionNotes).toBe(false));
+  });
+
   it("[CMP-037] 相棒のモデルは Claude のモデルと同じ選択肢から選べ、初期値は claude-haiku-5-5。一覧にない値は残す", async () => {
     const user = userEvent.setup();
     setup();

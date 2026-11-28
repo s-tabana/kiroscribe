@@ -347,8 +347,10 @@ async fn on_started(app: &AppHandle, meeting: MeetingApp) {
         Err(err) => {
             log_skipped(app, meeting, "startFailed", Some(&err.0));
             // 録音できなかった会議の、タイトルだけの空のノートは残さない
-            if let Err(delete_err) = state.db().delete_note(&note.id) {
-                eprintln!("空のノートを消せませんでした: {delete_err}");
+            match state.db().delete_note(&note.id) {
+                // 作ってから消すまでに、過去のノートの索引に入っていても、検索から外して消す
+                Ok(()) => crate::companion::note_deleted(app, &note.id),
+                Err(delete_err) => eprintln!("空のノートを消せませんでした: {delete_err}"),
             }
             show_popup(
                 app,

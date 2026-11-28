@@ -522,6 +522,113 @@ fn search_notes_command_covers_body_minutes_and_transcript() {
     assert!(refused.to_string().contains("query"), "{refused}");
 }
 
+/// 過去のノートの索引は、相棒と「Kiroscribe の過去のノート」の両方がオンで保存したときに作り、
+/// ノートを保存するたびに更新し、ノートを削除したら消す。
+// [IDX-017][NOTE-015]
+#[test]
+fn past_notes_are_indexed_while_both_settings_are_on() {
+    #[cfg(feature = "e2e")]
+    fixture::fixture();
+    let (app, window) = mock_app("http://127.0.0.1:9/latest.json");
+    app.manage(AppState::new(Database::open_in_memory().unwrap(), Box::new(MemorySecretStore::default())));
+    let search = |term: &str| {
+        let companion = app.state::<crate::companion::CompanionState>();
+        companion.indexer.search(&[term.to_string()], None, 8).1.into_iter().map(|hit| hit.note_id).collect::<Vec<_>>()
+    };
+    let wait_for = |term: &str, expected: Vec<String>| {
+        let start = std::time::Instant::now();
+        while search(term) != expected {
+            assert!(start.elapsed() < std::time::Duration::from_secs(20), "{term} の検索結果が {expected:?} になりません: {:?}", search(term));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    let id = invoke(&window, "create_note", json!({})).unwrap()["id"].as_str().unwrap().to_string();
+    let patch = json!({ "title": "経理の定例", "userNotes": "- 経費精算は新システムへ" });
+    invoke(&window, "update_note", json!({ "id": id, "patch": patch })).unwrap();
+
+    // 両方がオンで保存した時点で、すべてのノートを入れ直す
+    let mut settings = invoke(&window, "get_settings", json!({})).unwrap();
+    settings["companion"] = json!(false);
+    invoke(&window, "save_settings", json!({ "settings": settings })).unwrap();
+    settings["companion"] = json!(true);
+    invoke(&window, "save_settings", json!({ "settings": settings })).unwrap();
+    wait_for("経費精算", vec![id.clone()]);
+
+    // 保存するたびに更新する
+    let patch = json!({ "userNotes": "- 交通費の上限を決めた" });
+    invoke(&window, "update_note", json!({ "id": id, "patch": patch })).unwrap();
+    wait_for("交通費", vec![id.clone()]);
+    wait_for("経費精算", vec![]);
+
+    // 「Kiroscribe の過去のノート」をオフにして保存すると、ノートの索引を消す。オンに戻すと入れ直す
+    settings["companionNotes"] = json!(false);
+    invoke(&window, "save_settings", json!({ "settings": settings })).unwrap();
+    assert!(search("交通費").is_empty());
+    settings["companionNotes"] = json!(true);
+    invoke(&window, "save_settings", json!({ "settings": settings })).unwrap();
+    wait_for("交通費", vec![id.clone()]);
+
+    // ノートを削除したら消す
+    invoke(&window, "delete_note", json!({ "id": id })).unwrap();
+    wait_for("交通費", vec![]);
+}
+
+/// 録音を始めたノートは、すぐに検索から外す（索引にある前の中身も出さない）。止め終えたら、止めたノートを入れ直す。
+/// 止めた直後に別のノートの録音が始まり、A を止める処理の知らせ（録音なし）が B の開始のあとに届いても、
+/// B を検索に戻さない（索引の状態は、録音の開始と、止めたノートを指定した完了の処理だけで変える）。
+// [IDX-016][IDX-017]
+#[test]
+fn recording_notes_are_hidden_and_reindexed_when_stopped() {
+    #[cfg(feature = "e2e")]
+    fixture::fixture();
+    let (app, window) = mock_app("http://127.0.0.1:9/latest.json");
+    app.manage(AppState::new(Database::open_in_memory().unwrap(), Box::new(MemorySecretStore::default())));
+    let search = |term: &str| {
+        let companion = app.state::<crate::companion::CompanionState>();
+        let mut ids: Vec<String> = companion.indexer.search(&[term.to_string()], None, 8).1.into_iter().map(|hit| hit.note_id).collect();
+        ids.sort();
+        ids
+    };
+    let wait_for = |term: &str, expected: Vec<String>| {
+        let start = std::time::Instant::now();
+        while search(term) != expected {
+            assert!(start.elapsed() < std::time::Duration::from_secs(20), "{term} の検索結果が {expected:?} になりません: {:?}", search(term));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    let note = |memo: &str| {
+        let id = invoke(&window, "create_note", json!({})).unwrap()["id"].as_str().unwrap().to_string();
+        invoke(&window, "update_note", json!({ "id": id, "patch": { "userNotes": memo } })).unwrap();
+        id
+    };
+    let a = note("予算の確認");
+    let b = note("予算の見直し");
+    let mut settings = invoke(&window, "get_settings", json!({})).unwrap();
+    settings["companion"] = json!(false);
+    invoke(&window, "save_settings", json!({ "settings": settings })).unwrap();
+    settings["companion"] = json!(true);
+    invoke(&window, "save_settings", json!({ "settings": settings })).unwrap();
+    let mut both = vec![a.clone(), b.clone()];
+    both.sort();
+    wait_for("予算", both.clone());
+
+    // A の録音を始めると、索引にある A は出さない。録音中の保存は、止めるまで入れない
+    crate::companion::recording_started(app.handle(), &a);
+    assert_eq!(search("予算"), vec![b.clone()]);
+    invoke(&window, "update_note", json!({ "id": a, "patch": { "userNotes": "予算と交通費" } })).unwrap();
+    assert!(search("交通費").is_empty());
+
+    // A を止め終えてから B の録音が始まり、そのあとに A を止める処理の古い知らせ（録音なし）が届いた
+    crate::companion::recording_stopped(app.handle(), &a);
+    crate::companion::recording_started(app.handle(), &b);
+    crate::recording::emit_status_for_test(app.handle());
+    wait_for("交通費", vec![a.clone()]);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(search("予算"), vec![a.clone()], "B は録音中なので、古い知らせが届いても出さない");
+    crate::companion::recording_stopped(app.handle(), &b);
+    wait_for("予算", both);
+}
+
 // ---- 見本の書き出し ----
 
 /// 見本の値を、実行のたびに変わらない形にする。型の確認に要る情報（キー・null かどうか・列挙の値）だけを残す:

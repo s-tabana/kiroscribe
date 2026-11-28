@@ -8,6 +8,7 @@ interface CompanionSectionProps {
   /** 相棒のモデルの選択メニュー（議事録・チャットのモデルと同じ選択肢） */
   modelSelect: ReactNode;
   onCompanionChange(value: boolean): void;
+  onNotesChange(value: boolean): void;
   onError(message: string): void;
 }
 
@@ -15,7 +16,7 @@ interface CompanionSectionProps {
  * 設定画面の「会議の相棒」の欄。オンとオフと相棒のモデルは「設定を保存」で保存する。
  * 探すフォルダの追加・外す・「中身を送らない」は、その場で保存する。
  */
-export function CompanionSection({ settings, modelSelect, onCompanionChange, onError }: CompanionSectionProps) {
+export function CompanionSection({ settings, modelSelect, onCompanionChange, onNotesChange, onError }: CompanionSectionProps) {
   const backend = useBackend();
   const [index, setIndex] = useState<SearchIndexStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -74,9 +75,10 @@ export function CompanionSection({ settings, modelSelect, onCompanionChange, onE
         <dd>Anthropic（Claude）</dd>
         <dt>送るもの</dt>
         <dd>
-          {"資料を求めていそうな発言と、その前の発言（同じノートの 6 件まで）。" +
+          {"録音中のノートの題名と、資料を求めていそうな発言と、その前の発言（同じノートの 6 件まで）。" +
             "探すフォルダで見つかった資料の題名・場所（フォルダの名前と、そこからの相対のパス）・抜粋" +
             "（「中身を送らない」にしたフォルダは、抜粋を送りません）。" +
+            (settings.companionNotes ? "過去のノートで見つかったノートの題名・作成日時と抜粋。" : "") +
             "資料のファイルそのもの・索引・PC の中のフルパスは送りません。"}
         </dd>
         <dt>費用</dt>
@@ -91,6 +93,17 @@ export function CompanionSection({ settings, modelSelect, onCompanionChange, onE
           {modelSelect}
         </label>
       </div>
+
+      <label className="check">
+        <input type="checkbox" checked={settings.companionNotes} onChange={(e) => onNotesChange(e.target.checked)} />
+        <span>
+          Kiroscribe の過去のノート
+          <small>
+            {"ノートの題名・自分のメモ・議事録・文字起こしから探します（録音中のノートは除きます）。" +
+              "見つかったノートの題名・作成日時と抜粋は、相棒が資料を選ぶときに Anthropic へ送られます。"}
+          </small>
+        </span>
+      </label>
 
       <div className="companion-folders">
         <h4 id="companion-folders-title">探すフォルダ</h4>

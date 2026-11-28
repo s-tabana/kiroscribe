@@ -44,6 +44,8 @@ export interface Settings {
   companion: boolean;
   /** 会議の相棒の判定と選択に使う Claude のモデル */
   companionModel: string;
+  /** 会議の相棒が、Kiroscribe の過去のノートからも探す */
+  companionNotes: boolean;
 }
 
 export type Provider = "openai" | "anthropic";
@@ -67,6 +69,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autoUpdate: false,
   companion: true,
   companionModel: "claude-haiku-5-5",
+  companionNotes: true,
 };
 
 // ---- 会議の相棒の資料の索引 ----

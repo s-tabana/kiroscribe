@@ -24,7 +24,7 @@ fn with_mark(base: char, mark: char) -> Option<char> {
 }
 
 /// 1 文字の正規化（全角英数・記号は半角に、英大文字は小文字に、全角の空白は半角に、半角カタカナは全角に）。
-fn fold(c: char) -> char {
+pub(crate) fn fold(c: char) -> char {
     let c = match c as u32 {
         0xFF01..=0xFF5E => char::from_u32(c as u32 - 0xFEE0).unwrap(),
         0x3000 => ' ',

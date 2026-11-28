@@ -9,5 +9,6 @@
   "launchAtLogin": true,
   "autoUpdate": false,
   "companion": true,
-  "companionModel": "claude-haiku-5-5"
+  "companionModel": "claude-haiku-5-5",
+  "companionNotes": true
 }

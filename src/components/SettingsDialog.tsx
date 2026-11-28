@@ -292,6 +292,7 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
                 <CompanionSection
                   settings={settings}
                   onCompanionChange={(value) => update("companion", value)}
+                  onNotesChange={(value) => update("companionNotes", value)}
                   onError={(text) => setMessage({ kind: "error", text })}
                   modelSelect={
                     <ModelSelect

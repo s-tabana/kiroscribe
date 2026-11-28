@@ -209,6 +209,7 @@ async fn enhance(
     let note = state
         .db()
         .save_enhanced_notes(note_id, &body, title.as_deref())?;
+    crate::companion::note_saved(app, note_id);
     Ok(note)
 }
 

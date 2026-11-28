@@ -3,15 +3,17 @@
 //! - [`extract`]: ファイルから題名と中身を取り出す
 //! - [`walk`]: 追加したフォルダの中の、索引に入れるファイルを集める
 //! - [`store`]: 索引の保存先（`search-index.db`）と検索
+//! - [`url`]: 文の中の URL の、送らない部分（クエリとフラグメント）
 //! - [`indexer`]: 索引を裏で作り、フォルダの変更を見張る
 
 pub mod extract;
 pub mod indexer;
 pub mod normalize;
 pub mod store;
+pub mod url;
 pub mod walk;
 
-pub use indexer::{FolderStatus, IndexState, IndexStatus, Indexer, Intervals, SearchFolder};
+pub use indexer::{FolderStatus, IndexState, IndexStatus, Indexer, Intervals, NoteSource, SearchFolder};
 pub use store::{Hit, SearchIndex, INDEX_FILE};
 
 use crate::db::Database;

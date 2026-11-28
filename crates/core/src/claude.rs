@@ -262,6 +262,34 @@ impl ClaudeClient {
         Ok(result)
     }
 
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// ストリーミングを使わずに `POST /messages` を 1 回呼び、応答の JSON をそのまま返す（会議の相棒の判定と選択）。
+    /// `body` の `model` は、このクライアントのモデルにする。`timeout` で打ち切る。
+    pub async fn create_message(&self, mut body: Value, timeout: Duration) -> Result<Value> {
+        body["model"] = json!(self.model);
+        let request = self.client.post(format!("{}/messages", self.base_url));
+        let request = match &self.credential {
+            Credential::ApiKey(key) => request.header("x-api-key", key),
+            Credential::AccessToken(token) => request.bearer_auth(token),
+        };
+        let response = request
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .timeout(timeout)
+            .json(&body)
+            .send()
+            .await?;
+        let status = response.status();
+        let text = response.text().await?;
+        if !status.is_success() {
+            return Err(CoreError::Api { service: "Anthropic", status: status.as_u16(), message: api_error_message(&text) });
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
+
     /// 文字が出始める前の一時的なエラーは再試行する。出始めた後のエラーは途中の文章が混ざるため再試行しない。
     pub async fn stream(
         &self,
