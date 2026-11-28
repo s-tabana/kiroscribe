@@ -194,9 +194,18 @@ jobs:
           </body></html>
           '@ | Set-Content -Encoding UTF8 $page
           $edge = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
-          function Start-Edge([string[]]$extra) {
+          $wait = Join-Path $work 'meet-wait.html'
+          @'
+          <!doctype html><html><head><meta charset="utf-8"><title>Meet - abc-defg-hij</title></head><body>
+          <p>参加の準備は整いましたか?</p>
+          <button aria-label="Join now">j</button>
+          <button aria-label="Turn off microphone">m</button>
+          <script>navigator.mediaDevices.getUserMedia({ audio: true });</script>
+          </body></html>
+          '@ | Set-Content -Encoding UTF8 $wait
+          function Start-Edge([string[]]$extra, [string]$target = $page) {
             $userData = Join-Path $work ("edge-" + [guid]::NewGuid())
-            $edgeArgs = @('--no-first-run', '--no-default-browser-check', '--use-fake-ui-for-media-stream', "--user-data-dir=$userData", '--new-window') + $extra + @("file:///$($page -replace '\\', '/')")
+            $edgeArgs = @('--no-first-run', '--no-default-browser-check', '--use-fake-ui-for-media-stream', "--user-data-dir=$userData", '--new-window') + $extra + @("file:///$($target -replace '\\', '/')")
             Start-Process -FilePath $edge -ArgumentList $edgeArgs | Out-Null
           }
           # 確認用の道具を 1 回動かし、表示して、出力を返す
@@ -209,11 +218,11 @@ jobs:
           }
           $controls = '(?m)^\s*部品 msedge\.exe 0x[0-9a-f]+ 退出=あり'
           # 窓の中の部品が出るまで、何回か調べる（ブラウザが部品の情報を作るまで時間がかかることがある）
-          function Wait-Controls([string]$label) {
+          function Wait-Controls([string]$label, [string]$pattern = $controls) {
             for ($i = 1; $i -le 6; $i++) {
               Start-Sleep -Seconds 3
               $output = Invoke-Probe "$label（$i 回目）"
-              if ($output -match $controls) { break }
+              if ($output -match $pattern) { break }
             }
             return $output
           }
@@ -253,6 +262,15 @@ jobs:
               "確認: $name → $ok"
               if (-not $ok) { $failures += $name }
             }
+            # 参加前の待機画面（題もマイクも参加中と同じ）では、参加ボタンが打ち消しの印になり、参加中と判定しない
+            Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            Start-Edge @() $wait
+            $output = Wait-Controls 'Edge（待機画面）' '(?m)^\s*部品 msedge\.exe 0x[0-9a-f]+ 退出=なし 参加=あり'
+            $waiting = '(?m)^\s*判定表 Google Meet: 待機（打ち消しの印がある） 立った: 待機画面の参加ボタン（打ち消し）・Meet の窓の名前（中）'
+            $ok = $output -match $waiting
+            "確認: 判定表（待機画面は参加中にしない） → $ok"
+            if (-not $ok) { $failures += '判定表（待機画面）' }
             # 続けて動かし、目印（標準入力の 1 行）とファイルへの書き出しを確かめる
             $stdin = Join-Path $work 'stdin.txt'
             'ci 目印' | Set-Content -Encoding UTF8 $stdin

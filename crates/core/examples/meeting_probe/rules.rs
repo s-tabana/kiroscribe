@@ -4,8 +4,8 @@
 //! 書き出し、編集されたら、作り直さずに次の回から使う。
 //!
 //! 始める・続ける・止める（[`Judge`]）:
-//! - 開始: 強い印が 1 つ、または中・弱い印が合わせて 2 つ
-//! - 継続: 強い印がある間
+//! - 開始: 強い印が 1 つ、または中・弱い印が合わせて 2 つ。ただし打ち消しの印（参加前の待機画面のボタンなど）があれば始めない
+//! - 継続: 強い印がある間（打ち消しの印がある間は、強い印がないものとして扱う）
 //! - 終了: 強い印が消えて、表で指定した秒数のあいだ戻らない。終わったあとは、開始の条件がいったん崩れるまで始め直さない
 //!   （強い印がなく、中・弱い印だけが続いているときに、始めて止めてを繰り返さないため）
 
@@ -15,17 +15,24 @@ use serde::Deserialize;
 
 use crate::signals::{control_category, AudioSnapshot, UiaScan, WindowSnapshot, BROWSERS};
 
+/// 既定の判定表の版の印。読んだファイルにこれがなければ、古い版の既定の表から書き出したものかもしれないと知らせる。
+pub const VERSION_MARK: &str = "判定表の版: 2";
+
 /// 既定の判定表。初めて動かしたときに、exe と同じ場所に書き出す。
 pub const DEFAULT_RULES: &str = r#"# Kiroscribe 会議の検出の確認用の道具（meeting_probe）の判定表。
+# 判定表の版: 2
 # 編集して保存すると、次の回（2 秒ごと）から使う。書き方を誤ると、その旨を出して前の表を使い続ける。
+# 新しい版の既定の表を使うには、このファイルを消して起動し直す。
 #
 # 判定:
-# - 開始: 強い印（strong）が 1 つ、または中（medium）・弱い（weak）印が合わせて 2 つ
-# - 継続: 強い印がある間
+# - 開始: 強い印（strong）が 1 つ、または中（medium）・弱い（weak）印が合わせて 2 つ。
+#   ただし打ち消しの印（veto。参加前の待機画面の「今すぐ参加」など）があれば始めない
+# - 継続: 強い印がある間（打ち消しの印がある間は、強い印がないものとして扱う）
 # - 終了: 強い印が消えて end_after_seconds 秒のあいだ戻らない
+# - 窓の名前と部品の名前は、全角・半角のダッシュ（— – -）を同じものとして比べる
 #
 # 印の種類（kind）:
-# - control: 窓の中の部品（UI Automation）。category は 退出・ミュート・カメラ・画面共有。
+# - control: 窓の中の部品（UI Automation）。category は 退出・参加・ミュート・カメラ・画面共有。
 #   names を書くと、部品の名前（小文字にして比べる）にどれかを含むものだけ
 # - window: 窓。title は窓の名前（小文字にして比べる）にどれかを含むもの、class は窓のクラス名のどれかと同じもの
 # - session: オーディオのセッション。flow は capture（録音）か render（再生）。
@@ -43,6 +50,15 @@ name = "退出ボタン"
 strength = "strong"
 kind = "control"
 category = "退出"
+apps = ["browser"]
+title = ["meet"]
+
+# 参加前の待機画面（題は参加中と同じ「Meet - <会議コード>」で、マイクのプレビューで録音のセッションも Active になる）
+[[service.signal]]
+name = "待機画面の参加ボタン"
+strength = "veto"
+kind = "control"
+category = "参加"
 apps = ["browser"]
 title = ["meet"]
 
@@ -155,6 +171,13 @@ apps = ["browser"]
 title = ["teams"]
 
 [[service.signal]]
+name = "参加前の画面の参加ボタン"
+strength = "veto"
+kind = "control"
+category = "参加"
+apps = ["ms-teams.exe", "teams.exe"]
+
+[[service.signal]]
 name = "会議の窓の名前"
 strength = "medium"
 kind = "window"
@@ -216,6 +239,8 @@ pub enum Strength {
     Strong,
     Medium,
     Weak,
+    /// 打ち消し: 立っている間は始めず、強い印がないものとして扱う
+    Veto,
 }
 
 impl Strength {
@@ -224,6 +249,7 @@ impl Strength {
             Strength::Strong => "強",
             Strength::Medium => "中",
             Strength::Weak => "弱",
+            Strength::Veto => "打ち消し",
         }
     }
 }
@@ -337,9 +363,14 @@ fn app_matches(apps: &[String], exe: &str, guessed_browser: bool) -> bool {
     })
 }
 
+/// 小文字にし、全角・半角のダッシュ（— – ー以外のもの）を「-」にそろえる。
+fn normalize(text: &str) -> String {
+    text.to_lowercase().replace(['—', '–', '―', '‐', '−'], "-")
+}
+
 fn contains_any(text: &str, words: &[String]) -> bool {
-    let text = text.to_lowercase();
-    words.iter().any(|word| text.contains(&word.to_lowercase()))
+    let text = normalize(text);
+    words.iter().any(|word| text.contains(&normalize(word)))
 }
 
 fn window_matches(signal: &Signal, window: &WindowSnapshot) -> bool {
@@ -423,9 +454,13 @@ impl Judge {
         let mut outcomes = Vec::new();
         for service in &rules.services {
             let held: Vec<(&Signal, bool)> = service.signals.iter().map(|signal| (signal, holds(signal, facts))).collect();
-            let strong = held.iter().filter(|(s, on)| *on && s.strength == Strength::Strong).count();
-            let others = held.iter().filter(|(s, on)| *on && s.strength != Strength::Strong).count();
-            let start = strong >= 1 || others >= 2;
+            let count = |strengths: &[Strength]| held.iter().filter(|(s, on)| *on && strengths.contains(&s.strength)).count();
+            let veto = count(&[Strength::Veto]);
+            let raw_strong = count(&[Strength::Strong]);
+            let others = count(&[Strength::Medium, Strength::Weak]);
+            // 打ち消しの印がある間は、強い印がないものとして扱い、始めない
+            let strong = if veto > 0 { 0 } else { raw_strong };
+            let start = veto == 0 && (strong >= 1 || others >= 2);
             let state = self.states.entry(service.name.clone()).or_default();
             if !start {
                 state.blocked = false;
@@ -441,7 +476,7 @@ impl Judge {
                         if now_ms - lost >= service.end_after_seconds as i64 * 1000 {
                             event = Some(format!("終了（強い印が {} 秒戻らなかった）", service.end_after_seconds));
                             state.blocked = start;
-                            if start || others > 0 { Verdict::Waiting } else { Verdict::None }
+                            if start || others + veto + raw_strong > 0 { Verdict::Waiting } else { Verdict::None }
                         } else {
                             Verdict::Joined { started_ms, strong_lost_ms: Some(lost) }
                         }
@@ -451,13 +486,14 @@ impl Judge {
                     event = Some(if strong >= 1 { "開始（強い印）".to_string() } else { "開始（中・弱い印が 2 つ）".to_string() });
                     Verdict::Joined { started_ms: now_ms, strong_lost_ms: (strong == 0).then_some(now_ms) }
                 }
-                _ if strong + others > 0 => Verdict::Waiting,
+                _ if raw_strong + others + veto > 0 => Verdict::Waiting,
                 _ => Verdict::None,
             };
             state.verdict = Some(verdict);
             let (status, detail) = match verdict {
                 Verdict::None => ("なし".to_string(), String::new()),
                 Verdict::Waiting if state.blocked => ("待機".to_string(), "（終了のあと、開始の条件がいったん崩れるまで始めない）".to_string()),
+                Verdict::Waiting if veto > 0 => ("待機".to_string(), "（打ち消しの印がある）".to_string()),
                 Verdict::Waiting => ("待機".to_string(), String::new()),
                 Verdict::Joined { strong_lost_ms: None, .. } => ("参加中".to_string(), String::new()),
                 Verdict::Joined { strong_lost_ms: Some(lost), .. } => {
@@ -558,6 +594,7 @@ mod tests {
         let rules = parse(DEFAULT_RULES).unwrap();
         let names: Vec<&str> = rules.services.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["Google Meet", "Slack ハドル", "Discord の通話", "Teams", "Zoom"]);
+        assert!(DEFAULT_RULES.contains(VERSION_MARK));
         assert!(parse("[[service]]\nname = \"x\"\nend_after_seconds = 5\n[[service.signal]]\nname = \"a\"\nstrength = \"strong\"\nkind = \"session\"\napps = []\n")
             .unwrap_err()
             .contains("flow"));
@@ -576,7 +613,7 @@ mod tests {
         let meet_line = meet(&first);
         assert_eq!(meet_line.event.as_deref(), Some("開始（強い印）"));
         assert!(meet_line.text.contains("Google Meet: 参加中 立った: 退出ボタン（強）・Meet の窓の名前（中）"), "{}", meet_line.text);
-        assert!(meet_line.text.contains("立たない: ブラウザのマイク（弱）・ブラウザの再生の音（弱）"));
+        assert!(meet_line.text.contains("立たない: 待機画面の参加ボタン（打ち消し）・ブラウザのマイク（弱）・ブラウザの再生の音（弱）"), "{}", meet_line.text);
         let slack = first.iter().find(|o| o.service == "Slack ハドル").unwrap();
         assert!(slack.text.contains("Slack ハドル: なし"), "{}", slack.text);
 
@@ -616,6 +653,30 @@ mod tests {
         let one = Facts { windows: &[], uia: None, capture: Some(&capture), render: Some(&silent) };
         assert!(slack(judge.apply(&rules, &one, 24_000)).text.contains("待機 立った: Slack のマイク（弱）"));
         assert_eq!(slack(judge.apply(&rules, &both, 26_000)).event.as_deref(), Some("開始（中・弱い印が 2 つ）"));
+    }
+
+    #[test]
+    fn the_waiting_room_is_not_a_meeting_even_with_the_title_and_the_microphone() {
+        let rules = parse(DEFAULT_RULES).unwrap();
+        let mut judge = Judge::default();
+        // Zen の題は区切りが全角ダッシュ。待機画面では、マイクのプレビューで録音のセッションも Active
+        let windows = [window(5, "zen.exe", "Meet – abc-defg-hij — Zen Browser")];
+        let capture = audio(Flow::Capture, vec![("zen.exe", SessionState::Active, 0.0)]);
+        let mut scan = leave_button(5, "zen.exe");
+        scan.windows[0].matched = vec![Control { name: "今すぐ参加".into(), kind: "Button" }];
+        let waiting = Facts { windows: &windows, uia: Some(&scan), capture: Some(&capture), render: None };
+        let first = meet(&judge.apply(&rules, &waiting, 0)).clone();
+        assert!(first.event.is_none(), "待機画面では始めない");
+        assert!(first.text.contains("Google Meet: 待機（打ち消しの印がある） 立った: 待機画面の参加ボタン（打ち消し）・Meet の窓の名前（中）・ブラウザのマイク（弱）"), "{}", first.text);
+        // 参加すると、参加ボタンが消えて退出ボタンが出る
+        let joined_scan = leave_button(5, "zen.exe");
+        let joined = Facts { windows: &windows, uia: Some(&joined_scan), capture: Some(&capture), render: None };
+        assert_eq!(meet(&judge.apply(&rules, &joined, 14_000)).event.as_deref(), Some("開始（強い印）"));
+        // 退出後も題とマイクが残っても、強い印が戻らなければ終わる
+        let left = Facts { windows: &windows, uia: None, capture: Some(&capture), render: None };
+        judge.apply(&rules, &left, 16_000);
+        assert!(meet(&judge.apply(&rules, &left, 36_000)).event.as_deref().unwrap().starts_with("終了"));
+        assert!(meet(&judge.apply(&rules, &left, 38_000)).event.is_none(), "題とマイクだけで始め直さない");
     }
 
     #[test]

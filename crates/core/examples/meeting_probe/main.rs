@@ -37,7 +37,7 @@ Kiroscribe 会議の検出の確認用の道具（meeting_probe）
 - 製品と同じ判定（判定に使う手がかり・録音のセッションの一覧・判定・段階）
 - 録音と再生のセッション（端点ごと・アプリごとの状態と音の大きさ。音の大きさはピークの数値だけ）
 - 会議アプリとブラウザ（Chrome・Edge・Zen・Firefox など）の窓（プロセス・クラス名・見えているか・大きさ・最小化か・名前の分類）
-- 窓の中の部品（退出・ミュート・カメラ・画面共有のボタンがあるか。既定は 5 秒ごと）
+- 窓の中の部品（退出・参加・ミュート・カメラ・画面共有のボタンがあるか。既定は 5 秒ごと）
 - カメラの使用（Windows の記録 ConsentStore の webcam）
 - 判定表（meeting-rules.toml）を当てはめた、サービスごとの判定（参加中・待機・なし）と、立った印・立たない印
 Enter で区切った 1 行（例: discord 入った）は、時刻つきの目印として記録します。Ctrl+C で終わります。
@@ -498,6 +498,13 @@ impl RulesFile {
         match std::fs::read_to_string(path).map_err(|err| err.to_string()).and_then(|text| rules::parse(&text)) {
             Ok(rules) => {
                 out.line(&format!("[{time}] 判定表を読み込みました: {shown}（サービス {} 件）", rules.services.len()));
+                let current = std::fs::read_to_string(path).map(|text| text.contains(rules::VERSION_MARK)).unwrap_or(true);
+                if !current {
+                    out.line(&format!(
+                        "[{time}] 判定表: 「{}」の行がありません。前の版の既定の表なら、ファイルを消して起動し直すと新しい既定の表になります",
+                        rules::VERSION_MARK
+                    ));
+                }
                 self.rules = rules;
             }
             Err(error) => out.line(&format!("[{time}] 判定表に誤りがあるので、前の表を使います: {error}")),
