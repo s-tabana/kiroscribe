@@ -13,9 +13,25 @@ use kiroscribe_core::meetings::{desktop_app, web_meeting};
 use kiroscribe_core::mic_sessions::SessionState;
 use kiroscribe_core::mic_store::MicStore;
 
-/// 窓と部品を調べる対象のブラウザ（実行ファイル名、小文字）。
-pub const BROWSERS: &[&str] =
-    &["chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "vivaldi.exe", "opera.exe", "arc.exe"];
+/// 窓と部品を調べる対象のブラウザ（実行ファイル名、小文字）。製品の一覧（`meetings::BROWSERS`）より広く、
+/// マイクを使っているかによらず窓を出す。
+pub const BROWSERS: &[&str] = &[
+    // Chromium 系
+    "chrome.exe",
+    "msedge.exe",
+    "brave.exe",
+    "vivaldi.exe",
+    "opera.exe",
+    "arc.exe",
+    "chromium.exe",
+    "thorium.exe",
+    // Firefox 系
+    "firefox.exe",
+    "zen.exe",
+    "floorp.exe",
+    "librewolf.exe",
+    "waterfox.exe",
+];
 
 /// 窓と部品を調べる対象か: デスクトップの会議アプリ（Slack・Teams・Zoom・Discord。製品と同じ判定）かブラウザ。
 pub fn is_target_exe(exe: &str) -> bool {
@@ -281,7 +297,8 @@ pub fn audio_lines(snapshot: &AudioSnapshot) -> Vec<Line> {
             Some(peak) => (format!("ピーク {peak:.3}（{}）", peak_level(peak)), peak_level(peak)),
             None => ("ピーク 読めない".to_string(), "読めない"),
         };
-        let text = format!("  {label}{package} {} {peak}", session.state.name());
+        let browser = if BROWSERS.contains(&session.exe.as_str()) { "（ブラウザ）" } else { "" };
+        let text = format!("  {label}{browser}{package} {} {peak}", session.state.name());
         lines.push(
             Line::new(format!("{flow}/セッション/{}/{}/{}/{ordinal}", session.endpoint, session.pid, session.exe), label, text)
                 .compared_by(format!("{} {level}", session.state.name())),
@@ -461,13 +478,15 @@ mod tests {
     #[test]
     fn sessions_of_one_process_are_numbered_and_endpoints_are_marked() {
         let lines = audio_lines(&capture(vec![
+            session(1, 30, "zen.exe", SessionState::Active, Some(0.0)),
             session(1, 10, "chrome.exe", SessionState::Active, Some(0.2)),
             session(1, 10, "chrome.exe", SessionState::Inactive, Some(0.0)),
         ]));
         let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         assert!(texts.iter().any(|t| t.contains("録音の端点 1（既定・既定の通信）")), "{texts:?}");
-        assert!(texts.iter().any(|t| t.contains("pid=10 active ピーク 0.200（大）")), "{texts:?}");
-        assert!(texts.iter().any(|t| t.contains("pid=10 #2 inactive")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("pid=10（ブラウザ） active ピーク 0.200（大）")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("zen.exe pid=30（ブラウザ） active")), "製品の一覧にないブラウザも印を付ける: {texts:?}");
+        assert!(texts.iter().any(|t| t.contains("pid=10 #2（ブラウザ） inactive")), "{texts:?}");
         let keys: std::collections::HashSet<&str> = lines.iter().map(|l| l.key.as_str()).collect();
         assert_eq!(keys.len(), lines.len(), "行の key は重ならない");
     }
@@ -563,7 +582,7 @@ mod tests {
 
     #[test]
     fn target_windows_are_meeting_apps_and_browsers() {
-        for exe in ["Slack.exe", "ms-teams.exe", "Teams.exe", "Zoom.exe", "DiscordPTB.exe", "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "vivaldi.exe"] {
+        for exe in ["Slack.exe", "ms-teams.exe", "Teams.exe", "Zoom.exe", "DiscordPTB.exe", "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "vivaldi.exe", "zen.exe", "floorp.exe", "librewolf.exe", "waterfox.exe", "chromium.exe", "thorium.exe", "Opera.exe", "arc.exe"] {
             assert!(is_target_exe(exe), "{exe}");
         }
         assert!(!is_target_exe("notepad.exe"));
