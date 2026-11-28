@@ -302,6 +302,9 @@ pub fn control_category(name: &str) -> Option<&'static str> {
     let has = |words: &[&str]| words.iter().any(|w| name.contains(w));
     if has(&["leave", "hang up", "hangup", "disconnect", "end call", "退出", "退室", "切断", "通話を終了", "会議を終了", "通話から退出"]) {
         Some("退出")
+    } else if has(&["join now", "ask to join", "join meeting", "今すぐ参加", "参加をリクエスト", "参加リクエスト", "会議に参加"]) {
+        // 参加の前の待機画面のボタン（参加中には出ない）
+        Some("参加")
     } else if has(&["share screen", "screen share", "share your screen", "present now", "stop sharing", "画面を共有", "画面共有", "共有を停止", "発表"]) {
         Some("画面共有")
     } else if has(&["mute", "microphone", "deafen", "ミュート", "マイク"]) {
@@ -319,7 +322,7 @@ pub fn looks_unmute(name: &str) -> bool {
     ["unmute", "turn on microphone", "ミュート解除", "ミュートを解除", "マイクをオン"].iter().any(|w| name.contains(w))
 }
 
-pub const CATEGORIES: &[&str] = &["退出", "ミュート", "カメラ", "画面共有"];
+pub const CATEGORIES: &[&str] = &["退出", "参加", "ミュート", "カメラ", "画面共有"];
 
 /// 表示する行 1 つ。`key` が同じ行どうしを前回と比べ、`compare` が変わったときだけ `text` を出す。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -768,6 +771,9 @@ mod tests {
         assert_eq!(control_category("Turn off camera"), Some("カメラ"));
         assert_eq!(control_category("Share screen"), Some("画面共有"));
         assert_eq!(control_category("Reload"), None);
+        assert_eq!(control_category("今すぐ参加"), Some("参加"));
+        assert_eq!(control_category("Ask to join"), Some("参加"));
+        assert_eq!(control_category("参加者"), None, "参加中の「参加者」のボタンは当てない");
         assert!(looks_unmute("Unmute") && looks_unmute("ミュート解除") && !looks_unmute("Mute"));
 
         let scan = UiaScan {
@@ -787,7 +793,7 @@ mod tests {
         let hidden = uia_lines(&scan, false);
         assert!(hidden[1].text.contains("退出=あり（Button）"), "{}", hidden[1].text);
         assert!(hidden[1].text.contains("ミュート=あり（CheckBox・解除の名前）"));
-        assert!(hidden[1].text.contains("カメラ=なし") && hidden[1].text.contains("画面共有=なし"));
+        assert!(hidden[1].text.contains("カメラ=なし") && hidden[1].text.contains("画面共有=なし") && hidden[1].text.contains("参加=なし"));
         assert!(!hidden[1].text.contains("Leave huddle"), "既定では部品の名前を出さない");
         assert!(uia_lines(&scan, true)[1].text.contains("「Leave huddle」"));
         // 調べた部品の数と時間が少し変わっただけでは出し直さない
