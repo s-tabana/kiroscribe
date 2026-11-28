@@ -120,8 +120,9 @@ pub fn suspend_search(path: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let marker = erase_marker(path);
-    std::fs::write(&marker, b"erase\n")?;
-    std::fs::File::open(&marker)?.sync_all()
+    let mut file = std::fs::File::create(&marker)?;
+    std::io::Write::write_all(&mut file, b"erase\n")?;
+    file.sync_all()
 }
 
 /// 消し終えた索引の消去待ちを解き、検索を再開する。記録のファイルを消せなければエラー（検索は止めたまま）。
@@ -600,6 +601,7 @@ mod tests {
         SUSPENDED.lock().unwrap().retain(|p| p != &path);
         assert!(is_search_suspended(&path));
         assert!(SearchIndex::open(&path).unwrap().search(&terms(&["経費"]), 8).unwrap().is_empty());
+        index.close().unwrap();
         remove_index_files(&path).unwrap();
         assert!(erase_marker(&path).exists(), "索引のファイルを消しても、記録は消さない");
 
