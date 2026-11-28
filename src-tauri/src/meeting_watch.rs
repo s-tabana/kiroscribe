@@ -74,7 +74,8 @@ fn enqueue(app: &AppHandle, job: Job) {
     let _ = sender.send(job);
 }
 
-/// 確定した会議の開始・終了を、順番待ちの列に入れる。
+/// 確定した会議の開始・終了を、順番待ちの列に入れる（テストで、検出のスレッドの代わりに使う）。
+#[cfg(test)]
 pub fn submit(app: &AppHandle, event: MeetingEvent) {
     enqueue(app, Job::Event(event, None));
 }
@@ -351,7 +352,8 @@ fn create_meeting_note(app: &AppHandle, meeting: MeetingApp) -> Result<Note, Str
     .map_err(|e| e.to_string())
 }
 
-/// 確定した会議の開始・終了を処理する。
+/// 確定した会議の開始・終了を処理する（テストで、順番待ちの列を通さずに使う）。
+#[cfg(test)]
 pub(crate) async fn handle(app: &AppHandle, event: MeetingEvent) {
     handle_event(app, event, None).await
 }
