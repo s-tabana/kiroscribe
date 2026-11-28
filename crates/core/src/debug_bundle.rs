@@ -121,7 +121,8 @@ pub fn build_bundle(input: &BundleInput<'_>) -> std::io::Result<(Vec<u8>, Vec<St
     };
     add(&mut zip, README.into(), readme(input.environment).as_bytes())?;
     add(&mut zip, ENVIRONMENT.into(), &serde_json::to_vec_pretty(input.environment)?)?;
-    add(&mut zip, MEETING_RECORD.into(), &serde_json::to_vec_pretty(input.meeting_record)?)?;
+    // 保存も提出も、ここを通る。記録のウィンドウのタイトルは、ここで伏せる
+    add(&mut zip, MEETING_RECORD.into(), &serde_json::to_vec_pretty(&input.meeting_record.redacted())?)?;
     for path in input.log_files {
         let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) else {
             continue;
@@ -210,7 +211,9 @@ fn windows_version() -> Option<String> {
         product
     };
     let display = if display.is_empty() { String::new() } else { format!(" {display}") };
-    Some(format!("{product}{display} (build {build}.{ubr})"))
+    // ビルド番号を読めないときは、「(build .0)」のような値を書かない
+    let build = build_number(&build, ubr).map(|build| format!(" (build {build})")).unwrap_or_default();
+    Some(format!("{product}{display}{build}"))
 }
 
 #[cfg(test)]
@@ -228,6 +231,7 @@ mod tests {
         assert_eq!(build_number("  ", 5), None);
     }
     use crate::meeting_record::MeetingRecorder;
+    use crate::meetings::{MicUser, Observation, WindowInfo};
 
     fn settings() -> Settings {
         Settings {
@@ -261,7 +265,16 @@ mod tests {
             verbose_until: None,
             settings: Some(SafeSettings::new(&settings(), Some(&keys))),
         };
-        let record = MeetingRecorder::default().export("0.4.1", None);
+        let mut recorder = MeetingRecorder::default();
+        let meeting = Observation {
+            mic_users: vec![MicUser { id: "chrome.exe".into(), in_use: true }],
+            windows: vec![WindowInfo {
+                exe: "chrome.exe".into(),
+                title: "https://meet.google.com/abc-defg-hij?authuser=SECRETQUERY - Google Chrome".into(),
+            }],
+        };
+        recorder.record(0, &meeting, None);
+        let record = recorder.export("0.4.1", None);
         let out = dir.path().join("debug.zip");
         let names = write_bundle(
             &out,
@@ -299,6 +312,9 @@ mod tests {
         assert!(!env_text.contains("山田") && !env_text.contains("Realtek"), "{env_text}");
         let record: MeetingRecord = serde_json::from_str(&read(MEETING_RECORD)).unwrap();
         assert_eq!(record.format, crate::meeting_record::FORMAT, "回帰テストの材料と同じ形");
+        // ウィンドウのタイトルは伏せて入れる（判定に使う部分は残す）
+        let title = &record.entries[0].observation.windows[0].title;
+        assert_eq!(title, "https://meet.google.com/abc-defg-hij?<query> - Google Chrome");
         assert_eq!(read("logs/kiroscribe-20261127.log"), "{\"event\":\"app.exit\"}\n");
         let readme = read(README);
         assert!(readme.contains("API キー") && readme.contains("確かめてください"), "{readme}");

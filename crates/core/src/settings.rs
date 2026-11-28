@@ -230,10 +230,16 @@ mod tests {
         let stored = db.get_value(SETTINGS_KEY).unwrap().unwrap();
         assert!(!stored.contains("logIntake"), "{stored}");
         assert_eq!(db.load_settings().unwrap(), saved);
-        assert_eq!(
-            crate::log_submit::intake().unwrap().url(),
-            "https://log-intake.seita-tabana.workers.dev/v1/logs/kiroscribe"
-        );
+        // 送り先は本体に埋め込んだもの。E2E テスト用のビルドでは差し替わるため、埋め込んだ値から作って確かめる
+        #[cfg(feature = "e2e")]
+        let intake = crate::log_submit::Intake::production(
+            crate::log_submit::LOG_INTAKE_URL,
+            crate::log_submit::LOG_INTAKE_TOKEN,
+        )
+        .unwrap();
+        #[cfg(not(feature = "e2e"))]
+        let intake = crate::log_submit::intake().unwrap();
+        assert_eq!(intake.url(), "https://log-intake.seita-tabana.workers.dev/v1/logs/kiroscribe");
     }
 
     #[test]
