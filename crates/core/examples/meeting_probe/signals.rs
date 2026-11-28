@@ -336,7 +336,7 @@ impl Line {
         Line { compare: text.clone(), key, label, text }
     }
 
-    fn compared_by(mut self, compare: String) -> Self {
+    pub fn compared_by(mut self, compare: String) -> Self {
         self.compare = compare;
         self
     }

@@ -10,6 +10,7 @@
 //! （フルパス・音声は出さない）。出力は、画面とファイル（既定は exe と同じ場所の probe-output.txt）の両方に書く。
 //! 引数と測り方の手順は `--help`（[`HELP`]）と docs/meeting-probe.md。
 
+mod rules;
 mod signals;
 #[cfg(windows)]
 mod win;
@@ -38,11 +39,14 @@ Kiroscribe 会議の検出の確認用の道具（meeting_probe）
 - 会議アプリとブラウザ（Chrome・Edge・Zen・Firefox など）の窓（プロセス・クラス名・見えているか・大きさ・最小化か・名前の分類）
 - 窓の中の部品（退出・ミュート・カメラ・画面共有のボタンがあるか。既定は 5 秒ごと）
 - カメラの使用（Windows の記録 ConsentStore の webcam）
+- 判定表（meeting-rules.toml）を当てはめた、サービスごとの判定（参加中・待機・なし）と、立った印・立たない印
 Enter で区切った 1 行（例: discord 入った）は、時刻つきの目印として記録します。Ctrl+C で終わります。
 
 引数:
   --titles              窓・部品・端点の実際の名前も出す（チャンネル名・参加者名が含まれうるので、人に渡す前に確かめる）
   --output <ファイル>   書き出す先（既定は exe と同じフォルダの probe-output.txt。追記する）
+  --rules <ファイル>    判定表（既定は exe と同じフォルダの meeting-rules.toml。なければ既定の表を書き出す。
+                        編集すると次の回から使う）
   --interval <秒>       調べる間隔（既定は 2 秒）
   --uia-interval <秒>   窓の中の部品を調べる間隔（既定は 5 秒）
   --once                1 回だけ調べて終わる
@@ -70,6 +74,7 @@ struct Options {
     require_sessions: bool,
     expect: Option<MeetingApp>,
     output: Option<PathBuf>,
+    rules: Option<PathBuf>,
     help: bool,
 }
 
@@ -101,6 +106,7 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
         require_sessions: false,
         expect: None,
         output: None,
+        rules: None,
         help: false,
     };
     let mut args = args.into_iter();
@@ -110,6 +116,7 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
             "--titles" => options.titles = true,
             "--require-sessions" => options.require_sessions = true,
             "--help" | "-h" => options.help = true,
+            "--rules" => options.rules = Some(args.next().ok_or("--rules には判定表のファイルを指定してください")?.into()),
             "--output" => options.output = Some(args.next().ok_or("--output には書き出す先を指定してください")?.into()),
             "--uia-interval" => options.uia_interval = seconds(args.next(), "--uia-interval")?,
             "--expect" => {
@@ -397,30 +404,104 @@ fn filetime_text(filetime: u64) -> String {
         .unwrap_or_default()
 }
 
-/// 会議中を示しうる手がかり（判定には使わない）の行。
-fn signal_lines(titles: bool, uia: Option<&signals::UiaScan>) -> Vec<signals::Line> {
+/// 1 回分の、会議中を示しうる手がかり（表示と判定表の両方に使う）。
+#[derive(Default)]
+struct Gathered {
+    capture: Option<signals::AudioSnapshot>,
+    render: Option<signals::AudioSnapshot>,
+    windows: Vec<signals::WindowSnapshot>,
+    uia: Option<signals::UiaScan>,
+    camera: Option<kiroscribe_core::mic_store::MicStore>,
+}
+
+fn gather(titles: bool, uia: Option<signals::UiaScan>) -> Gathered {
     #[cfg(windows)]
     {
-        let mut lines = signals::audio_lines(&win::read_audio(signals::Flow::Capture, titles));
-        lines.extend(signals::audio_lines(&win::read_audio(signals::Flow::Render, titles)));
-        lines.extend(signals::window_lines(&win::list_windows(), titles));
-        lines.extend(match uia {
-            Some(scan) => signals::uia_lines(scan, titles),
-            None => vec![signals::Line::new("部品/一覧".into(), "窓の中の部品".into(), "  窓の中の部品: 最初の走査の途中".into())],
-        });
-        lines.extend(signals::camera_lines(Some(&win::read_camera()), filetime_text));
-        lines
+        Gathered {
+            capture: Some(win::read_audio(signals::Flow::Capture, titles)),
+            render: Some(win::read_audio(signals::Flow::Render, titles)),
+            windows: win::list_windows(),
+            uia,
+            camera: Some(win::read_camera()),
+        }
     }
     #[cfg(not(windows))]
     {
-        let _ = (titles, uia);
+        let _ = titles;
+        Gathered { uia, ..Default::default() }
+    }
+}
+
+/// 会議中を示しうる手がかり（判定には使わない）の行。
+fn signal_lines(gathered: &Gathered, titles: bool) -> Vec<signals::Line> {
+    if cfg!(not(windows)) {
         let mut lines = vec![signals::Line::new(
             "手がかり".into(),
             "手がかり".into(),
             "  録音と再生のセッション・窓・窓の中の部品: 取れない（Windows 以外）".into(),
         )];
         lines.extend(signals::camera_lines(None, filetime_text));
-        lines
+        return lines;
+    }
+    let mut lines = Vec::new();
+    for snapshot in [&gathered.capture, &gathered.render].into_iter().flatten() {
+        lines.extend(signals::audio_lines(snapshot));
+    }
+    lines.extend(signals::window_lines(&gathered.windows, titles));
+    lines.extend(match &gathered.uia {
+        Some(scan) => signals::uia_lines(scan, titles),
+        None => vec![signals::Line::new("部品/一覧".into(), "窓の中の部品".into(), "  窓の中の部品: 最初の走査の途中".into())],
+    });
+    lines.extend(signals::camera_lines(gathered.camera.as_ref(), filetime_text));
+    lines
+}
+
+const RULES_FILE: &str = "meeting-rules.toml";
+
+/// 判定表のファイル。変わっていたら読み直す。
+struct RulesFile {
+    path: Option<PathBuf>,
+    modified: Option<std::time::SystemTime>,
+    rules: rules::Rules,
+}
+
+impl RulesFile {
+    /// ファイルを開く。既定の場所になければ、既定の表を書き出す（書けなければ、既定の表をそのまま使う）。
+    fn open(options: &Options, out: &mut Out) -> Self {
+        let rules = rules::parse(rules::DEFAULT_RULES).expect("既定の判定表");
+        let path = options.rules.clone().or_else(|| Some(std::env::current_exe().ok()?.parent()?.join(RULES_FILE)));
+        let shown = match &options.rules {
+            Some(path) => path.display().to_string(),
+            None => format!("exe と同じフォルダの {RULES_FILE}"),
+        };
+        if let Some(path) = &path {
+            if options.rules.is_none() && !path.exists() {
+                match std::fs::write(path, rules::DEFAULT_RULES) {
+                    Ok(()) => out.line(&format!("  判定表: 既定の表を {shown} に書き出しました（編集すると次の回から使います）")),
+                    Err(err) => out.line(&format!("  判定表: {shown} に書き出せないので、既定の表を使います（{err}）")),
+                }
+            }
+        }
+        let mut file = RulesFile { path, modified: None, rules };
+        file.refresh(out, &shown);
+        file
+    }
+
+    fn refresh(&mut self, out: &mut Out, shown: &str) {
+        let Some(path) = &self.path else { return };
+        let Ok(modified) = std::fs::metadata(path).and_then(|m| m.modified()) else { return };
+        if self.modified == Some(modified) {
+            return;
+        }
+        self.modified = Some(modified);
+        let time = chrono::Local::now().format("%H:%M:%S");
+        match std::fs::read_to_string(path).map_err(|err| err.to_string()).and_then(|text| rules::parse(&text)) {
+            Ok(rules) => {
+                out.line(&format!("[{time}] 判定表を読み込みました: {shown}（サービス {} 件）", rules.services.len()));
+                self.rules = rules;
+            }
+            Err(error) => out.line(&format!("[{time}] 判定表に誤りがあるので、前の表を使います: {error}")),
+        }
     }
 }
 
@@ -487,15 +568,45 @@ fn main() {
     let mut tracker = MeetingTracker::default();
     let mut last: Option<Vec<String>> = None;
     let mut differ = signals::Differ::default();
+    let mut verdicts = signals::Differ::default();
+    let mut judge = rules::Judge::default();
+    let rules_shown = match &options.rules {
+        Some(path) => path.display().to_string(),
+        None => format!("exe と同じフォルダの {RULES_FILE}"),
+    };
+    let mut rules_file = RulesFile::open(&options, &mut out);
     let mut quiet_since = Instant::now();
     loop {
         let now = now_ms();
         let (observation, sources) = observe_detailed();
         let event = tracker.observe(&observation, None, now);
         let lines = render(&observation, sources.as_ref(), &tracker, options.titles);
-        let changes = differ.changes(&signal_lines(options.titles, uia.latest().as_ref()));
+        let gathered = gather(options.titles, uia.latest());
+        let changes = differ.changes(&signal_lines(&gathered, options.titles));
+        rules_file.refresh(&mut out, &rules_shown);
+        let facts = rules::Facts {
+            windows: &gathered.windows,
+            uia: gathered.uia.as_ref(),
+            capture: gathered.capture.as_ref(),
+            render: gathered.render.as_ref(),
+        };
+        let outcomes = judge.apply(&rules_file.rules, &facts, now);
+        let verdict_lines: Vec<signals::Line> = outcomes
+            .iter()
+            .map(|o| {
+                signals::Line::new(format!("判定表/{}", o.service), format!("判定表 {}", o.service), o.text.clone())
+                    .compared_by(o.compare.clone())
+            })
+            .collect();
+        let verdict_changes = verdicts.changes(&verdict_lines);
         let time = chrono::Local::now().format("%H:%M:%S");
         let mut printed = false;
+        for outcome in &outcomes {
+            if let Some(event) = &outcome.event {
+                out.line(&format!("[{time}] ☆ 判定表: {} {event}", outcome.service));
+                printed = true;
+            }
+        }
         match event {
             Some(MeetingEvent::Started(app)) => {
                 out.line(&format!("[{time}] ★ 会議の開始を確定: {}（製品なら録音を始める）", app.label()));
@@ -508,7 +619,7 @@ fn main() {
             None => {}
         }
         let block_changed = last.as_ref() != Some(&lines);
-        if block_changed || !changes.is_empty() {
+        if block_changed || !changes.is_empty() || !verdict_changes.is_empty() {
             out.line(&format!("[{time}]"));
             printed = true;
         }
@@ -521,6 +632,12 @@ fn main() {
         if !changes.is_empty() {
             out.line("  -- 会議中を示しうる手がかり（判定には使わない。変化した行だけ）");
             for line in &changes {
+                out.line(line);
+            }
+        }
+        if !verdict_changes.is_empty() {
+            out.line("  -- 判定表の判定（製品の判定には使わない。変化したサービスだけ）");
+            for line in &verdict_changes {
                 out.line(line);
             }
         }
