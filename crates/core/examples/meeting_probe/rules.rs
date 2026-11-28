@@ -5,7 +5,8 @@
 //!
 //! 始める・続ける・止める（[`Judge`]）:
 //! - 開始: 強い印が 1 つ、または中・弱い印が合わせて 2 つ。ただし打ち消しの印（参加前の待機画面のボタンなど）があれば始めない
-//! - 継続: 強い印がある間（打ち消しの印がある間は、強い印がないものとして扱う）
+//! - 継続: 強い印がある間（打ち消しの印がある間は、強い印がないものとして扱う）。参加中に打ち消しの印が出たら、すぐに終える
+//! - 窓の中の部品をまだ一度も調べていない間は、部品の印を持つサービスを始めない
 //! - 終了: 強い印が消えて、表で指定した秒数のあいだ戻らない。終わったあとは、開始の条件がいったん崩れるまで始め直さない
 //!   （強い印がなく、中・弱い印だけが続いているときに、始めて止めてを繰り返さないため）
 
@@ -16,18 +17,19 @@ use serde::Deserialize;
 use crate::signals::{control_category, AudioSnapshot, UiaScan, WindowSnapshot, BROWSERS};
 
 /// 既定の判定表の版の印。読んだファイルにこれがなければ、古い版の既定の表から書き出したものかもしれないと知らせる。
-pub const VERSION_MARK: &str = "判定表の版: 2";
+pub const VERSION_MARK: &str = "判定表の版: 3";
 
 /// 既定の判定表。初めて動かしたときに、exe と同じ場所に書き出す。
 pub const DEFAULT_RULES: &str = r#"# Kiroscribe 会議の検出の確認用の道具（meeting_probe）の判定表。
-# 判定表の版: 2
+# 判定表の版: 3
 # 編集して保存すると、次の回（2 秒ごと）から使う。書き方を誤ると、その旨を出して前の表を使い続ける。
 # 新しい版の既定の表を使うには、このファイルを消して起動し直す。
 #
 # 判定:
 # - 開始: 強い印（strong）が 1 つ、または中（medium）・弱い（weak）印が合わせて 2 つ。
 #   ただし打ち消しの印（veto。参加前の待機画面の「今すぐ参加」など）があれば始めない
-# - 継続: 強い印がある間（打ち消しの印がある間は、強い印がないものとして扱う）
+# - 継続: 強い印がある間（打ち消しの印がある間は、強い印がないものとして扱う）。参加中に打ち消しの印が出たら、すぐに終える
+# - 窓の中の部品をまだ一度も調べていない間（起動の直後）は、control の印を持つサービスを始めない
 # - 終了: 強い印が消えて end_after_seconds 秒のあいだ戻らない
 # - 窓の名前と部品の名前は、全角・半角のダッシュ（— – -）を同じものとして比べる
 #
@@ -460,7 +462,9 @@ impl Judge {
             let others = count(&[Strength::Medium, Strength::Weak]);
             // 打ち消しの印がある間は、強い印がないものとして扱い、始めない
             let strong = if veto > 0 { 0 } else { raw_strong };
-            let start = veto == 0 && (strong >= 1 || others >= 2);
+            // 窓の中の部品をまだ一度も調べていない間は、部品の印（強い印・打ち消しの印）が分からないので始めない
+            let unscanned = facts.uia.is_none() && service.signals.iter().any(|s| s.kind == Kind::Control);
+            let start = !unscanned && veto == 0 && (strong >= 1 || others >= 2);
             let state = self.states.entry(service.name.clone()).or_default();
             if !start {
                 state.blocked = false;
@@ -468,6 +472,11 @@ impl Judge {
             let before = state.verdict.unwrap_or(Verdict::None);
             let mut event = None;
             let verdict = match before {
+                Verdict::Joined { .. } if veto > 0 => {
+                    // 参加中に打ち消しの印が出たら、参加前の画面だったとみなして、すぐに終える
+                    event = Some("終了（打ち消しの印が出た）".to_string());
+                    Verdict::Waiting
+                }
                 Verdict::Joined { started_ms, strong_lost_ms } => {
                     if strong >= 1 {
                         Verdict::Joined { started_ms, strong_lost_ms: None }
@@ -494,6 +503,7 @@ impl Judge {
                 Verdict::None => ("なし".to_string(), String::new()),
                 Verdict::Waiting if state.blocked => ("待機".to_string(), "（終了のあと、開始の条件がいったん崩れるまで始めない）".to_string()),
                 Verdict::Waiting if veto > 0 => ("待機".to_string(), "（打ち消しの印がある）".to_string()),
+                Verdict::Waiting if unscanned => ("待機".to_string(), "（窓の中の部品をまだ調べていない）".to_string()),
                 Verdict::Waiting => ("待機".to_string(), String::new()),
                 Verdict::Joined { strong_lost_ms: None, .. } => ("参加中".to_string(), String::new()),
                 Verdict::Joined { strong_lost_ms: Some(lost), .. } => {
@@ -638,7 +648,8 @@ mod tests {
         let mut judge = Judge::default();
         let capture = audio(Flow::Capture, vec![("slack.exe", SessionState::Active, 0.0)]);
         let render = audio(Flow::Render, vec![("slack.exe", SessionState::Active, 0.05)]);
-        let both = Facts { windows: &[], uia: None, capture: Some(&capture), render: Some(&render) };
+        let scanned = UiaScan::default();
+        let both = Facts { windows: &[], uia: Some(&scanned), capture: Some(&capture), render: Some(&render) };
         let slack = |outcomes: Vec<Outcome>| outcomes.into_iter().find(|o| o.service == "Slack ハドル").unwrap();
         let started = slack(judge.apply(&rules, &both, 0));
         assert_eq!(started.event.as_deref(), Some("開始（中・弱い印が 2 つ）"));
@@ -650,7 +661,7 @@ mod tests {
         assert!(blocked.event.is_none());
         // 再生の音が止まって条件が崩れたあと、また 2 つそろえば始める
         let silent = audio(Flow::Render, vec![("slack.exe", SessionState::Active, 0.0)]);
-        let one = Facts { windows: &[], uia: None, capture: Some(&capture), render: Some(&silent) };
+        let one = Facts { windows: &[], uia: Some(&scanned), capture: Some(&capture), render: Some(&silent) };
         assert!(slack(judge.apply(&rules, &one, 24_000)).text.contains("待機 立った: Slack のマイク（弱）"));
         assert_eq!(slack(judge.apply(&rules, &both, 26_000)).event.as_deref(), Some("開始（中・弱い印が 2 つ）"));
     }
@@ -677,6 +688,29 @@ mod tests {
         judge.apply(&rules, &left, 16_000);
         assert!(meet(&judge.apply(&rules, &left, 36_000)).event.as_deref().unwrap().starts_with("終了"));
         assert!(meet(&judge.apply(&rules, &left, 38_000)).event.is_none(), "題とマイクだけで始め直さない");
+    }
+
+    #[test]
+    fn nothing_starts_before_the_first_scan_and_a_veto_ends_a_meeting_at_once() {
+        let rules = parse(DEFAULT_RULES).unwrap();
+        let mut judge = Judge::default();
+        let windows = [window(5, "chrome.exe", "Meet - abc-defg-hij - Google Chrome")];
+        let capture = audio(Flow::Capture, vec![("chrome.exe", SessionState::Active, 0.0)]);
+        let before_scan = Facts { windows: &windows, uia: None, capture: Some(&capture), render: None };
+        let first = meet(&judge.apply(&rules, &before_scan, 0)).clone();
+        assert!(first.event.is_none());
+        assert!(first.text.contains("待機（窓の中の部品をまだ調べていない）"), "{}", first.text);
+        // 部品を調べても退出・参加のボタンがなければ、題とマイクの 2 つで始める
+        let empty = UiaScan::default();
+        let scanned = Facts { windows: &windows, uia: Some(&empty), capture: Some(&capture), render: None };
+        assert_eq!(meet(&judge.apply(&rules, &scanned, 2_000)).event.as_deref(), Some("開始（中・弱い印が 2 つ）"));
+        // そのあとで参加ボタンが見つかれば、すぐに終える
+        let mut scan = leave_button(5, "chrome.exe");
+        scan.windows[0].matched = vec![Control { name: "Join now".into(), kind: "Button" }];
+        let veto = Facts { windows: &windows, uia: Some(&scan), capture: Some(&capture), render: None };
+        let ended = meet(&judge.apply(&rules, &veto, 4_000)).clone();
+        assert_eq!(ended.event.as_deref(), Some("終了（打ち消しの印が出た）"));
+        assert!(ended.text.contains("待機（打ち消しの印がある）"), "{}", ended.text);
     }
 
     #[test]
