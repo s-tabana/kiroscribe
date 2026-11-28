@@ -60,10 +60,22 @@
 ブラウザの音声入力（Google ドキュメントの音声入力など）か、録音のアプリを 1 つ、30 秒ほど使います。
 始めと終わりに `音声入力 始め`・`音声入力 終わり` のような目印を打ちます。
 
-## 出力の読み方
+## 対象のブラウザ
 
-対象のブラウザは、Chrome・Edge・Brave・Vivaldi・Opera・Arc・Chromium・Thorium（Chromium 系）と、Firefox・Zen・Floorp・LibreWolf・Waterfox（Firefox 系）です。
+対象のブラウザは、次の実行ファイルの名前のものです。
+同じ名前を使う版（Chrome と Edge の Beta・Dev・Canary、Firefox の Developer Edition・Nightly、Tor Browser の firefox.exe、Opera GX）も含みます。
+
+| 系統 | 実行ファイルの名前 |
+| --- | --- |
+| Chromium 系 | chrome・msedge・brave・vivaldi・opera・opera_gx・arc・thorium・chromium・supermium・browser（Yandex）・whale・comet・dia・atlas・sidekick・island・duckduckgo |
+| Firefox 系 | firefox・zen・floorp・librewolf・waterfox・mullvadbrowser |
+
+一覧にないブラウザは、実行ファイルの版情報（製品名・会社名）から推定します。
+録音・再生のセッションでは、子プロセスの起動の引数（Chromium の `--type=renderer` など、Firefox の `-contentproc`）からも推定します。
+推定したものには「★一覧にないブラウザと推定（根拠: …）」と付きます。
 製品が会議の判定に使うブラウザ（Chrome・Edge・Firefox・Brave・Vivaldi・Opera・Arc）より広く調べます。
+
+## 出力の読み方
 
 出力の前半は、製品と同じ判定（判定に使う手がかり・録音のセッションの一覧・判定・段階）です。
 後半の「会議中を示しうる手がかり」は判定には使わず、変化した行だけが出ます。
