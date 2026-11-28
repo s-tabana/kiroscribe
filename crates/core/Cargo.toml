@@ -40,9 +40,9 @@ wiremock = "0.6"
 tempfile = "3"
 
 # 資格情報マネージャーの中身を、keyring を通さずに Windows の API で直接確かめるテスト用。
-# LibraryLoader・WindowsAndMessaging は、E2E テストの道具（examples/hold_mic.rs）が、会議の窓とボタンを出すため
+# Graphics_Gdi・LibraryLoader・WindowsAndMessaging は、E2E テストの道具（examples/hold_mic.rs）が、会議の窓とボタンを出すため
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security_Credentials", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
 
 # 確認用の道具の、OS によらない部分の単体テストを cargo test で動かす
 [[example]]
