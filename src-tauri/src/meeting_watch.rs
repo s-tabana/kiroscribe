@@ -562,7 +562,7 @@ mod tests {
             scan: Some(ControlScan {
                 windows: vec![ScannedWindow {
                     hwnd: 77,
-                    controls: vec![ControlFact { kind: ControlType::Button, name: "通話から退出".into() }],
+                    controls: vec![ControlFact::new(ControlType::Button, "通話から退出")],
                     seen: 120,
                     error: None,
                     incomplete: None,
@@ -595,7 +595,8 @@ mod tests {
         assert_eq!((&meet["app"], &meet["state"], &meet["context"]), (&json!("googleMeet"), &json!("joined"), &json!("chrome.exe の窓")));
         assert_eq!(
             meet["signals"],
-            json!(["退出ボタン（強）", "Meet のタブの題（中）", "ブラウザのマイク（弱）", "ブラウザの再生の音（弱）"])
+            json!(["退出ボタン（強）", "Meet のタブの題（中）"]),
+            "Meet のページを表示している窓では、ブラウザのマイクと再生の音を数えない"
         );
         assert_eq!(normal["capture"]["status"], "ok");
         assert_eq!(normal["capture"]["total"], 2);
@@ -630,9 +631,9 @@ mod tests {
                 windows: vec![ScannedWindow {
                     hwnd: 5,
                     controls: vec![
-                        ControlFact { kind: ControlType::Button, name: "ハドルから退出する".into() },
+                        ControlFact::new(ControlType::Button, "ハドルから退出する"),
                         // Meet の退出後の画面の語（再参加）に当たる、Slack のメッセージの本文
-                        ControlFact { kind: ControlType::Text, name: "山田: 明日また再参加します".into() },
+                        ControlFact::new(ControlType::Text, "山田: 明日また再参加します"),
                     ],
                     seen: 40,
                     error: None,
@@ -651,9 +652,9 @@ mod tests {
 
         let mut left = meeting_facts(0.2);
         left.scan.as_mut().unwrap().windows[0].controls = vec![
-            ControlFact { kind: ControlType::Button, name: "再参加".into() },
+            ControlFact::new(ControlType::Button, "再参加"),
             // 会議のチャットの本文は、退出後の画面の見出しと同じ文でも書かない
-            ControlFact { kind: ControlType::Text, name: "ミーティングから退出しました".into() },
+            ControlFact::new(ControlType::Text, "ミーティングから退出しました"),
         ];
         let mut judge = Judge::new(Rules::builtin());
         let left_step = step(left, &mut judge, 0);
@@ -683,7 +684,10 @@ mod tests {
     // [LOG-005]
     #[test]
     fn confirming_time_is_logged() {
+        // Teams のデスクトップ版の会議の窓の題と、Teams のマイク（組み合わせ）
         let mut facts = meeting_facts(0.0);
+        facts.windows[0] = WindowFact { exe: "ms-teams.exe".into(), title: "会議 | Microsoft Teams".into(), site: None, ..facts.windows[0].clone() };
+        facts.capture.sessions.push(session(r"C:\Program Files\WindowsApps\MSTeams\ms-teams.exe", SessionState::Active, None));
         facts.scan.as_mut().unwrap().windows[0].controls.clear();
         let mut judge = Judge::new(Rules::builtin());
         let step = step(facts, &mut judge, 10_000);

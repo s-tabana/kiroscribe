@@ -3,8 +3,9 @@
 //! 読むのは、判定表（[`crate::meeting_rules`]）の対象のアプリ（会議アプリとブラウザ）のものだけ。
 //! - 窓: トップレベルの窓の題・クラス名・見えているか
 //! - 部品: UI Automation で、判定表が使う種類（Button・TabItem・Text）の部品の名前と種類。調べる窓は [`scan_targets`]
-//! - サイト: 調べるブラウザの窓の、ブラウザ自身のツールバーの中のアドレスバーと、最上位の本文の URL から、ブラウザが
-//!   表示を確定したページのホスト名（[`confirmed_site`]）。パスとクエリは読んだその場で捨てる
+//! - サイト: 調べるブラウザの窓の、ブラウザ自身のナビゲーション用ツールバーの中のアドレスバーと、最上位の本文の URL から、
+//!   ブラウザが表示を確定したページのホスト名（[`selected_page`]）。値は所属を確かめた部品のものだけを読み、パスとクエリは
+//!   読んだその場で捨てる。ブラウザの窓の部品は、表示中のページの本文の中のものと、タブの一覧の TabItem だけを読む
 //! - オーディオのセッション: [`crate::audio_sessions`]
 //!
 //! 画面の画像や音声そのものは読まない（SEC-013）。Windows 以外では、何も読まない。
@@ -83,7 +84,7 @@ fn is_host_and_port(head: &str) -> bool {
     }
 }
 
-/// ブラウザの種類（アドレスバーの見分け方が違う）。窓のクラス名で決める。
+/// ブラウザの種類（アドレスバーとページの本文の境界の見分け方が違う）。窓のクラス名で決める。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Engine {
     /// Chromium 系（Chrome・Edge・Brave など。Electron のアプリも同じクラス名）
@@ -91,6 +92,9 @@ pub enum Engine {
     /// Firefox 系（Firefox・Zen など）
     Firefox,
 }
+
+/// Firefox 系のナビゲーション用ツールバー（`<toolbar id="nav-bar">`）の AutomationId。
+const FIREFOX_NAVIGATION_TOOLBAR: &str = "nav-bar";
 
 impl Engine {
     /// 窓のクラス名からブラウザの種類を決める。知らないクラス名は `None`（アドレスバーを読まない）。
@@ -104,16 +108,50 @@ impl Engine {
 
     /// アドレスバーの部品か。Chromium 系はクラス名が OmniboxViewViews の Edit、Firefox 系は AutomationId が urlbar-input の
     /// Edit か ComboBox（Firefox 150 の入力欄は role="combobox" で、UI Automation には ComboBox として出る）。
-    /// ページの作成者もクラス名や識別子を付けられるので、ブラウザ自身のツールバーの中か（[`in_browser_toolbar`]）も確かめる。
+    /// ページの作成者もクラス名や識別子を付けられるので、ブラウザ自身のナビゲーション用ツールバーの中か
+    /// （[`Engine::in_navigation_toolbar`]）も確かめる。
     pub fn is_address_bar(self, part: &UiPart) -> bool {
         match self {
             Engine::Chromium => part.kind == PartKind::Edit && part.class_name == "OmniboxViewViews",
             Engine::Firefox => matches!(part.kind, PartKind::Edit | PartKind::ComboBox) && part.automation_id == "urlbar-input",
         }
     }
+
+    /// 部品の祖先（近い順。窓そのものは含めない）に、ページの本文との境界があるか（その部品はページの中）。
+    /// - Chromium 系: ページの最上位の本文（RootWebArea）は、ページの作成者が役割を変えても Document になる
+    /// - Firefox 系: 本文の役割はページの作成者が変えられる（role="application" の本文は Pane になる）。どのページも
+    ///   ブラウザの枠（`<browser>`。役割 INTERNAL_FRAME）の下にあり、その枠は Pane になるので、Pane も境界とみなす
+    pub fn in_page(self, ancestors: &[UiPart]) -> bool {
+        ancestors.iter().any(|part| match self {
+            Engine::Chromium => part.kind == PartKind::Document,
+            Engine::Firefox => matches!(part.kind, PartKind::Document | PartKind::Pane),
+        })
+    }
+
+    /// ブラウザ自身のナビゲーション用ツールバーか。Firefox 系は AutomationId が nav-bar の ToolBar。Chromium 系は ToolBar
+    /// （ページの部品は必ず本文の Document の下にあるので、ページの外の ToolBar はブラウザ自身のもの）。
+    fn is_navigation_toolbar(self, part: &UiPart) -> bool {
+        part.kind == PartKind::ToolBar
+            && match self {
+                Engine::Chromium => true,
+                Engine::Firefox => part.automation_id == FIREFOX_NAVIGATION_TOOLBAR,
+            }
+    }
+
+    /// アドレスバーの祖先から、ブラウザ自身のナビゲーション用ツールバーの中か: ページとの境界がなく、いちばん近い ToolBar が
+    /// ナビゲーション用ツールバーのとき。ツールバーを確かめられない窓では、アドレスバーとして読まない（会議を始めない）。
+    pub fn in_navigation_toolbar(self, ancestors: &[UiPart]) -> bool {
+        !self.in_page(ancestors)
+            && ancestors.iter().find(|part| part.kind == PartKind::ToolBar).is_some_and(|toolbar| self.is_navigation_toolbar(toolbar))
+    }
+
+    /// 部品の祖先から、ブラウザ自身のタブの一覧（Tab）の中の部品か（ページの中のタブは含めない）。
+    pub fn in_tab_strip(self, ancestors: &[UiPart]) -> bool {
+        !self.in_page(ancestors) && ancestors.iter().any(|part| part.kind == PartKind::Tab)
+    }
 }
 
-/// アドレスバーを見分けるのに使う部品の種類。
+/// アドレスバー・ページの本文・タブの一覧・メッセージの一覧を見分けるのに使う部品の種類。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartKind {
     Edit,
@@ -121,10 +159,16 @@ pub enum PartKind {
     /// ページの本文（ページの作成者が中身を決める）
     Document,
     ToolBar,
+    /// Firefox 系では、ページを入れるブラウザの枠と、role="application" の本文
+    Pane,
+    /// タブの一覧
+    Tab,
+    /// 一覧の項目（チャットのメッセージなど）
+    ListItem,
     Other,
 }
 
-/// アドレスバーを見分けるのに使う、部品の値。
+/// 部品の種類と、見分けに使う値。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UiPart {
     pub kind: PartKind,
@@ -132,39 +176,37 @@ pub struct UiPart {
     pub automation_id: String,
 }
 
-/// 部品の祖先の種類（近い順。窓そのものは含めない）から、その部品がブラウザ自身のツールバーの中か。
-/// ページの本文（Document）の中の部品は、ツールバーに似せて作れるので、ツールバーの中とみなさない。
-pub fn in_browser_toolbar(ancestors: &[PartKind]) -> bool {
-    !ancestors.contains(&PartKind::Document) && ancestors.contains(&PartKind::ToolBar)
-}
-
-/// 本文（Document）の祖先の種類から、その本文が窓の最上位の本文（埋め込まれた本文でない）か。
-pub fn is_top_document(ancestors: &[PartKind]) -> bool {
-    !ancestors.contains(&PartKind::Document)
-}
-
-/// ブラウザ自身のツールバーの中で見つけたアドレスバー 1 つ。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AddressBar {
-    /// 表示中の値
-    pub value: String,
-    /// キーボードの入力先か（編集中でありうる）
-    pub focused: bool,
-}
-
-/// 表示中のページのホスト名を、ブラウザが確定したものだけ返す。
-/// - アドレスバーが 1 つだけ見つかったときだけ（見つからない・2 つ以上あるときは `None`）
-/// - 最上位の本文の URL（ブラウザが表示を確定したページ）を読めたときは、アドレスバーのホスト名がそのどれかと同じときだけ
-///   （入力途中の値は、まだ確定していないので使わない）
-/// - 本文の URL を読めないときは、アドレスバーが入力先でないときだけ
-pub fn confirmed_site(bars: &[AddressBar], documents: &[String]) -> Option<String> {
-    let [bar] = bars else { return None };
-    let host = host_of(&bar.value)?;
-    let committed: Vec<String> = documents.iter().filter_map(|url| host_of(url)).collect();
-    if committed.is_empty() {
-        return (!bar.focused).then_some(host);
+impl UiPart {
+    /// 種類だけの部品（クラス名と識別子が空）。
+    pub fn of(kind: PartKind) -> Self {
+        UiPart { kind, class_name: String::new(), automation_id: String::new() }
     }
-    committed.contains(&host).then_some(host)
+}
+
+/// 本文（Document）の祖先から、その本文が窓の最上位の本文（埋め込まれた本文でない）か。
+pub fn is_top_document(ancestors: &[UiPart]) -> bool {
+    !ancestors.iter().any(|part| part.kind == PartKind::Document)
+}
+
+/// 部品の祖先（本文まで）から、一覧の項目（チャットのメッセージなど）の中の部品か。祖先をたどれないときは `None`。
+pub fn in_list_item(ancestors: Option<&[UiPart]>) -> bool {
+    ancestors.is_none_or(|ancestors| ancestors.iter().any(|part| part.kind == PartKind::ListItem))
+}
+
+/// 表示中のページ: ブラウザ自身のアドレスバーが 1 つだけで、そのホスト名と同じホスト名の最上位の本文（ブラウザが表示を
+/// 確定したページ）が 1 つだけのとき、そのホスト名と、その本文の位置。アドレスバーが入力先かどうかを問わず、本文の URL と
+/// 合わないアドレスバーの値（入力途中や、別の窓に移る前に編集した値）は使わない。本文の URL を読めないとき・合う本文が
+/// 2 つ以上あるとき（どれが表示中か分からない）は `None`。
+pub fn selected_page(bars: &[String], documents: &[Option<String>]) -> Option<(String, usize)> {
+    let [bar] = bars else { return None };
+    let host = host_of(bar)?;
+    let mut matching = documents
+        .iter()
+        .enumerate()
+        .filter(|(_, url)| url.as_deref().and_then(host_of).as_deref() == Some(host.as_str()))
+        .map(|(at, _)| at);
+    let at = matching.next()?;
+    matching.next().is_none().then_some((host, at))
 }
 
 /// 窓 1 つの中を調べた結果のうち、調べ切れなかった理由（組み合わせの開始に要る調べた回に数えない。MTG-007）。
@@ -172,16 +214,21 @@ pub fn confirmed_site(bars: &[AddressBar], documents: &[String]) -> Option<Strin
 /// - `requires_document`: ブラウザや Chromium の部品を使うアプリの窓（ページの本文の中に参加ボタンなどがある）
 /// - `documents`: 見つかった本文（Document）の数。0 なら、ブラウザの枠だけを読み、本文を読めていない
 /// - `prepare_error`: 本文を読めるようにする準備（Chromium への MSAA の問い合わせ）の失敗
+/// - `page_error`: ブラウザの窓で、表示中のページを確かめられなかった理由（[`selected_page`]・調べている間のページの変化）
 pub fn scan_shortfall(
     missed: usize,
     first_error: Option<&str>,
     requires_document: bool,
     documents: usize,
     prepare_error: Option<&str>,
+    page_error: Option<&str>,
 ) -> Option<String> {
     let mut reasons = Vec::new();
     if let Some(error) = prepare_error {
         reasons.push(format!("本文を読む準備ができない（{error}）"));
+    }
+    if let Some(error) = page_error {
+        reasons.push(error.to_string());
     }
     if requires_document && documents == 0 {
         reasons.push("本文を読めない".to_string());
@@ -219,6 +266,21 @@ impl ControlType {
 pub struct ControlFact {
     pub kind: ControlType,
     pub name: String,
+    /// 一覧の項目（チャットのメッセージなど）の中の部品か（[`in_list_item`]）。祖先をたどれなかったときも `true`。
+    /// 一覧の中を数えない印（[`Rules::cares_about_lists`]）に当たる部品だけ確かめ、ほかは `false`
+    pub in_list_item: bool,
+}
+
+impl ControlFact {
+    /// 一覧の項目の外の部品。
+    pub fn new(kind: ControlType, name: impl Into<String>) -> Self {
+        ControlFact { kind, name: name.into(), in_list_item: false }
+    }
+
+    /// 一覧の項目（チャットのメッセージなど）の中の部品。
+    pub fn in_message(kind: ControlType, name: impl Into<String>) -> Self {
+        ControlFact { in_list_item: true, ..ControlFact::new(kind, name) }
+    }
 }
 
 /// 窓 1 つの中を調べた結果。
@@ -337,17 +399,17 @@ mod win {
     use windows::core::BSTR;
     use windows::Win32::UI::Accessibility::{
         AccessibleObjectFromWindow, CUIAutomation, IAccessible, IUIAutomation, IUIAutomation2, IUIAutomationCacheRequest,
-        IUIAutomationCondition, IUIAutomationElement, IUIAutomationTreeWalker, TreeScope_Descendants,
+        IUIAutomationCondition, IUIAutomationElement, IUIAutomationElementArray, IUIAutomationTreeWalker, TreeScope_Descendants,
         UIA_AutomationIdPropertyId, UIA_ButtonControlTypeId, UIA_CheckBoxControlTypeId, UIA_ClassNamePropertyId,
         UIA_ComboBoxControlTypeId, UIA_ControlTypePropertyId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
-        UIA_HasKeyboardFocusPropertyId, UIA_MenuItemControlTypeId, UIA_NamePropertyId, UIA_NativeWindowHandlePropertyId,
-        UIA_TabItemControlTypeId, UIA_TextControlTypeId, UIA_ToolBarControlTypeId, UIA_ValueValuePropertyId,
-        UIA_CONTROLTYPE_ID,
+        UIA_ListItemControlTypeId, UIA_MenuItemControlTypeId, UIA_NamePropertyId, UIA_NativeWindowHandlePropertyId,
+        UIA_PaneControlTypeId, UIA_TabControlTypeId, UIA_TabItemControlTypeId, UIA_TextControlTypeId, UIA_ToolBarControlTypeId,
+        UIA_ValueValuePropertyId, UIA_CONTROLTYPE_ID,
     };
 
     use super::{
-        confirmed_site, in_browser_toolbar, is_top_document, scan_shortfall, scan_targets, AddressBar, ControlFact, ControlScan,
-        ControlType, Engine, Facts, PartKind, ScannedWindow, UiPart, WindowFact,
+        in_list_item, is_top_document, scan_shortfall, scan_targets, selected_page, ControlFact, ControlScan, ControlType, Engine,
+        Facts, PartKind, ScannedWindow, UiPart, WindowFact,
     };
     use crate::audio_sessions::{self, hresult, Flow};
     use crate::meeting_rules::Rules;
@@ -365,8 +427,8 @@ mod win {
     /// ブラウザのアドレスバーの部品: Chromium 系はクラス名、Firefox 系は AutomationId で見分ける（[`Engine::is_address_bar`]）。
     const CHROMIUM_ADDRESS_BAR: &str = "OmniboxViewViews";
     const FIREFOX_ADDRESS_BAR: &str = "urlbar-input";
-    /// 部品から窓までの祖先をたどる段数の上限（超えたら、ツールバーの中か・最上位の本文かを確かめられないものとして扱う）。
-    const MAX_ANCESTORS: usize = 32;
+    /// 部品から窓（か本文）までの祖先をたどる段数の上限（超えたら、どこの部品かを確かめられないものとして扱う）。
+    const MAX_ANCESTORS: usize = 64;
 
     fn code(err: &windows::core::Error) -> String {
         hresult(err.code().0)
@@ -399,6 +461,12 @@ mod win {
         variant
     }
 
+    /// 部品の今の値（ValuePattern の値）。所属を確かめたアドレスバーと最上位の本文だけに使う（SEC-013）。
+    fn current_value(element: &IUIAutomationElement) -> Option<String> {
+        let value = unsafe { element.GetCurrentPropertyValue(UIA_ValueValuePropertyId) }.ok()?;
+        BSTR::try_from(&value).ok().map(|text| text.to_string())
+    }
+
     /// UI Automation で部品を調べる道具一式。
     struct Uia {
         automation: IUIAutomation,
@@ -406,11 +474,14 @@ mod win {
         condition: Option<(Vec<ControlType>, IUIAutomationCondition)>,
         /// 本文（Document）の部品の条件（窓の中を調べるときに、本文を読めたかを確かめる）
         document: IUIAutomationCondition,
-        /// アドレスバーと本文を読むための、取り置く値と、ブラウザの種類ごとの条件（アドレスバーか本文）
+        /// タブ（TabItem）の部品の条件（ブラウザのタブの一覧を読む）
+        tab_item: IUIAutomationCondition,
+        /// アドレスバーと本文を見分けるための、取り置く値（種類・クラス名・識別子。値は取り置かない）と、
+        /// ブラウザの種類ごとの条件（アドレスバーか本文）
         site_cache: IUIAutomationCacheRequest,
         chromium_site: IUIAutomationCondition,
         firefox_site: IUIAutomationCondition,
-        /// 祖先をたどる道具と、そのときに取り置く値（種類と窓の識別子）
+        /// 祖先をたどる道具と、そのときに取り置く値（種類・窓の識別子・クラス名・識別子）
         walker: IUIAutomationTreeWalker,
         parent_cache: IUIAutomationCacheRequest,
     }
@@ -421,8 +492,54 @@ mod win {
             id if id == UIA_ComboBoxControlTypeId => PartKind::ComboBox,
             id if id == UIA_DocumentControlTypeId => PartKind::Document,
             id if id == UIA_ToolBarControlTypeId => PartKind::ToolBar,
+            id if id == UIA_PaneControlTypeId => PartKind::Pane,
+            id if id == UIA_TabControlTypeId => PartKind::Tab,
+            id if id == UIA_ListItemControlTypeId => PartKind::ListItem,
             _ => PartKind::Other,
         }
+    }
+
+    /// 取り置いた値から、部品の種類と見分けに使う値を読む。
+    fn cached_part(element: &IUIAutomationElement) -> Result<UiPart, windows::core::Error> {
+        unsafe {
+            Ok(UiPart {
+                kind: part_kind(element.CachedControlType()?),
+                class_name: element.CachedClassName().map(|name| name.to_string()).unwrap_or_default(),
+                automation_id: element.CachedAutomationId().map(|id| id.to_string()).unwrap_or_default(),
+            })
+        }
+    }
+
+    /// 表示中のページ（[`selected_page`]）: ホスト名と、その最上位の本文。
+    struct Page {
+        site: String,
+        document: IUIAutomationElement,
+    }
+
+    /// 窓 1 つの中を調べた途中の数: 読めなかった部品の数と最初の理由、読めた本文の数。
+    #[derive(Default)]
+    struct Tally {
+        missed: usize,
+        first: Option<String>,
+        documents: usize,
+    }
+
+    impl Tally {
+        fn miss(&mut self, err: &windows::core::Error) {
+            self.missed += 1;
+            self.first.get_or_insert_with(|| code(err));
+        }
+    }
+
+    /// 部品を集める場所。
+    #[derive(Clone, Copy)]
+    enum Place {
+        /// デスクトップの会議アプリの窓の中すべて
+        Window,
+        /// ブラウザの表示中のページの本文の中（TabItem は、ページの中のものなので除く）
+        Page,
+        /// ブラウザ自身のタブの一覧の中の TabItem だけ（[`Engine::in_tab_strip`]）
+        TabStrip(Engine),
     }
 
     impl Uia {
@@ -442,14 +559,10 @@ mod win {
                     automation.CreatePropertyCondition(UIA_ControlTypePropertyId, &variant_i32(id.0)).map_err(|err| code(&err))
                 };
                 let document = type_is(UIA_DocumentControlTypeId)?;
+                let tab_item = type_is(UIA_TabItemControlTypeId)?;
+                // 一次の列挙では、見分けに要る値だけを取り置く（ページの中の入力欄や埋め込まれた本文の値は読まない。SEC-013）
                 let site_cache = automation.CreateCacheRequest().map_err(|err| code(&err))?;
-                for property in [
-                    UIA_ValueValuePropertyId,
-                    UIA_ControlTypePropertyId,
-                    UIA_ClassNamePropertyId,
-                    UIA_AutomationIdPropertyId,
-                    UIA_HasKeyboardFocusPropertyId,
-                ] {
+                for property in [UIA_ControlTypePropertyId, UIA_ClassNamePropertyId, UIA_AutomationIdPropertyId] {
                     site_cache.AddProperty(property).map_err(|err| code(&err))?;
                 }
                 let chromium = automation
@@ -466,13 +579,20 @@ mod win {
                 let firefox_site = automation.CreateOrCondition(&firefox, &document).map_err(|err| code(&err))?;
                 let walker = automation.ControlViewWalker().map_err(|err| code(&err))?;
                 let parent_cache = automation.CreateCacheRequest().map_err(|err| code(&err))?;
-                parent_cache.AddProperty(UIA_ControlTypePropertyId).map_err(|err| code(&err))?;
-                parent_cache.AddProperty(UIA_NativeWindowHandlePropertyId).map_err(|err| code(&err))?;
+                for property in [
+                    UIA_ControlTypePropertyId,
+                    UIA_NativeWindowHandlePropertyId,
+                    UIA_ClassNamePropertyId,
+                    UIA_AutomationIdPropertyId,
+                ] {
+                    parent_cache.AddProperty(property).map_err(|err| code(&err))?;
+                }
                 Ok(Uia {
                     automation,
                     cache,
                     condition: None,
                     document,
+                    tab_item,
                     site_cache,
                     chromium_site,
                     firefox_site,
@@ -482,67 +602,60 @@ mod win {
             }
         }
 
-        /// 部品から窓（`hwnd`）までの祖先の種類（近い順。窓そのものは含めない）。窓までたどれないときは `None`。
+        /// 部品から窓（`hwnd`）までの祖先（近い順。窓そのものは含めない）。窓までたどれないときは `None`。
         /// 本文（Document）の祖先が見つかったら、そこで止める（その部品は本文の中なので、それより上は要らない）。
-        fn ancestors(&self, element: &IUIAutomationElement, hwnd: u64) -> Option<Vec<PartKind>> {
-            let mut kinds = Vec::new();
+        fn ancestors(&self, element: &IUIAutomationElement, hwnd: u64) -> Option<Vec<UiPart>> {
+            let mut parts = Vec::new();
             let mut current = element.clone();
             for _ in 0..MAX_ANCESTORS {
                 let parent = unsafe { self.walker.GetParentElementBuildCache(&current, &self.parent_cache) }.ok()?;
                 let handle = unsafe { parent.CachedNativeWindowHandle() }.ok()?;
                 if handle.0 as usize as u64 == hwnd {
-                    return Some(kinds);
+                    return Some(parts);
                 }
-                let kind = part_kind(unsafe { parent.CachedControlType() }.ok()?);
-                kinds.push(kind);
-                if kind == PartKind::Document {
-                    return Some(kinds);
+                let part = cached_part(&parent).ok()?;
+                let document = part.kind == PartKind::Document;
+                parts.push(part);
+                if document {
+                    return Some(parts);
                 }
                 current = parent;
             }
             None
         }
 
-        /// ブラウザの窓で、ブラウザが表示を確定したページのホスト名（[`confirmed_site`]）。ブラウザ自身のツールバーの中の
-        /// アドレスバーがない（アプリとして開いた窓など）・読めないときは `None`。ページの本文の中の部品は、アドレスバーとして読まない。
-        /// 値（URL）は、ホスト名を取り出したらその場で捨てる。
-        fn site(&self, hwnd: u64, engine: Engine) -> Option<String> {
+        /// ブラウザの窓の、表示中のページ（[`selected_page`]）。ブラウザ自身のナビゲーション用ツールバーの中のアドレスバーと、
+        /// 最上位の本文を見分けてから、その値（URL）だけを読む。値は、ホスト名を取り出したらその場で捨てる。
+        /// アドレスバーのない窓（アプリとして開いた窓など）・ツールバーを確かめられない窓・表示中のページを決められない窓は、理由を返す。
+        fn page(&self, hwnd: u64, engine: Engine) -> Result<Page, String> {
             let condition = match engine {
                 Engine::Chromium => &self.chromium_site,
                 Engine::Firefox => &self.firefox_site,
             };
             let found = unsafe {
-                let element = self.automation.ElementFromHandle(HWND(hwnd as usize as *mut _)).ok()?;
-                element.FindAllBuildCache(TreeScope_Descendants, condition, &self.site_cache).ok()?
+                let element = self.automation.ElementFromHandle(HWND(hwnd as usize as *mut _)).map_err(|err| code(&err))?;
+                element.FindAllBuildCache(TreeScope_Descendants, condition, &self.site_cache).map_err(|err| code(&err))?
             };
-            let mut bars: Vec<AddressBar> = Vec::new();
-            let mut documents: Vec<String> = Vec::new();
-            for at in 0..unsafe { found.Length() }.ok()? {
-                let element = unsafe { found.GetElement(at) }.ok()?;
-                let part = unsafe {
-                    UiPart {
-                        kind: part_kind(element.CachedControlType().ok()?),
-                        class_name: element.CachedClassName().map(|name| name.to_string()).unwrap_or_default(),
-                        automation_id: element.CachedAutomationId().map(|id| id.to_string()).unwrap_or_default(),
-                    }
-                };
-                let value = || -> Option<String> {
-                    let value = unsafe { element.GetCachedPropertyValue(UIA_ValueValuePropertyId) }.ok()?;
-                    BSTR::try_from(&value).ok().map(|text| text.to_string())
-                };
+            let mut bars: Vec<IUIAutomationElement> = Vec::new();
+            let mut documents: Vec<IUIAutomationElement> = Vec::new();
+            for at in 0..unsafe { found.Length() }.map_err(|err| code(&err))? {
+                let element = unsafe { found.GetElement(at) }.map_err(|err| code(&err))?;
+                let part = cached_part(&element).map_err(|err| code(&err))?;
                 if part.kind == PartKind::Document {
                     // 埋め込まれた本文（iframe など）や、たどれない本文は数えない
                     if self.ancestors(&element, hwnd).is_some_and(|ancestors| is_top_document(&ancestors)) {
-                        documents.extend(value());
+                        documents.push(element);
                     }
-                } else if engine.is_address_bar(&part) {
-                    if self.ancestors(&element, hwnd).is_some_and(|ancestors| in_browser_toolbar(&ancestors)) {
-                        let focused = unsafe { element.CachedHasKeyboardFocus() }.map(|focus| focus.as_bool()).unwrap_or(true);
-                        bars.push(AddressBar { value: value().unwrap_or_default(), focused });
-                    }
+                } else if engine.is_address_bar(&part)
+                    && self.ancestors(&element, hwnd).is_some_and(|ancestors| engine.in_navigation_toolbar(&ancestors))
+                {
+                    bars.push(element);
                 }
             }
-            confirmed_site(&bars, &documents)
+            let values: Vec<String> = bars.iter().map(|bar| current_value(bar).unwrap_or_default()).collect();
+            let urls: Vec<Option<String>> = documents.iter().map(current_value).collect();
+            let (site, at) = selected_page(&values, &urls).ok_or_else(|| "表示中のページを確かめられない".to_string())?;
+            Ok(Page { site, document: documents.swap_remove(at) })
         }
 
         /// 読む部品の種類の条件（種類が変わったときだけ作り直す）。
@@ -571,8 +684,82 @@ mod win {
             Ok(condition)
         }
 
-        /// 窓 1 つの中を調べる。`requires_document` の窓（ブラウザ・Chromium の部品を使うアプリ）は、本文を 1 つも読めなければ、
-        /// 調べ切れなかった回にする。`prepare_error` は、本文を読めるようにする準備の失敗。
+        /// 見つかった部品のうち、判定表の部品の印に当たりうるもの（[`Rules::keeps_control`]）を `result` に足す。
+        fn gather(
+            &self,
+            found: &IUIAutomationElementArray,
+            hwnd: u64,
+            rules: &Rules,
+            place: Place,
+            result: &mut ScannedWindow,
+            tally: &mut Tally,
+        ) {
+            let count = match unsafe { found.Length() } {
+                Ok(count) => count,
+                Err(err) => {
+                    tally.miss(&err);
+                    return;
+                }
+            };
+            for at in 0..count {
+                let element = match unsafe { found.GetElement(at) } {
+                    Ok(element) => element,
+                    Err(err) => {
+                        tally.miss(&err);
+                        continue;
+                    }
+                };
+                result.seen += 1;
+                let kind = match unsafe { element.CachedControlType() } {
+                    Ok(id) if id == UIA_DocumentControlTypeId => {
+                        tally.documents += 1;
+                        continue;
+                    }
+                    Ok(id) => control_type(id),
+                    Err(err) => {
+                        tally.miss(&err);
+                        continue;
+                    }
+                };
+                let Some(kind) = kind else { continue };
+                let wanted = match place {
+                    Place::Window => true,
+                    Place::Page => kind != ControlType::TabItem,
+                    Place::TabStrip(_) => kind == ControlType::TabItem,
+                };
+                if !wanted {
+                    continue;
+                }
+                let name = match unsafe { element.CachedName() } {
+                    Ok(name) => name.to_string(),
+                    Err(err) => {
+                        tally.miss(&err);
+                        continue;
+                    }
+                };
+                if !rules.keeps_control(kind, &name) {
+                    continue;
+                }
+                let mut fact = ControlFact::new(kind, name);
+                match place {
+                    Place::TabStrip(engine) => {
+                        // ページの中や、ブックマークバー・サイドパネルの部品は、タブの一覧のタブとして数えない
+                        if !self.ancestors(&element, hwnd).is_some_and(|ancestors| engine.in_tab_strip(&ancestors)) {
+                            continue;
+                        }
+                    }
+                    Place::Window | Place::Page => {
+                        if rules.cares_about_lists(kind, &fact.name) {
+                            fact.in_list_item = in_list_item(self.ancestors(&element, hwnd).as_deref());
+                        }
+                    }
+                }
+                result.controls.push(fact);
+            }
+        }
+
+        /// デスクトップの会議アプリの窓 1 つの中を調べる。`requires_document` の窓（Chromium の部品を使うアプリ）は、本文を
+        /// 1 つも読めなければ、調べ切れなかった回にする。`prepare_error` は、本文を読めるようにする準備の失敗。
         fn scan_window(
             &self,
             hwnd: u64,
@@ -594,55 +781,66 @@ mod win {
                     return result;
                 }
             };
-            let count = match unsafe { found.Length() } {
-                Ok(count) => count,
-                Err(err) => {
-                    result.error = Some(code(&err));
-                    return result;
-                }
-            };
-            // 読めなかった部品の数と、最初の理由（読めた部品の印は立てるが、調べ切れなかった回として扱う）
-            let mut missed = 0usize;
-            let mut first: Option<String> = None;
-            let mut documents = 0usize;
-            let mut miss = |err: windows::core::Error| {
-                missed += 1;
-                first.get_or_insert_with(|| code(&err));
-            };
-            for at in 0..count {
-                let element = match unsafe { found.GetElement(at) } {
-                    Ok(element) => element,
-                    Err(err) => {
-                        miss(err);
-                        continue;
-                    }
+            let mut tally = Tally::default();
+            self.gather(&found, hwnd, rules, Place::Window, &mut result, &mut tally);
+            result.incomplete =
+                scan_shortfall(tally.missed, tally.first.as_deref(), requires_document, tally.documents, prepare_error, None);
+            result
+        }
+
+        /// ブラウザの窓 1 つの中を調べ、表示中のページのホスト名も返す。部品は、ブラウザ自身のタブの一覧の TabItem と、
+        /// 表示中のページの本文の中のものだけを読む（ブックマークバー・サイドパネル・別の本文の部品は読まない）。
+        /// 調べている間に表示中のページが変わったときは、ページの部品とホスト名を捨て、調べ切れなかった回にする。
+        fn scan_browser(
+            &self,
+            hwnd: u64,
+            engine: Engine,
+            condition: &IUIAutomationCondition,
+            rules: &Rules,
+            prepare_error: Option<&str>,
+        ) -> (ScannedWindow, Option<String>) {
+            let mut result = ScannedWindow { hwnd, ..Default::default() };
+            let mut tally = Tally::default();
+            if rules.control_types().contains(&ControlType::TabItem) {
+                let found = unsafe {
+                    self.automation
+                        .ElementFromHandle(HWND(hwnd as usize as *mut _))
+                        .and_then(|element| element.FindAllBuildCache(TreeScope_Descendants, &self.tab_item, &self.cache))
                 };
-                result.seen += 1;
-                let kind = match unsafe { element.CachedControlType() } {
-                    Ok(id) if id == UIA_DocumentControlTypeId => {
-                        documents += 1;
-                        continue;
-                    }
-                    Ok(id) => control_type(id),
+                match found {
+                    Ok(found) => self.gather(&found, hwnd, rules, Place::TabStrip(engine), &mut result, &mut tally),
                     Err(err) => {
-                        miss(err);
-                        continue;
+                        result.error = Some(code(&err));
+                        return (result, None);
                     }
-                };
-                let Some(kind) = kind else { continue };
-                let name = match unsafe { element.CachedName() } {
-                    Ok(name) => name.to_string(),
-                    Err(err) => {
-                        miss(err);
-                        continue;
-                    }
-                };
-                if rules.keeps_control(kind, &name) {
-                    result.controls.push(ControlFact { kind, name });
                 }
             }
-            result.incomplete = scan_shortfall(missed, first.as_deref(), requires_document, documents, prepare_error);
-            result
+            let mut site = None;
+            let page_error = match self.page(hwnd, engine) {
+                Ok(page) => {
+                    tally.documents += 1;
+                    match unsafe { page.document.FindAllBuildCache(TreeScope_Descendants, condition, &self.cache) } {
+                        Ok(found) => self.gather(&found, hwnd, rules, Place::Page, &mut result, &mut tally),
+                        Err(err) => tally.miss(&err),
+                    }
+                    // 調べている間にタブを切り替えた・ページを移ったときは、前のページのホスト名に、次のページの部品を結び付けない
+                    let same = self.page(hwnd, engine).is_ok_and(|after| {
+                        after.site == page.site
+                            && unsafe { self.automation.CompareElements(&after.document, &page.document) }.is_ok_and(|same| same.as_bool())
+                    });
+                    if same {
+                        site = Some(page.site);
+                        None
+                    } else {
+                        result.controls.retain(|control| control.kind == ControlType::TabItem);
+                        Some("調べている間に表示中のページが変わった".to_string())
+                    }
+                }
+                Err(reason) => Some(reason),
+            };
+            result.incomplete =
+                scan_shortfall(tally.missed, tally.first.as_deref(), true, tally.documents, prepare_error, page_error.as_deref());
+            (result, site)
         }
     }
 
@@ -652,7 +850,7 @@ mod win {
         /// UI Automation を最後に使えなかった時刻と理由（[`RETRY_INTERVAL`] たつまでは作り直さない）
         failed: Option<(Instant, String)>,
         nudged: HashMap<u64, Instant>,
-        /// ブラウザの窓ごとに、前にサイトを読んだときの題と、読んだサイト
+        /// ブラウザの窓ごとに、前にサイトを読もうとしたときの題と、読んだサイト（読めなかったときは `None`）
         sites: HashMap<u64, (String, Option<String>)>,
         own_pid: u32,
     }
@@ -681,13 +879,18 @@ mod win {
             let capture = without_own(audio_sessions::read(Flow::Capture, &|_| false));
             let render = without_own(audio_sessions::read(Flow::Render, &|exe| rules.wants_peak(exe, browsers)));
             let mut read_sites: Vec<u64> = Vec::new();
+            let mut targets: Vec<u64> = Vec::new();
             let scan = scan.then(|| {
-                let targets = scan_targets(rules, browsers, &windows, meeting_windows);
+                targets = scan_targets(rules, browsers, &windows, meeting_windows);
                 self.scan(rules, browsers, &mut windows, &targets, &mut read_sites)
             });
-            // この回にサイトを読まなかったブラウザの窓は、題が変わっていなければ、前に読んだサイトのまま
             for window in windows.iter_mut().filter(|window| browsers.contains(&window.exe) && !read_sites.contains(&window.hwnd)) {
-                if let Some((title, site)) = self.sites.get(&window.hwnd) {
+                if targets.contains(&window.hwnd) {
+                    // 調べようとして調べられなかった窓（UI Automation を使えない回）は、前に読んだサイトを使わない
+                    window.site = None;
+                    self.sites.insert(window.hwnd, (window.title.clone(), None));
+                } else if let Some((title, site)) = self.sites.get(&window.hwnd) {
+                    // 調べなかった窓は、題が変わっていなければ、前に読んだサイトのまま
                     if *title == window.title {
                         window.site = site.clone();
                     }
@@ -720,6 +923,8 @@ mod win {
             }
         }
 
+        /// 窓の中を調べる。調べようとしたブラウザの窓は `read_sites` に足し、そのサイトを、この回に読めたものだけにする
+        /// （応答のない窓・調べ切れなかった窓では、前に読んだサイトを使わない）。
         fn scan(
             &mut self,
             rules: &Rules,
@@ -741,33 +946,43 @@ mod win {
             let mut scanned = Vec::new();
             for hwnd in targets {
                 let Some(window) = windows.iter_mut().find(|window| window.hwnd == *hwnd) else { continue };
+                let browser = browsers.contains(&window.exe);
+                if browser {
+                    window.site = None;
+                    read_sites.push(*hwnd);
+                }
                 if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsHungAppWindow(*hwnd as usize as _) } != 0 {
                     scanned.push(ScannedWindow { hwnd: *hwnd, error: Some("応答のない窓".into()), ..Default::default() });
-                    continue;
-                }
-                // 本文を読めるようにする準備に失敗したときは、次の回にも問い合わせ直し、この回は調べ切れなかった回にする
-                let mut prepare_error = None;
-                if window.class == CHROMIUM_WINDOW {
-                    let due = self.nudged.get(hwnd).is_none_or(|at| at.elapsed() >= NUDGE_INTERVAL);
-                    if due {
-                        match unsafe { nudge_chromium(*hwnd) } {
-                            Ok(()) => {
-                                self.nudged.insert(*hwnd, Instant::now());
-                            }
-                            Err(error) => {
-                                self.nudged.remove(hwnd);
-                                prepare_error = Some(error);
+                } else {
+                    // 本文を読めるようにする準備に失敗したときは、次の回にも問い合わせ直し、この回は調べ切れなかった回にする
+                    let mut prepare_error = None;
+                    if window.class == CHROMIUM_WINDOW {
+                        let due = self.nudged.get(hwnd).is_none_or(|at| at.elapsed() >= NUDGE_INTERVAL);
+                        if due {
+                            match unsafe { nudge_chromium(*hwnd) } {
+                                Ok(()) => {
+                                    self.nudged.insert(*hwnd, Instant::now());
+                                }
+                                Err(error) => {
+                                    self.nudged.remove(hwnd);
+                                    prepare_error = Some(error);
+                                }
                             }
                         }
                     }
+                    let engine = Engine::of_window(&window.class);
+                    match (browser, engine) {
+                        (true, Some(engine)) => {
+                            let (result, site) = uia.scan_browser(*hwnd, engine, &condition, rules, prepare_error.as_deref());
+                            window.site = site;
+                            scanned.push(result);
+                        }
+                        _ => scanned.push(uia.scan_window(*hwnd, &condition, rules, engine.is_some(), prepare_error.as_deref())),
+                    }
                 }
-                let engine = Engine::of_window(&window.class);
-                if browsers.contains(&window.exe) {
-                    window.site = engine.and_then(|engine| uia.site(*hwnd, engine));
+                if browser {
                     self.sites.insert(*hwnd, (window.title.clone(), window.site.clone()));
-                    read_sites.push(*hwnd);
                 }
-                scanned.push(uia.scan_window(*hwnd, &condition, rules, engine.is_some(), prepare_error.as_deref()));
             }
             // なくなった窓の記録は捨てる
             self.nudged.retain(|hwnd, _| windows.iter().any(|window| window.hwnd == *hwnd));
@@ -991,38 +1206,76 @@ mod tests {
         assert!(!Engine::Firefox.is_address_bar(&part(PartKind::Edit, "OmniboxViewViews", "")));
         assert!(!Engine::Firefox.is_address_bar(&part(PartKind::Other, "", "urlbar-input")));
 
-        use PartKind::{Document, Other, ToolBar};
-        assert!(in_browser_toolbar(&[Other, ToolBar, Other]), "ブラウザのツールバーの中");
-        assert!(!in_browser_toolbar(&[Other, Other]), "ツールバーの外");
-        assert!(!in_browser_toolbar(&[ToolBar, Document, Other]), "ページの本文の中のツールバー");
-        assert!(!in_browser_toolbar(&[Other, Document, ToolBar]), "ページの本文の中");
-        assert!(is_top_document(&[Other, Other]));
-        assert!(!is_top_document(&[Other, Document, Other]), "埋め込まれた本文");
+        use PartKind::{Document, Other, Pane, Tab, ToolBar};
+        let kinds = |kinds: &[PartKind]| kinds.iter().copied().map(UiPart::of).collect::<Vec<_>>();
+        let nav_bar = UiPart { automation_id: "nav-bar".into(), ..UiPart::of(ToolBar) };
+        assert!(Engine::Chromium.in_navigation_toolbar(&kinds(&[Other, ToolBar, Other, Pane])), "Chromium のツールバーの中");
+        assert!(!Engine::Chromium.in_navigation_toolbar(&kinds(&[Other, Other])), "ツールバーの外");
+        assert!(!Engine::Chromium.in_navigation_toolbar(&kinds(&[ToolBar, Document])), "ページの本文の中のツールバー");
+        assert!(Engine::Firefox.in_navigation_toolbar(&[UiPart::of(Other), nav_bar.clone(), UiPart::of(Other)]), "Firefox の nav-bar");
+        assert!(!Engine::Firefox.in_navigation_toolbar(&kinds(&[Other, ToolBar, Other])), "識別子のないツールバー");
+        assert!(!Engine::Firefox.in_navigation_toolbar(&[UiPart::of(ToolBar), nav_bar.clone()]), "いちばん近いツールバーが nav-bar でない");
+        assert!(is_top_document(&kinds(&[Other, Other])));
+        assert!(!is_top_document(&kinds(&[Other, Document])), "埋め込まれた本文");
+        // タブの一覧の中のタブだけ
+        assert!(Engine::Chromium.in_tab_strip(&kinds(&[Tab, Other, Pane])));
+        assert!(!Engine::Chromium.in_tab_strip(&kinds(&[Other, Pane])), "ブックマークバー・サイドパネル");
+        assert!(!Engine::Chromium.in_tab_strip(&kinds(&[Tab, Document])), "ページの中のタブ");
+        assert!(!Engine::Firefox.in_tab_strip(&kinds(&[Tab, Pane])), "Firefox のページの中のタブ");
     }
 
-    fn bar(value: &str, focused: bool) -> AddressBar {
-        AddressBar { value: value.into(), focused }
+    /// Firefox 150 では、本文に role="application" を付けたページの本文は Document でなく Pane になる。そのページの中に、
+    /// ツールバー（AutomationId が nav-bar のものも）と urlbar-input の入力欄を置いても、ブラウザの枠（Pane）の下なので、
+    /// アドレスバーとしない。
+    // [MTG-031]
+    #[test]
+    fn a_firefox_page_without_a_document_is_still_a_page() {
+        use PartKind::{Other, Pane, ToolBar};
+        let nav_bar = UiPart { automation_id: "nav-bar".into(), ..UiPart::of(ToolBar) };
+        // ページの中の偽のツールバー: ツールバー → 本文（Pane） → ブラウザの枠（Pane） → ブラウザの窓
+        let fake = [UiPart::of(Other), nav_bar.clone(), UiPart::of(Other), UiPart::of(Pane), UiPart::of(Pane), UiPart::of(Other)];
+        assert!(Engine::Firefox.in_page(&fake));
+        assert!(!Engine::Firefox.in_navigation_toolbar(&fake));
+        // Chromium 系のページの本文は必ず Document なので、窓の Pane はページの境界でない
+        assert!(!Engine::Chromium.in_page(&[UiPart::of(Pane)]));
     }
 
-    /// 表示中のページのホスト名は、ブラウザが確定したものだけ。入力途中の会議の URL では、表示中のページを会議のサイトとしない。
-    /// アドレスバーがない窓（アプリとして開いた窓）・2 つ以上ある窓では読まない。
+    /// 一覧の項目（チャットのメッセージ）の中の部品か。祖先をたどれないときは、一覧の中かもしれないものとして扱う。
+    // [MTG-032]
+    #[test]
+    fn buttons_in_a_message_are_in_a_list_item() {
+        use PartKind::{Document, ListItem, Other};
+        assert!(in_list_item(Some(&[UiPart::of(Other), UiPart::of(ListItem), UiPart::of(Document)])));
+        assert!(!in_list_item(Some(&[UiPart::of(Other), UiPart::of(Document)])));
+        assert!(in_list_item(None), "たどれない");
+    }
+
+    /// 表示中のページのホスト名は、アドレスバーのホスト名と同じホスト名の最上位の本文（ブラウザが表示を確定したページ）が
+    /// 1 つだけあるときだけ。入力途中の値・入力先を離れた編集中の値・本文の URL を読めない窓では使わない。
+    /// アドレスバーがない窓（アプリとして開いた窓）・2 つ以上ある窓でも使わない。
     // [MTG-031]
     #[test]
     fn only_a_committed_site_is_used() {
-        let page = |url: &str| vec![url.to_string()];
-        // 本文の URL を読めるとき: アドレスバーのホストが、確定した本文のどれかと同じときだけ
-        assert_eq!(confirmed_site(&[bar("meet.google.com/abc", false)], &page("https://meet.google.com/abc")).as_deref(), Some("meet.google.com"));
-        assert_eq!(confirmed_site(&[bar("meet.google.com/abc", true)], &page("https://meet.google.com/abc")).as_deref(), Some("meet.google.com"), "入力先でも、確定した本文と同じ");
-        assert_eq!(confirmed_site(&[bar("meet.google.com/abc", true)], &page("https://news.example/")), None, "入力途中の会議の URL");
-        assert_eq!(confirmed_site(&[bar("meet.google.com/abc", false)], &page("https://news.example/")), None, "入力先を離れた入力途中の値");
-        // 本文の URL を読めないとき: アドレスバーが入力先でないときだけ
-        assert_eq!(confirmed_site(&[bar("meet.google.com/abc", false)], &[]).as_deref(), Some("meet.google.com"));
-        assert_eq!(confirmed_site(&[bar("meet.google.com/abc", true)], &[]), None, "編集中かもしれない");
-        assert_eq!(confirmed_site(&[bar("meet.google.com/abc", false)], &page("about:blank")).as_deref(), Some("meet.google.com"), "ホスト名のない本文は数えない");
-        // アドレスバーがない・2 つ以上ある
-        assert_eq!(confirmed_site(&[], &page("https://meet.google.com/abc")), None, "アプリとして開いた窓");
-        assert_eq!(confirmed_site(&[bar("meet.google.com", false), bar("meet.google.com", false)], &[]), None);
-        assert_eq!(confirmed_site(&[bar("meet google", false)], &[]), None, "検索語");
+        let bar = |value: &str| vec![value.to_string()];
+        let pages = |urls: &[&str]| urls.iter().map(|url| Some(url.to_string())).collect::<Vec<_>>();
+        assert_eq!(selected_page(&bar("meet.google.com/abc"), &pages(&["https://meet.google.com/abc"])), Some(("meet.google.com".into(), 0)));
+        assert_eq!(
+            selected_page(&bar("meet.google.com/abc"), &pages(&["https://news.example/", "https://meet.google.com/abc"])),
+            Some(("meet.google.com".into(), 1)),
+            "サイドパネルの本文があっても、アドレスバーと同じページを選ぶ"
+        );
+        assert_eq!(selected_page(&bar("meet.google.com/abc"), &pages(&["https://news.example/"])), None, "入力途中・編集したまま離れた値");
+        assert_eq!(selected_page(&bar("meet.google.com/abc"), &[]), None, "本文を読めない");
+        assert_eq!(selected_page(&bar("meet.google.com/abc"), &[None]), None, "本文の URL を読めない");
+        assert_eq!(selected_page(&bar("meet.google.com/abc"), &pages(&["about:blank"])), None, "ホスト名のない本文");
+        assert_eq!(
+            selected_page(&bar("meet.google.com/abc"), &pages(&["https://meet.google.com/a", "https://meet.google.com/b"])),
+            None,
+            "どちらが表示中か分からない"
+        );
+        assert_eq!(selected_page(&[], &pages(&["https://meet.google.com/abc"])), None, "アプリとして開いた窓");
+        assert_eq!(selected_page(&[bar("meet.google.com")[0].clone(), "meet.google.com".into()], &pages(&["https://meet.google.com/"])), None);
+        assert_eq!(selected_page(&bar("meet google"), &pages(&["https://meet.google.com/"])), None, "検索語");
     }
 
     /// 窓 1 つの中を調べ切れなかった回: 部品を読めない、ブラウザや Chromium の部品を使うアプリの窓で本文を 1 つも読めない
@@ -1030,14 +1283,18 @@ mod tests {
     // [MTG-007]
     #[test]
     fn a_scan_needs_the_page_body() {
-        assert_eq!(scan_shortfall(0, None, true, 1, None), None, "印に当たる部品が 0 件でも、本文を読めた");
-        assert_eq!(scan_shortfall(0, None, false, 0, None), None, "本文のないデスクトップのアプリ（Zoom）");
-        assert_eq!(scan_shortfall(0, None, true, 0, None).as_deref(), Some("本文を読めない"), "ブラウザの枠だけ");
+        assert_eq!(scan_shortfall(0, None, true, 1, None, None), None, "印に当たる部品が 0 件でも、本文を読めた");
+        assert_eq!(scan_shortfall(0, None, false, 0, None, None), None, "本文のないデスクトップのアプリ（Zoom）");
+        assert_eq!(scan_shortfall(0, None, true, 0, None, None).as_deref(), Some("本文を読めない"), "ブラウザの枠だけ");
         assert_eq!(
-            scan_shortfall(0, None, true, 2, Some("Web の部分の子の窓がない")).as_deref(),
+            scan_shortfall(0, None, true, 2, Some("Web の部分の子の窓がない"), None).as_deref(),
             Some("本文を読む準備ができない（Web の部分の子の窓がない）")
         );
-        assert_eq!(scan_shortfall(3, Some("0x80040201"), false, 0, None).as_deref(), Some("3 個の部品を読めない（0x80040201）"));
+        assert_eq!(scan_shortfall(3, Some("0x80040201"), false, 0, None, None).as_deref(), Some("3 個の部品を読めない（0x80040201）"));
+        assert_eq!(
+            scan_shortfall(0, None, true, 1, None, Some("調べている間に表示中のページが変わった")).as_deref(),
+            Some("調べている間に表示中のページが変わった")
+        );
     }
 
     /// 窓の中を調べるのは、会議アプリの見えている窓と、題がサービスに当たるブラウザの窓と、続いている会議の窓だけ。

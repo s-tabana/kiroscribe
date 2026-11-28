@@ -41,7 +41,8 @@ Enter で区切った 1 行（例: discord 入った）は、時刻つきの目�
 引数:
   --titles              窓の題・ページのサイト・印に当たった部品の名前も出す（チャンネル名・参加者名が含まれうるので、
                         人に渡す前に確かめる）
-  --output <ファイル>   書き出す先（既定は exe と同じフォルダの probe-output.txt。追記する）
+  --output <ファイル>   書き出す先（既定は exe と同じフォルダの probe-output.txt。実行のたびに書き直し、
+                        前の実行の分は残さない）
   --interval <秒>       調べる間隔（既定は 2 秒。製品と同じ）
   --once                1 回だけ調べて終わる
   --require-sessions    --once で、録音のセッションの一覧を取れなければ終了コード 1
@@ -245,7 +246,8 @@ fn main() {
         return;
     }
     let path = options.output.clone().or_else(default_output);
-    let opened = path.as_ref().map(|path| std::fs::OpenOptions::new().create(true).append(true).open(path));
+    // 実行のたびに書き直す（前の版や前の実行が書いた内容を、人に渡すファイルに残さない）
+    let opened = path.as_ref().map(|path| std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(path));
     let file = match opened {
         Some(Ok(file)) => Some(file),
         Some(Err(err)) => {

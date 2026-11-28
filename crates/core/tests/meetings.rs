@@ -20,11 +20,11 @@ fn hidden(hwnd: u64, exe: &str, class: &str, title: &str) -> WindowFact {
 }
 
 fn button(name: &str) -> ControlFact {
-    ControlFact { kind: ControlType::Button, name: name.into() }
+    ControlFact::new(ControlType::Button, name)
 }
 
 fn control(kind: ControlType, name: &str) -> ControlFact {
-    ControlFact { kind, name: name.into() }
+    ControlFact::new(kind, name)
 }
 
 fn session(exe: &str, state: SessionState, peak: Option<f32>) -> AudioSession {
@@ -253,20 +253,22 @@ fn only_buttons_count_and_excluded_names_do_not() {
 }
 
 /// 強い印は 1 つで、その回に開始。組み合わせ（中・弱 2 つ）は、4 秒続き、その間に部品を 2 回以上調べてから開始。
-/// 待機画面を開いた直後（部品をまだ読めない約 2 秒）や、タブを閉じる途中に、組み合わせだけで始めない。
+/// 参加前の画面を開いた直後（部品をまだ読めない約 2 秒）や、窓を閉じる途中に、組み合わせだけで始めない。
 // [MTG-007]
 #[test]
 fn a_combination_waits_for_two_scans_and_a_strong_signal_starts_at_once() {
-    // 待機画面を開いた直後: 1 回目の走査では部品が読めず、2 回目で参加ボタン（打ち消し）が見える
-    let opening = meet_in_chrome(vec![]).mic("chrome.exe");
-    let waiting = meet_in_chrome(vec![button("今すぐ参加")]).mic("chrome.exe");
+    const TEAMS: MeetingApp = MeetingApp::Teams;
+    let teams = |controls: Vec<ControlFact>| Pc::new().window(window(90, "ms-teams.exe", CHROME, "会議 | Microsoft Teams"), controls).mic("ms-teams.exe");
+    // 参加前の画面を開いた直後: 1 回目の走査では部品が読めず、2 回目で参加ボタン（打ち消し）が見える
+    let opening = teams(vec![]);
+    let waiting = teams(vec![button("今すぐ参加")]);
     let mut run = Run::new();
     assert!(run.tick(&opening).is_empty());
-    assert_eq!(run.state(MEET), ServiceState::Confirming);
-    assert!(run.hold(&waiting, 30).is_empty(), "待機画面");
-    assert_eq!(run.state(MEET), ServiceState::Waiting);
+    assert_eq!(run.state(TEAMS), ServiceState::Confirming);
+    assert!(run.hold(&waiting, 30).is_empty(), "参加前の画面");
+    assert_eq!(run.state(TEAMS), ServiceState::Waiting);
     // 参加すると、退出ボタン（強）で、その回に始まる
-    assert_eq!(run.tick(&meet_in_chrome(vec![button("通話から退出")]).mic("chrome.exe")), started(MEET));
+    assert_eq!(run.tick(&teams(vec![button("退出")])), started(TEAMS));
 
     // 部品を調べない回は数えない。調べた回が 2 回になり、4 秒たってから始める
     let mut run = Run::new();
@@ -274,15 +276,15 @@ fn a_combination_waits_for_two_scans_and_a_strong_signal_starts_at_once() {
     assert!(run.tick(&opening).is_empty());
     assert!(run.tick(&unscanned).is_empty());
     assert!(run.tick(&unscanned).is_empty(), "4 秒たったが、調べたのは 1 回");
-    assert_eq!(run.tick(&opening), started(MEET));
+    assert_eq!(run.tick(&opening), started(TEAMS));
 
-    // タブを閉じる途中（題とマイクが残り、部品が読めない）は、閉じ終わると数え直す
+    // 窓を閉じる途中（題とマイクが残り、部品が読めない）は、閉じ終わると数え直す
     let mut run = Run::new();
     assert!(run.tick(&opening).is_empty());
     assert!(run.tick(&Pc::new()).is_empty());
     assert!(run.tick(&opening).is_empty());
     assert!(run.tick(&opening).is_empty());
-    assert_eq!(run.tick(&opening), started(MEET), "途切れてから 4 秒");
+    assert_eq!(run.tick(&opening), started(TEAMS), "途切れてから 4 秒");
 
     // マイクだけ（弱い印 1 つ）では始めない
     let mut run = Run::new();
@@ -552,8 +554,9 @@ fn discord_in_a_browser_needs_the_call_itself() {
 // [MTG-007]
 #[test]
 fn a_partly_read_window_does_not_count_as_a_scan() {
+    const TEAMS: MeetingApp = MeetingApp::Teams;
     let partly = |controls: Vec<ControlFact>| {
-        let mut facts = meet_in_chrome(controls).mic("chrome.exe").facts();
+        let mut facts = Pc::new().window(window(90, "ms-teams.exe", CHROME, "会議 | Microsoft Teams"), controls).mic("ms-teams.exe").facts();
         facts.scan.as_mut().unwrap().windows[0].incomplete = Some("3 個の部品を読めない（0x80040201）".into());
         facts
     };
@@ -561,11 +564,60 @@ fn a_partly_read_window_does_not_count_as_a_scan() {
     let mut judge = Judge::new(Rules::builtin());
     let events: Vec<MeetingEvent> = (0..15).flat_map(|i| judge.tick(&evaluation, i * POLL_MS)).map(|d| d.event).collect();
     assert!(events.is_empty(), "{events:?}");
-    assert_eq!(judge.phase(), Phase::Confirming(MEET), "調べ切れるまで確定を待つ");
+    assert_eq!(judge.phase(), Phase::Confirming(TEAMS), "調べ切れるまで確定を待つ");
 
-    let evaluation = evaluate(Rules::builtin(), &partly(vec![button("通話から退出")]), &Browsers::builtin());
+    let evaluation = evaluate(Rules::builtin(), &partly(vec![button("退出")]), &Browsers::builtin());
     let mut judge = Judge::new(Rules::builtin());
-    assert_eq!(judge.tick(&evaluation, 0).iter().map(|d| d.event).collect::<Vec<_>>(), started(MEET));
+    assert_eq!(judge.tick(&evaluation, 0).iter().map(|d| d.event).collect::<Vec<_>>(), started(TEAMS));
+}
+
+/// ブラウザで会議のサービスのページを表示している窓では、ブラウザのマイクと再生の音を数えない（どのタブのものか分からない）。
+/// Meet を退出し、退出後の画面のボタンを読めず見出しの文字と題だけが残るとき、別のタブのマイクや音楽があっても 20 秒で終える。
+/// 同じ様子（題とマイク）では、組み合わせで始めない。
+// [MTG-008][MTG-009]
+#[test]
+fn other_tabs_audio_does_not_keep_a_meet_page_without_its_controls() {
+    let mut run = Run::new();
+    assert_eq!(run.tick(&meet_in_chrome(vec![button("通話から退出")]).mic("chrome.exe")), started(MEET));
+    let heading_only = meet_in_chrome(vec![control(ControlType::Text, "ミーティングから退出しました")]).mic("chrome.exe").sound("chrome.exe", 0.4);
+    assert!(run.hold(&heading_only, 20).is_empty());
+    assert_eq!(run.tick(&heading_only), ended(MEET), "退出から 20 秒");
+    assert!(run.hold(&heading_only, 60).is_empty(), "題と別のタブの音では始め直さない");
+}
+
+/// 「開始のあとだけ」の印（背面を含むタブ）は、会議を確かめた窓でだけ数える。会議の窓を閉じたあと、別の窓に Meet に似た
+/// 名前の背面のタブがあり、同じブラウザでマイクと再生の音が続いても、その窓で会議を続けない。
+// [MTG-009]
+#[test]
+fn background_tabs_count_only_in_the_meeting_window() {
+    let mut run = Run::new();
+    let joined = meet_in_chrome(vec![button("通話から退出"), control(ControlType::TabItem, "Meet - abc-defg-hij")]).mic("chrome.exe");
+    assert_eq!(run.tick(&joined), started(MEET));
+    let other_window = Pc::new()
+        .window(
+            window(11, "chrome.exe", CHROME, "企画書 - Google ドキュメント - Google Chrome").at_site("docs.google.com"),
+            vec![control(ControlType::TabItem, "Google Meet の使い方 - ヘルプ")],
+        )
+        .mic("chrome.exe")
+        .sound("chrome.exe", 0.4);
+    assert!(run.hold(&other_window, 20).is_empty());
+    assert_eq!(run.tick(&other_window), ended(MEET), "会議の窓を閉じてから 20 秒");
+    assert!(run.hold(&other_window, 30).is_empty());
+}
+
+/// Discord のメッセージ（一覧の項目）の中のボタンは、名前が「Leave」「切断」でも、通話の切断ボタンとして数えない。
+/// デスクトップ版もブラウザ版も同じ。通話の操作の切断ボタンでは始める。
+// [MTG-032]
+#[test]
+fn buttons_in_discord_messages_are_not_the_disconnect_button() {
+    let message = |name: &str| ControlFact::in_message(ControlType::Button, name);
+    let mut run = Run::new();
+    let desktop = Pc::new().window(window(70, "discord.exe", CHROME, "#一般 | 開発 - Discord"), vec![message("Leave"), message("切断")]);
+    assert!(run.hold(&desktop, 20).is_empty(), "デスクトップ版のメッセージのボタン");
+    let mut run = Run::new();
+    assert!(run.hold(&discord_web("discord.com", vec![message("Disconnect")]), 20).is_empty(), "ブラウザ版のメッセージのボタン");
+    let mut run = Run::new();
+    assert_eq!(run.tick(&discord_web("discord.com", vec![message("Disconnect"), button("Disconnect")])), started(MeetingApp::Discord));
 }
 
 /// Meet の会議中に、チャットの本文（文字の部品）に「再参加」や、退出後の画面の見出しと同じ文が見えても、退出ボタンがあれば続く。

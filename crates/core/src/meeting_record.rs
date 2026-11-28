@@ -23,26 +23,39 @@ use crate::meeting_judge::JudgeConfig;
 use crate::meetings::{Decision, Judge, MeetingEvent, POLL_MS};
 
 /// 書き出すファイルの形式の名前。形か再生のしかたを変えたら、末尾の番号を上げる。
-pub const FORMAT: &str = "kiroscribe-meeting-record/4";
-/// 1 つ前の形式（記録 1 件の `at` から `until` までに調べた `count` 回を、その間に等しい間隔で並べて再生する）。
+pub const FORMAT: &str = "kiroscribe-meeting-record/5";
+/// 1 つ前の形式（形は [`FORMAT`] と同じ。判定表の版 3 の製品が書いた。「開始のあとだけ」の印を、参加中のサービスの
+/// どの文脈でも数える判定で再生する）。
+pub const FORMAT_V4: &str = "kiroscribe-meeting-record/4";
+/// 2 つ前の形式（記録 1 件の `at` から `until` までに調べた `count` 回を、その間に等しい間隔で並べて再生する）。
 pub const FORMAT_V3: &str = "kiroscribe-meeting-record/3";
-/// 2 つ前の形式（記録 1 件の `at` から `until` まで 2 秒ごとに調べ、次の記録までの間は、窓の中を調べずに同じ印が
+/// 3 つ前の形式（記録 1 件の `at` から `until` まで 2 秒ごとに調べ、次の記録までの間は、窓の中を調べずに同じ印が
 /// 続いていたものとして再生する。最後の記録のあとも、終了の猶予がたつまで進める）。初期のもの（`until` を書かない）は、
-/// 次の記録まで 2 秒ごとに、窓の中を調べた様子も含めて同じ様子が続いていたものとして再生する。
+/// 次の記録まで 2 秒ごとに、窓の中を調べた様子も含めて同じ様子が続いていたものとして再生する。初期のものを書いた製品は、
+/// 組み合わせで窓の印と部品の印を 1 つずつ数えた。
 pub const FORMAT_V2: &str = "kiroscribe-meeting-record/2";
 /// メモリーに残す件数（古いものから捨てる）。
 pub const CAPACITY: usize = 300;
+/// 記録 1 件に残す、同じ様子を調べた時刻の差の数の上限（2 秒ごとで約 1 時間。超えたら、同じ様子でも次の記録にする）。
+pub const MAX_GAPS: usize = 1_800;
 
-/// 判定表の版ごとの、開始・終了を決める時間と回数（記録の再生に使う）。いまの版は、組み込みの判定表から読む。
-const PAST_RULES: [(u32, JudgeConfig); 2] = [
-    (1, JudgeConfig { end_after_ms: 20_000, combination_ms: 4_000, combination_scans: 2 }),
-    (2, JudgeConfig { end_after_ms: 20_000, combination_ms: 4_000, combination_scans: 2 }),
-];
+/// 判定表の版 3 までの製品の判定のしかた（時間と回数は、どの版も同じ）。
+const PAST_JUDGE: JudgeConfig = JudgeConfig {
+    end_after_ms: 20_000,
+    combination_ms: 4_000,
+    combination_scans: 2,
+    titles_once: true,
+    after_start_in_meeting_context: false,
+};
+
+/// 判定表の版ごとの、開始・終了を決める時間と回数と判定のしかた（記録の再生に使う）。いまの版は、組み込みの判定表から読む。
+const PAST_RULES: [(u32, JudgeConfig); 3] = [(1, PAST_JUDGE), (2, PAST_JUDGE), (3, PAST_JUDGE)];
 
 /// 記録の形式ごとの、その形式で書き出した製品の判定表の版。
 fn rules_version_of(format: &str) -> Option<u32> {
     match format {
         FORMAT => Some(Rules::builtin().version),
+        FORMAT_V4 => Some(3),
         FORMAT_V3 => Some(2),
         FORMAT_V2 => Some(1),
         _ => None,
@@ -100,7 +113,8 @@ pub struct RecordedTitle {
 pub struct RecordEntry {
     /// 調べた時刻（UNIX ミリ秒）
     pub at: i64,
-    /// 同じ様子を続けて調べた 2 回目からの各回の、1 つ前に調べた時刻からの差（ミリ秒。`at` の 1 回だけなら空。形式 /4）
+    /// 同じ様子を続けて調べた 2 回目からの各回の、1 つ前に調べた時刻からの差（ミリ秒。`at` の 1 回だけなら空。形式 /4・/5。
+    /// [`MAX_GAPS`] 個まで）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<u32>,
     /// 同じ様子を続けて調べた最後の時刻（UNIX ミリ秒。形式 /2・/3 の記録だけ）
@@ -126,8 +140,12 @@ fn is_one(count: &u32) -> bool {
     *count == 1
 }
 
+fn is_zero(count: &u64) -> bool {
+    *count == 0
+}
+
 impl RecordEntry {
-    /// 形式 /4 の記録 1 件の、調べた時刻（`at` と、`gaps` を順に足した時刻）。
+    /// 形式 /4・/5 の記録 1 件の、調べた時刻（`at` と、`gaps` を順に足した時刻）。
     fn times(&self) -> Vec<i64> {
         let mut now = self.at;
         let mut times = vec![now];
@@ -148,6 +166,9 @@ pub struct MeetingRecord {
     /// 判定表の版（[`Rules::version`]）
     pub rules_version: u32,
     pub entries: Vec<RecordEntry>,
+    /// メモリーに残す件数を超えて捨てた、古い記録の数（捨てた範囲の判定の状態は残らない）
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dropped: u64,
     /// 回帰テストで、再生したときに起きるはずの出来事（[`event_name`] の形）。書き出したときは空
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expected: Vec<String>,
@@ -196,23 +217,32 @@ pub fn titles(evaluation: &Evaluation, facts: &Facts) -> Vec<RecordedTitle> {
 #[derive(Debug, Default)]
 pub struct MeetingRecorder {
     entries: VecDeque<RecordEntry>,
+    /// 最後に記録した時刻（最後の記録の、最後に調べた時刻）
+    last_at: Option<i64>,
+    /// 件数の上限を超えて捨てた記録の数
+    dropped: u64,
 }
 
 impl MeetingRecorder {
     /// 1 回分を記録する。前の記録と同じ様子で、出来事もなければ、新しくは残さず、前の記録の `gaps` に、前に調べた時刻からの差を足す。
-    /// `verbose`（詳しい記録）のときだけ、題も残す。
+    /// 差を表せないとき（時計が戻った・前に調べてから約 49.7 日より空いた）と、前の記録の `gaps` が [`MAX_GAPS`] 個に達したときは、
+    /// 実際の時刻で新しい記録にする。`verbose`（詳しい記録）のときだけ、題も残す。
     pub fn record(&mut self, at: i64, evaluation: &Evaluation, facts: &Facts, decisions: &[Decision], verbose: bool) {
         let titles = if verbose { titles(evaluation, facts) } else { Vec::new() };
+        let previous = self.last_at.replace(at);
         if decisions.is_empty() {
-            if let Some(last) = self.entries.back_mut().filter(|last| last.services == evaluation.services && last.titles == titles) {
-                let previous = last.times().last().copied().unwrap_or(last.at);
-                // 時計が戻ったときは、差を 0 とする（調べた順は変えない）
-                last.gaps.push(u32::try_from(at - previous).unwrap_or(0));
-                return;
+            let last = self.entries.back_mut().filter(|last| last.services == evaluation.services && last.titles == titles);
+            let gap = previous.and_then(|previous| u32::try_from(at - previous).ok());
+            if let (Some(last), Some(gap)) = (last, gap) {
+                if last.gaps.len() < MAX_GAPS {
+                    last.gaps.push(gap);
+                    return;
+                }
             }
         }
         if self.entries.len() == CAPACITY {
             self.entries.pop_front();
+            self.dropped += 1;
         }
         self.entries.push_back(RecordEntry {
             at,
@@ -243,6 +273,7 @@ impl MeetingRecorder {
             app_version: app_version.to_string(),
             rules_version: Rules::builtin().version,
             entries: self.entries.iter().cloned().collect(),
+            dropped: self.dropped,
             expected: Vec::new(),
             description: String::new(),
         }
@@ -261,23 +292,32 @@ pub struct ReplayWay {
 pub enum Outcome {
     /// 再生のしかたが 1 つに決まり、確定した出来事
     Events(Vec<String>),
-    /// 再生のしかたを記録から 1 つに決められず、しかたによって結果が違う（どれが製品の判定だったかは確定しない）
+    /// 再生のしかたを記録から 1 つに決められず、しかたによって結果が違うか、古い記録を捨てていて、残った記録の前の判定の
+    /// 状態が分からない（どれが製品の判定だったかは確定しない）
     Undetermined(Vec<ReplayWay>),
 }
 
 /// 記録を、その記録を書いた製品の判定（形式に合う判定表の版の時間と回数）で再生し、確定した出来事を順に返す。
 /// 判定を進めるのは、実際に調べた時刻だけ（調べていない時刻の様子で、開始・終了を決めない）。
-/// - [`FORMAT`]: 記録 1 件の `at` と `gaps` から求めた、実際に調べた時刻
+/// - [`FORMAT`]・[`FORMAT_V4`]: 記録 1 件の `at` と `gaps` から求めた、実際に調べた時刻
 /// - [`FORMAT_V3`]: 記録 1 件の `at` から `until` までの `count` 回を、その間に等しい間隔で並べた時刻
 /// - [`FORMAT_V2`]: その形式の再生のしかた（初期のものと後期のもので違う。[`FORMAT_V2`] の説明）
 ///
-/// 形式と判定表の版の組み合わせが合わない記録・知らない版の記録は、エラー。
+/// 古い記録を捨てた記録（`dropped` が 1 以上）は、残った最初の記録の前の判定の状態が分からないので、会議のない状態から
+/// 再生した結果を、確定しない結果として返す。形式と判定表の版の組み合わせが合わない記録・知らない版の記録は、エラー。
 pub fn replay(record: &MeetingRecord) -> Result<Outcome, String> {
     let judge = judge_for(record)?;
-    Ok(match record.format.as_str() {
+    let outcome = match record.format.as_str() {
         FORMAT_V2 => replay_v2(record, judge),
         FORMAT_V3 => Outcome::Events(replay_at(record, judge, observed_times_v3)),
         _ => Outcome::Events(replay_at(record, judge, RecordEntry::times)),
+    };
+    Ok(match outcome {
+        Outcome::Events(events) if record.dropped > 0 => Outcome::Undetermined(vec![ReplayWay {
+            name: format!("古い {} 件を捨てたあとの記録（残った最初の記録から、会議のない状態として再生した）", record.dropped),
+            events,
+        }]),
+        outcome => outcome,
     })
 }
 
@@ -349,8 +389,10 @@ fn replay_v2_late(record: &MeetingRecord, mut judge: Judge) -> Vec<String> {
 }
 
 /// 初期の [`FORMAT_V2`] の再生: 最初の記録の時刻から 2 秒ごとに、その時刻までの最後の記録の様子（窓の中を調べた様子も含む）で
-/// 進める。最後の記録のあとも、終了の猶予がたつまで同じ様子のまま進める。
+/// 進める。最後の記録のあとも、終了の猶予がたつまで同じ様子のまま進める。組み合わせは、その製品と同じく、窓の印と部品の印を
+/// 1 つずつ数える。
 fn replay_v2_early(record: &MeetingRecord, mut judge: Judge) -> Vec<String> {
+    judge.config.titles_once = false;
     let (Some(first), Some(last)) = (record.entries.first(), record.entries.last()) else {
         return Vec::new();
     };
@@ -392,7 +434,7 @@ pub struct Replayed {
 }
 
 /// 書き出した記録（JSON）を、まず形式を読み、その形式の判定と再生のしかたで再生する。
-/// - [`FORMAT`]・[`FORMAT_V3`]・[`FORMAT_V2`]: 判定表の当てはめの結果を、その形式の判定表の版の判定で再生する（[`replay`]）
+/// - [`FORMAT`]・[`FORMAT_V4`]・[`FORMAT_V3`]・[`FORMAT_V2`]: 判定表の当てはめの結果を、その形式の判定表の版の判定で再生する（[`replay`]）
 /// - [`crate::meeting_record_v1::FORMAT`]: マイクの使用と窓の題を、その記録を書いた版の判定で再生する
 pub fn replay_json(text: &str) -> Result<Replayed, String> {
     let value: serde_json::Value = serde_json::from_str(text).map_err(|err| format!("JSON として読めません: {err}"))?;
@@ -736,5 +778,107 @@ mod tests {
         let expected = vec!["started:googleMeet", "ended:googleMeet"];
         assert_eq!(events(&record), expected);
         assert_eq!(events(&redacted), expected);
+    }
+    fn signal(name: &str, strength: Strength, kind: Kind, after_start: bool) -> Held {
+        Held { name: name.into(), strength, kind, after_start }
+    }
+
+    /// 初期の形式 /2 を書いた製品は、組み合わせで窓の題とタブの名前を 1 つずつ数えた。開始のあとに題とタブの名前だけが残る
+    /// 記録は、初期の /2 では続き、後期の /2 では終わるので、結果を確定しない。
+    // [MTG-025]
+    #[test]
+    fn an_early_v2_record_counts_the_title_and_the_tab_separately() {
+        let title_and_tab = Evaluation {
+            services: vec![ServiceEvaluation {
+                app: MeetingApp::GoogleMeet,
+                contexts: vec![Context {
+                    app: "chrome.exe".into(),
+                    window: Some(42),
+                    scanned: true,
+                    signals: vec![
+                        signal("Meet のタブの題", Strength::Medium, Kind::Window, false),
+                        signal("背面を含む Meet のタブ", Strength::Weak, Kind::Control, true),
+                    ],
+                }],
+            }],
+        };
+        let record = MeetingRecord {
+            format: FORMAT_V2.into(),
+            rules_version: 1,
+            entries: vec![entry(0, &[], meet_tab()), entry(2_000, &[], title_and_tab)],
+            ..MeetingRecorder::default().export("0.4.4")
+        };
+        let Outcome::Undetermined(ways) = replay(&record).unwrap() else { panic!("結果を確定したように出さない") };
+        assert_eq!(
+            ways.iter().map(|way| way.events.clone()).collect::<Vec<_>>(),
+            vec![vec!["started:googleMeet".to_string()], vec!["started:googleMeet".to_string(), "ended:googleMeet".to_string()]]
+        );
+    }
+
+    /// 形式 /4 の記録は、その製品と同じく「開始のあとだけ」の印を参加中のサービスのどの文脈でも数えて再生する。
+    /// 形式 /5 は、会議を確かめた文脈でだけ数える。
+    // [MTG-009][MTG-025]
+    #[test]
+    fn the_v4_format_counts_background_tabs_in_every_window() {
+        let elsewhere = Evaluation {
+            services: vec![ServiceEvaluation {
+                app: MeetingApp::GoogleMeet,
+                contexts: vec![Context {
+                    app: "chrome.exe".into(),
+                    window: Some(43),
+                    scanned: true,
+                    signals: vec![
+                        signal("背面を含む Meet のタブ", Strength::Weak, Kind::Control, true),
+                        signal("ブラウザのマイク", Strength::Weak, Kind::Session, false),
+                    ],
+                }],
+            }],
+        };
+        let entries = vec![entry(0, &[], meet_tab()), entry(2_000, &[2_000; 12], elsewhere)];
+        let v5 = MeetingRecord { entries: entries.clone(), ..MeetingRecorder::default().export("0.4.4") };
+        assert_eq!(events(&v5), vec!["started:googleMeet", "ended:googleMeet"]);
+        let v4 = MeetingRecord { format: FORMAT_V4.into(), rules_version: 3, entries, ..v5 };
+        assert_eq!(events(&v4), vec!["started:googleMeet"]);
+    }
+
+    /// 件数の上限を超えて古い記録を捨てた記録は、残った記録の前の判定の状態が分からないので、結果を確定しない。
+    // [MTG-025]
+    #[test]
+    fn a_record_with_dropped_entries_is_not_determined() {
+        let mut recorder = MeetingRecorder::default();
+        for i in 0..(CAPACITY as i64 + 2) {
+            let flip = if i % 2 == 0 { meet_tab() } else { Evaluation::default() };
+            recorder.record(i * 2_000, &flip, &Facts::default(), &[], false);
+        }
+        let record = recorder.export("0.4.4");
+        assert_eq!((record.entries.len(), record.dropped), (CAPACITY, 2));
+        assert!(matches!(replay(&record).unwrap(), Outcome::Undetermined(ways) if ways.len() == 1));
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(replay_json(&json).unwrap().events.is_empty());
+        assert!(!serde_json::to_string(&MeetingRecorder::default().export("0.4.4")).unwrap().contains("dropped"));
+    }
+
+    /// 前に調べた時刻からの差を表せないとき（時計が戻った・約 49.7 日より空いた）は、実際の時刻で新しい記録にする。
+    /// 同じ様子が続いても、記録 1 件の差の数は [`MAX_GAPS`] 個までにする。
+    // [MTG-025]
+    #[test]
+    fn gaps_stay_representable_and_bounded() {
+        let mut recorder = MeetingRecorder::default();
+        let facts = Facts::default();
+        recorder.record(10_000, &meet_tab(), &facts, &[], false);
+        recorder.record(8_000, &meet_tab(), &facts, &[], false);
+        let far = 8_000 + i64::from(u32::MAX) + 1;
+        recorder.record(far, &meet_tab(), &facts, &[], false);
+        let record = recorder.export("0.4.4");
+        assert_eq!(record.entries.iter().map(|e| (e.at, e.gaps.len())).collect::<Vec<_>>(), vec![(10_000, 0), (8_000, 0), (far, 0)]);
+
+        let mut recorder = MeetingRecorder::default();
+        for i in 0..(MAX_GAPS as i64 + 3) {
+            recorder.record(i * 2_000, &Evaluation::default(), &facts, &[], false);
+        }
+        let record = recorder.export("0.4.4");
+        assert_eq!(record.entries.iter().map(|e| e.gaps.len()).collect::<Vec<_>>(), vec![MAX_GAPS, 1]);
+        assert_eq!(record.entries[1].at, (MAX_GAPS as i64 + 1) * 2_000);
+        assert_eq!(record.entries[1].times().last(), Some(&((MAX_GAPS as i64 + 2) * 2_000)));
     }
 }

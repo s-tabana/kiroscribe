@@ -3,7 +3,7 @@
 # （名前のそろい方は、crates/core/src/meeting_rules.rs のテストが確かめる）。
 
 # 判定表の版。印を足す・名前を変える・強さを変えたら上げる（会議の検出の記録 meeting-detection.json に書く）
-version = 3
+version = 4
 
 # 強い印も、中・弱い印の組み合わせもない状態が、これだけ続いたら会議の終了とする（秒）
 end_after_seconds = 20
@@ -185,6 +185,8 @@ kind = "control"
 apps = ["discord.exe", "discordptb.exe", "discordcanary.exe", "discorddevelopment.exe"]
 names = ["@leave"]
 exclude = ["@discord_not_leave"]
+# メッセージ（一覧の項目）の中のボタンでは立たない（アプリがメッセージに置くボタンは、名前を自由に決められる）
+skip_list_items = true
 
 [[service.signal]]
 name = "Discord のマイク"
@@ -209,6 +211,8 @@ apps = ["browser"]
 title = ["@discord_tab"]
 names = ["@leave"]
 exclude = ["@discord_not_leave"]
+# メッセージ（一覧の項目）の中のボタンでは立たない（アプリがメッセージに置くボタンは、名前を自由に決められる）
+skip_list_items = true
 
 # ブラウザ版は、切断ボタンだけで始め、続ける。タブの題はチャンネルの名前で、切断したあとも同じまま残る。ブラウザのマイクと
 # 再生の音は、実行ファイルの単位でしか分からず、別のタブのものでも立つ。どちらも、その通話に参加中であることを示さない

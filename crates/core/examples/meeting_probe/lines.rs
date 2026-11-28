@@ -228,7 +228,7 @@ mod tests {
             scan: Some(ControlScan {
                 windows: vec![ScannedWindow {
                     hwnd: 0x1a,
-                    controls: vec![ControlFact { kind: ControlType::Button, name: "通話から退出".into() }],
+                    controls: vec![ControlFact::new(ControlType::Button, "通話から退出")],
                     seen: 30,
                     error: None,
                     incomplete: None,
@@ -286,9 +286,9 @@ mod tests {
     fn titles_show_only_the_controls_that_hold_a_signal() {
         let mut facts = facts();
         facts.scan.as_mut().unwrap().windows[0].controls = vec![
-            ControlFact { kind: ControlType::Button, name: "通話から退出".into() },
-            ControlFact { kind: ControlType::Text, name: "山田: 明日また再参加します".into() },
-            ControlFact { kind: ControlType::Text, name: "Acme の会議に参加（Join meeting）".into() },
+            ControlFact::new(ControlType::Button, "通話から退出"),
+            ControlFact::new(ControlType::Text, "山田: 明日また再参加します"),
+            ControlFact::new(ControlType::Text, "Acme の会議に参加（Join meeting）"),
         ];
         let evaluation = evaluate(Rules::builtin(), &facts, &Browsers::builtin());
         let lines = window_lines(Rules::builtin(), &facts, &evaluation, true);

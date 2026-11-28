@@ -48,6 +48,14 @@ describe("SettingsDialog", () => {
     expect(await within(field).findByText("未設定")).toBeInTheDocument();
   });
 
+  it("[MTG-032] 自動検出の説明に、ブラウザ版の Discord を記録する範囲と、続けて記録する方法を書く", async () => {
+    setup();
+    const auto = await screen.findByLabelText(/会議を検出したら自動で録音/);
+    const label = auto.closest("label") as HTMLElement;
+    expect(label).toHaveTextContent(/ブラウザ版の Discord は、通話のタブを表示している間だけ記録します/);
+    expect(label).toHaveTextContent(/通話のタブを表示したままにするか、手動で録音してください/);
+  });
+
   it("[SET-002][SET-012] 設定を変更して保存できる", async () => {
     const user = userEvent.setup();
     const { saveSettings, backend } = setup();

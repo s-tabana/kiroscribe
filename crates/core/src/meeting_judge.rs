@@ -5,7 +5,7 @@
 //!   （窓の印と部品の印は、合わせて 1 つと数える）、
 //!   その組み合わせが [`JudgeConfig::combination_ms`] 続き、その間に窓の中の部品を [`JudgeConfig::combination_scans`] 回以上
 //!   調べたとき。打ち消しの印のある文脈では始めない
-//! - 継続: 強い印か組み合わせ（開始のあとは「開始のあとだけ」の印も数える）がある間
+//! - 継続: 強い印か組み合わせ（開始のあとは、参加を確かめた文脈でだけ「開始のあとだけ」の印も数える）がある間
 //! - 終了: 強い印も組み合わせもない状態が [`JudgeConfig::end_after_ms`] 続いたとき。会議の文脈に打ち消しの印が出たら、すぐ
 //!
 //! 録音するのは 1 つの会議だけなので、参加中のサービスのうち 1 つを「いまの会議」として開始・終了を知らせる。
@@ -16,12 +16,17 @@ use serde::{Deserialize, Serialize};
 use crate::meeting_rules::{Context, Evaluation, Held, Kind, Rules, ServiceEvaluation, Strength};
 use crate::meetings::{MeetingApp, MeetingEvent};
 
-/// 開始・終了を決める時間と回数。
+/// 開始・終了を決める時間と回数と、判定のしかた（記録の再生では、記録を書いた製品の判定のしかたに合わせる）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JudgeConfig {
     pub end_after_ms: i64,
     pub combination_ms: i64,
     pub combination_scans: u32,
+    /// 組み合わせで、窓の印と部品の印を合わせて 1 つと数える（`false` は、初期の形式 /2 を書いた製品の数え方: 1 つずつ数える）
+    pub titles_once: bool,
+    /// 「開始のあとだけ」の印を、参加を確かめた文脈（会議の窓）でだけ数える（`false` は、判定表の版 3 までの製品の数え方:
+    /// 参加中のサービスのどの文脈でも数える）
+    pub after_start_in_meeting_context: bool,
 }
 
 impl JudgeConfig {
@@ -30,6 +35,8 @@ impl JudgeConfig {
             end_after_ms: rules.end_after_ms,
             combination_ms: rules.combination_ms,
             combination_scans: rules.combination_scans,
+            titles_once: true,
+            after_start_in_meeting_context: true,
         }
     }
 }
@@ -194,6 +201,7 @@ struct Candidate<'a> {
     context: &'a Context,
     counted: Vec<&'a Held>,
     veto: Option<&'a Held>,
+    titles_once: bool,
 }
 
 impl Candidate<'_> {
@@ -211,7 +219,8 @@ impl Candidate<'_> {
         let weak: Vec<&&Held> =
             self.counted.iter().filter(|held| matches!(held.strength, Strength::Medium | Strength::Weak)).collect();
         let sessions = weak.iter().filter(|held| held.kind == Kind::Session).count();
-        let titles = usize::from(weak.iter().any(|held| held.kind != Kind::Session));
+        let titles = weak.iter().filter(|held| held.kind != Kind::Session).count();
+        let titles = if self.titles_once { titles.min(1) } else { titles };
         self.veto.is_none() && sessions + titles >= 2
     }
 
@@ -225,18 +234,22 @@ impl Candidate<'_> {
 }
 
 /// サービス 1 つの文脈を見立てる。窓の文脈は、窓の印か部品の印が数えられるものだけ。
-fn candidates(service: Option<&ServiceEvaluation>, joined: bool) -> Vec<Candidate<'_>> {
+/// 「開始のあとだけ」の印は、参加中のとき（`meeting` が参加を確かめた文脈）だけ数える。判定のしかたが
+/// [`JudgeConfig::after_start_in_meeting_context`] なら、参加を確かめた文脈でだけ数える（会議を始めた窓を閉じたあと、
+/// 別の窓のサービスに似た名前のタブとブラウザの音で、会議を続けない。文脈を移るには、移る先に参加中を示す印が要る）。
+fn candidates<'a>(service: Option<&'a ServiceEvaluation>, meeting: Option<&ContextKey>, config: &JudgeConfig) -> Vec<Candidate<'a>> {
     let Some(service) = service else { return Vec::new() };
     service
         .contexts
         .iter()
         .filter_map(|context| {
-            let counted: Vec<&Held> = context.signals.iter().filter(|held| joined || !held.after_start).collect();
+            let after_start = meeting.is_some_and(|key| !config.after_start_in_meeting_context || ContextKey::of(context) == *key);
+            let counted: Vec<&Held> = context.signals.iter().filter(|held| after_start || !held.after_start).collect();
             if context.window.is_some() && !counted.iter().any(|held| held.kind != Kind::Session) {
                 return None;
             }
             let veto = counted.iter().copied().find(|held| held.strength == Strength::Veto);
-            Some(Candidate { context, counted, veto })
+            Some(Candidate { context, counted, veto, titles_once: config.titles_once })
         })
         .collect()
 }
@@ -279,8 +292,8 @@ impl Judge {
         let config = self.config;
         let mut ended: Vec<(MeetingApp, Reason)> = Vec::new();
         for state in &mut self.states {
-            let joined = state.joined.is_some();
-            let list = candidates(evaluation.service(state.app), joined);
+            let meeting = state.joined.as_ref().map(|joined| joined.context.clone());
+            let list = candidates(evaluation.service(state.app), meeting.as_ref(), &config);
             let prefer = state.joined.as_ref().map(|j| j.context.clone()).or_else(|| state.pending.as_ref().map(|p| p.context.clone()));
             let strong = pick(&list, &|c| c.strong(), prefer.as_ref());
             let combination = pick(&list, &|c| c.combination(), prefer.as_ref());

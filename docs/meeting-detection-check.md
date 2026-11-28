@@ -102,7 +102,7 @@ Teams は、判定表を作るときに測っていません。初めての確�
 
 ## 終わったら
 
-1. `meeting_probe.exe` を Ctrl+C で終え、`probe-output.txt`（exe と同じフォルダ）を取っておきます。
+1. `meeting_probe.exe` を Ctrl+C で終え、`probe-output.txt`（exe と同じフォルダ）を取っておきます。`probe-output.txt` は起動のたびに書き直すので、続けて測るときは、前のファイルを別の名前で取っておきます。
 2. Kiroscribe の設定の「このアプリについて」の「デバッグ用のログを保存…」で zip を保存します。
 3. 期待どおりでなかった手順と、その時刻（目印）を書き、`probe-output.txt` と zip を一緒に渡します。
 4. 開発の側は、zip の `meeting-detection.json` を回帰テストに加え（`crates/core/tests/fixtures/meetings/README.md`）、テストが失敗することを確かめてから判定表を直します。

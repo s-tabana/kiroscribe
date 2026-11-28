@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 
 use crate::audio_sessions::{AudioSessions, Flow, SessionState};
-use crate::meeting_facts::{ControlType, Facts, WindowFact};
+use crate::meeting_facts::{ControlFact, ControlType, Facts, WindowFact};
 use crate::meetings::{Browsers, MeetingApp};
 
 /// 組み込みの判定表。
@@ -100,6 +100,8 @@ struct RawSignal {
     audible: bool,
     #[serde(default)]
     after_start: bool,
+    #[serde(default)]
+    skip_list_items: bool,
 }
 
 /// 判定表（読み込んで、比べる形にしたもの）。
@@ -150,6 +152,8 @@ pub struct Signal {
     class: Vec<String>,
     flow: Option<Flow>,
     audible: bool,
+    /// 一覧の項目（チャットのメッセージなど）の中の部品では立たない（メッセージに置けるボタンの名前では、通話の操作と区別できない）
+    skip_list_items: bool,
 }
 
 /// 印の対象のアプリ。
@@ -404,6 +408,13 @@ impl Rules {
             .any(|signal| signal.kind == Kind::Control && signal.types.contains(&kind) && signal.names.matches(name))
     }
 
+    /// 調べた部品が、一覧の項目の中では立たない印（`skip_list_items`）に当たりうるか（その部品だけ、一覧の項目の中かを確かめる）。
+    pub fn cares_about_lists(&self, kind: ControlType, name: &str) -> bool {
+        self.signals().any(|signal| {
+            signal.kind == Kind::Control && signal.skip_list_items && signal.types.contains(&kind) && signal.names.matches(name)
+        })
+    }
+
     /// 再生の音の大きさを読むアプリか（再生の音の印の対象）。
     pub fn wants_peak(&self, exe: &str, browsers: &Browsers) -> bool {
         self.signals().any(|signal| signal.kind == Kind::Session && signal.audible && signal.apps.matches(exe, browsers))
@@ -444,6 +455,9 @@ fn compile(raw: RawSignal, words: &HashMap<String, Vec<String>>) -> Result<Signa
     if raw.after_start && raw.strength != Strength::Weak && raw.strength != Strength::Medium {
         return Err("after_start は中・弱い印だけに付けられます".into());
     }
+    if raw.skip_list_items && raw.kind != Kind::Control {
+        return Err("skip_list_items は control のときだけ書けます".into());
+    }
     Ok(Signal {
         name: raw.name,
         strength: raw.strength,
@@ -457,6 +471,7 @@ fn compile(raw: RawSignal, words: &HashMap<String, Vec<String>>) -> Result<Signa
         class: raw.class,
         flow: raw.flow,
         audible: raw.audible,
+        skip_list_items: raw.skip_list_items,
     })
 }
 
@@ -543,6 +558,14 @@ fn session_holds(signal: &Signal, exe: &str, facts: &Facts, audible_peak: f32) -
     })
 }
 
+/// 部品が、部品の印に当たるか（一覧の項目の中では立たない印は、一覧の項目の中の部品を除く）。
+fn control_matches(signal: &Signal, control: &ControlFact) -> bool {
+    signal.types.contains(&control.kind)
+        && signal.names.matches(&control.name)
+        && !signal.exclude.matches(&control.name)
+        && !(signal.skip_list_items && control.in_list_item)
+}
+
 /// 窓の印・部品の印が、その窓で立っているか。ブラウザの窓では、表示中のページがサービスのサイトのときだけ
 /// （ほかのサイトのページの題や部品では立たない）。「開始のあとだけ」の印は、背面のタブを見るものなので、サイトを問わない。
 fn window_holds(service: &Service, signal: &Signal, window: &WindowFact, facts: &Facts, browsers: &Browsers) -> bool {
@@ -554,11 +577,9 @@ fn window_holds(service: &Service, signal: &Signal, window: &WindowFact, facts: 
     }
     match signal.kind {
         Kind::Window => signal.class.is_empty() || signal.class.iter().any(|class| *class == window.class),
-        Kind::Control => facts.scanned_window(window.hwnd).is_some_and(|scanned| {
-            scanned.controls.iter().any(|control| {
-                signal.types.contains(&control.kind) && signal.names.matches(&control.name) && !signal.exclude.matches(&control.name)
-            })
-        }),
+        Kind::Control => facts
+            .scanned_window(window.hwnd)
+            .is_some_and(|scanned| scanned.controls.iter().any(|control| control_matches(signal, control))),
         Kind::Session => false,
     }
 }
@@ -581,13 +602,10 @@ pub fn matched_controls(rules: &Rules, facts: &Facts, evaluation: &Evaluation) -
             let Some(scanned) = context.window.and_then(|hwnd| facts.scanned_window(hwnd)) else { continue };
             for held in context.signals.iter().filter(|held| held.kind == Kind::Control) {
                 let Some(signal) = table.signals.iter().find(|signal| signal.name == held.name) else { continue };
-                for control in &scanned.controls {
-                    if !signal.types.contains(&control.kind) || signal.exclude.matches(&control.name) {
-                        continue;
-                    }
+                for control in scanned.controls.iter().filter(|control| control_matches(signal, control)) {
                     let name = match control.kind {
                         ControlType::Text => signal.names.matched_word(&control.name),
-                        _ => signal.names.matches(&control.name).then(|| control.name.clone()),
+                        _ => Some(control.name.clone()),
                     };
                     let Some(name) = name else { continue };
                     let matched = MatchedControl { window: scanned.hwnd, kind: control.kind, name };
@@ -608,7 +626,9 @@ fn held(signal: &Signal) -> Held {
 /// 1 回分の PC の様子に判定表を当てはめる。
 ///
 /// - 窓の文脈: 対象のアプリの窓ごとに、その窓の窓の印・部品の印と、その窓のアプリの録音・再生の印。
-///   窓の印か部品の印が 1 つも立っていない窓は、文脈にしない（ブラウザのマイクの使用だけでは、会議の印にしない）
+///   窓の印か部品の印が 1 つも立っていない窓は、文脈にしない（ブラウザのマイクの使用だけでは、会議の印にしない）。
+///   ブラウザの窓で、表示中のページがそのサービスのサイトのときは、ブラウザの録音・再生の印を数えない（どのタブのものか
+///   分からない。そのページの通話の操作の部品で判定する。会議のタブが背面にあるときだけ、タブの一覧の印と組み合わせる）
 /// - デスクトップの会議アプリの文脈: サービスごとに、ブラウザでないアプリの録音・再生の印と、そのアプリの窓の打ち消しの印
 pub fn evaluate(rules: &Rules, facts: &Facts, browsers: &Browsers) -> Evaluation {
     let mut services = Vec::new();
@@ -616,8 +636,13 @@ pub fn evaluate(rules: &Rules, facts: &Facts, browsers: &Browsers) -> Evaluation
         let mut contexts = Vec::new();
         let mut desktop_vetoes: Vec<Held> = Vec::new();
         for window in &facts.windows {
-            let signals: Vec<&Signal> =
-                service.signals.iter().filter(|signal| signal.apps.matches(&window.exe, browsers)).collect();
+            let showing_site = browsers.contains(&window.exe) && window.site.as_deref().is_some_and(|site| service.is_site(site));
+            let signals: Vec<&Signal> = service
+                .signals
+                .iter()
+                .filter(|signal| signal.apps.matches(&window.exe, browsers))
+                .filter(|signal| !(showing_site && signal.kind == Kind::Session))
+                .collect();
             if signals.is_empty() {
                 continue;
             }

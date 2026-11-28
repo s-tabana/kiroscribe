@@ -6,7 +6,8 @@
 //! - `README.txt` … 中身の説明
 //! - `environment.json` … アプリと OS のバージョン、秘密でない設定（[`Environment`]）
 //! - `meeting-detection.json` … 会議の検出の記録（[`crate::meeting_record::MeetingRecord`]）
-//! - `logs/kiroscribe-<年月日>.log` … デバッグ用のログ（[`crate::debug_log`]）
+//! - `logs/kiroscribe-<年月日>.log` … デバッグ用のログ（[`crate::debug_log`]）。前の版が書いた行も、いまの伏せ方で伏せ直して入れる
+//!   （[`masked_log`]）
 
 use std::io::{Cursor, Write};
 use std::path::Path;
@@ -131,10 +132,51 @@ pub fn build_bundle(input: &BundleInput<'_>) -> std::io::Result<(Vec<u8>, Vec<St
         let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
-        add(&mut zip, format!("{LOG_DIR}/{name}"), &bytes)?;
+        add(&mut zip, format!("{LOG_DIR}/{name}"), masked_log(&bytes).as_bytes())?;
     }
     let cursor = zip.finish().map_err(std::io::Error::other)?;
     Ok((cursor.into_inner(), names))
+}
+
+/// ログのファイルの中身を、いまの伏せ方（[`crate::debug_log::mask_text`]）で伏せ直す。前の版が書いた行には、いまなら伏せる
+/// 値（括弧のあるパスの後ろの URL のクエリなど）が残りうる。JSON として読める行は、文字列の値と名前を伏せて書き直し、
+/// 読めない行（書いている途中の行など）は、行全体を伏せる。伏せるもののない行は、書いたときのまま入れる。
+pub fn masked_log(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let (body, end) = match line.strip_suffix('\n') {
+            Some(body) => (body.strip_suffix('\r').unwrap_or(body), "\n"),
+            None => (line, ""),
+        };
+        match serde_json::from_str::<serde_json::Value>(body) {
+            Ok(value) => {
+                // 伏せるものがない行は、書いたときのまま入れる
+                let masked = mask_value(value.clone());
+                if masked == value {
+                    out.push_str(body);
+                } else {
+                    out.push_str(&serde_json::to_string(&masked).unwrap_or_default());
+                }
+            }
+            Err(_) => out.push_str(&crate::debug_log::mask_text(body)),
+        }
+        out.push_str(end);
+    }
+    out
+}
+
+/// 値の中の文字列（名前を含む）をすべて伏せる。
+fn mask_value(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(text) => Value::String(crate::debug_log::mask_text(&text)),
+        Value::Array(items) => Value::Array(items.into_iter().map(mask_value).collect()),
+        Value::Object(map) => {
+            Value::Object(map.into_iter().map(|(key, value)| (crate::debug_log::mask_text(&key), mask_value(value))).collect())
+        }
+        other => other,
+    }
 }
 
 /// zip を `out` に保存する。zip に入れた名前の一覧を返す。
@@ -337,6 +379,23 @@ mod tests {
         assert_eq!(read("logs/kiroscribe-20261127.log"), "{\"event\":\"app.exit\"}\n");
         let readme = read(README);
         assert!(readme.contains("API キー") && readme.contains("確かめてください"), "{readme}");
+    }
+
+    /// 前の版が書いたログの行に、いまなら伏せる値（括弧のあるパスの後ろの URL のクエリ）が残っていても、zip に入れるときに
+    /// 伏せ直す。JSON として読めない行も伏せる。伏せるもののない行は、書いたときのまま入れる。
+    // [LOG-009][LOG-011]
+    #[test]
+    fn old_log_lines_are_masked_again() {
+        let old = concat!(
+            "{\"at\":\"2026-11-27T10:00:00+09:00\",\"event\":\"update.check\",\"fields\":{\"url\":\"https://example.com/a(1)/b?token=OLDSECRET\"}}\r\n",
+            "{\"event\":\"app.exit\",\"at\":\"x\"}\n",
+            "書きかけの行 https://example.com/a'b?sig=HALFSECRET",
+        );
+        let masked = masked_log(old.as_bytes());
+        assert!(!masked.contains("OLDSECRET") && !masked.contains("HALFSECRET"), "{masked}");
+        assert!(masked.contains("https://example.com/a(1)/b?<query>"), "{masked}");
+        assert!(masked.contains("{\"event\":\"app.exit\",\"at\":\"x\"}\n"), "伏せるもののない行はそのまま: {masked}");
+        assert_eq!(masked.lines().count(), 3);
     }
 
     #[test]
