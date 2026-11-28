@@ -35,6 +35,8 @@ windows = { version = "0.62", features = ["Win32_Media_Audio", "Win32_System_Com
 [dev-dependencies]
 wiremock = "0.6"
 tempfile = "3"
+# 会議の検出の確認用の道具（examples/meeting_probe）の判定表（meeting-rules.toml）を読む
+toml = "1"
 
 # 資格情報マネージャーの中身を、keyring を通さずに Windows の API で直接確かめるテスト用。
 # ToolHelp・Wdk_System_Threading・Storage_FileSystem は、確認用の道具（examples/meeting_probe）が
