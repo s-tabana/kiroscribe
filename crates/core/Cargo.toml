@@ -22,13 +22,23 @@ reqwest = { version = "0.13", default-features = false, features = ["native-tls"
 futures-util = "0.3"
 cpal = "0.18"
 keyring-core = "1"
-# デバッグ用のログの書き出し（debug_bundle.rs）
-zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# 会議の相棒の資料の索引（search/）: 文字コード、Office の文書（zip と XML）、PDF、フォルダの見張り
+# zip は、デバッグ用のログの書き出し（debug_bundle.rs）にも使う
+encoding_rs = "0.8"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+quick-xml = "0.42"
+pdf-extract = "0.12"
+notify = "9"
+
+# 資料の索引で、開いたフォルダを基準にリンクをたどらずにファイルを開く（O_NOFOLLOW など）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-native-keyring-store = "1"
 winreg = "0.56"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+# 資料の索引で、探すフォルダのハンドルを基準に、名前を 1 つずつ開く（NtCreateFile）
+windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 wiremock = "0.6"

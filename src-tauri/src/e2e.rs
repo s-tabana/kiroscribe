@@ -202,6 +202,8 @@ struct DialogAnswers {
     confirm: bool,
     /// 保存ダイアログで選ぶパス（書かなければ取り消し）
     save_path: Option<String>,
+    /// フォルダを選ぶダイアログで選ぶフォルダ（書かなければ取り消し）
+    folder_path: Option<String>,
 }
 
 fn dialog_answers() -> DialogAnswers {
@@ -270,6 +272,13 @@ fn save(options: Value) -> Option<String> {
         DIALOG_LOG_FILE,
         &json!({ "type": "save", "options": options, "answer": answer }).to_string(),
     );
+    answer
+}
+
+/// フォルダを選ぶダイアログ（本体が出す。会議の相棒の「フォルダを追加…」）の代わり。`dialogs.json` のフォルダを返す。
+pub fn pick_folder() -> Option<String> {
+    let answer = dialog_answers().folder_path;
+    append_line(DIALOG_LOG_FILE, &json!({ "type": "folder", "answer": answer }).to_string());
     answer
 }
 

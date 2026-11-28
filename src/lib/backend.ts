@@ -24,6 +24,7 @@ import type {
   Provider,
   RecordingErrorEvent,
   RecordingStatus,
+  SearchIndexStatus,
   ReleaseNotes,
   Segment,
   Settings,
@@ -58,6 +59,21 @@ export interface Backend {
   setApiKey(provider: Provider, value: string): Promise<ApiKeyStatus>;
   /** 確認ダイアログ。kind は見た目（既定は警告。削除などの取り消せない操作用） */
   confirm(message: string, title?: string, kind?: "warning" | "info"): Promise<boolean>;
+
+  // ---- 会議の相棒の資料の索引 ----
+  getSearchIndexStatus(): Promise<SearchIndexStatus>;
+  /** フォルダを選ぶダイアログ（本体が出す）で選んだフォルダを、探すフォルダに足す。取り消したら null */
+  addSearchFolder(): Promise<SearchIndexStatus | null>;
+  removeSearchFolder(path: string): Promise<SearchIndexStatus>;
+  /** 「中身を送らない」を切り替える */
+  setSearchFolderNoContent(path: string, value: boolean): Promise<SearchIndexStatus>;
+  /** 索引を空にして作り直す（相棒がオフなら、理由のメッセージで reject する） */
+  rebuildSearchIndex(): Promise<SearchIndexStatus>;
+  /**
+   * 索引の状態の知らせを待ち受ける。`onReady` は、待ち受けの登録が済んだときに呼ぶ
+   * （それより前に届いた知らせは受け取れないので、登録が済んでから状態を読み直す）
+   */
+  onSearchIndexStatus(cb: (status: SearchIndexStatus) => void, onReady?: () => void): Unsubscribe;
 
   // ---- 録音・文字起こし ----
   listAudioDevices(): Promise<AudioDevice[]>;
@@ -164,13 +180,16 @@ function subscribeAsync<T>(event: string, cb: (payload: T) => void): Promise<Uns
   return listen<T>(event, (e) => cb(e.payload));
 }
 
-/** Tauri のイベント購読を、同期的に解除できる形にする */
-function subscribe<T>(event: string, cb: (payload: T) => void): Unsubscribe {
+/** Tauri のイベント購読を、同期的に解除できる形にする。`onReady` は、購読の登録が済んだときに呼ぶ */
+function subscribe<T>(event: string, cb: (payload: T) => void, onReady?: () => void): Unsubscribe {
   let disposed = false;
   let unlisten: (() => void) | null = null;
   void subscribeAsync<T>(event, cb).then((fn) => {
     if (disposed) fn();
-    else unlisten = fn;
+    else {
+      unlisten = fn;
+      onReady?.();
+    }
   });
   return () => {
     disposed = true;
@@ -211,6 +230,13 @@ export function createTauriBackend(): Backend {
     getApiKeyStatus: () => invoke("get_api_key_status"),
     setApiKey: (provider, value) => invoke("set_api_key", { provider, value }),
     confirm: (message, title = "Kiroscribe", kind = "warning") => ask(message, { title, kind }),
+
+    getSearchIndexStatus: () => invoke("get_search_index_status"),
+    addSearchFolder: () => invoke("add_search_folder"),
+    removeSearchFolder: (path) => invoke("remove_search_folder", { path }),
+    setSearchFolderNoContent: (path, value) => invoke("set_search_folder_no_content", { path, value }),
+    rebuildSearchIndex: () => invoke("rebuild_search_index"),
+    onSearchIndexStatus: (cb, onReady) => subscribe("search-index-status", cb, onReady),
 
     listAudioDevices: () => invoke("list_audio_devices"),
     listSegments: (noteId) => invoke("list_segments", { noteId }),

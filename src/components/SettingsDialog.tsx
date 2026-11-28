@@ -3,6 +3,7 @@ import { errorMessage, useBackend, type Backend } from "../lib/backend";
 import { useUpdater } from "../hooks/useUpdater";
 import { shortDateTimeLabel } from "../lib/dates";
 import type { ApiKeyStatus, AudioDevice, HelpTab, Provider, Settings } from "../lib/types";
+import { CompanionSection } from "./CompanionSection";
 import { HelpDialog } from "./HelpDialog";
 import { Markdown } from "./Markdown";
 import { UpdateProgress } from "./UpdateBanner";
@@ -287,6 +288,19 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
                     </label>
                   </div>
                 </section>
+
+                <CompanionSection
+                  settings={settings}
+                  onCompanionChange={(value) => update("companion", value)}
+                  onError={(text) => setMessage({ kind: "error", text })}
+                  modelSelect={
+                    <ModelSelect
+                      options={CLAUDE_MODELS}
+                      value={settings.companionModel}
+                      onChange={(value) => update("companionModel", value)}
+                    />
+                  }
+                />
               </>
             )}
 
