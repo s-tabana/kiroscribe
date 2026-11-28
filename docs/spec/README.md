@@ -27,6 +27,8 @@ Kiroscribe の振る舞いを、確かめられる単位で 1 項目ずつ書き
 | LOG | [デバッグ用のログ](log.md) |
 | REL | [配布とリリース](rel.md) |
 | IPC | [画面と本体の取り決め](ipc.md) |
+| CMP | [会議の相棒](cmp.md) |
+| IDX | [資料の索引](idx.md) |
 
 項目の数と、テストとの対応の状況は、`node scripts/check-spec-coverage.mjs` が表示します（CI では、ジョブの Summary に出ます）。
 

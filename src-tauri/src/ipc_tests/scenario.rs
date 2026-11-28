@@ -201,6 +201,111 @@ fn ipc_contract_matches_the_frontend() {
     assert_eq!(status["anthropic"], true);
     assert!(!status.to_string().contains("sk-ant-test"), "キーの値は画面に返さない");
 
+    // ---- 会議の相棒の資料の索引（フォルダを選ぶダイアログは dialogs.json の答え） ----
+    // 索引の状態は裏で変わるので、命令のたびに、その命令のあとに届いた知らせを待つ（見本に入る知らせが、その時々で変わらないように）
+    let index_events = |since: usize| events_named(&events, "search-index-status").split_off(since);
+    let index_seen = || events_named(&events, "search-index-status").len();
+    let answers = fixture.dir.join("dialogs.json");
+    let folder = fixture.dir.join("共有資料");
+    std::fs::create_dir_all(folder.join("人事")).unwrap();
+    std::fs::write(folder.join("経費精算の手順.txt"), "申請は月末まで").unwrap();
+    let folder_path = folder.to_string_lossy().to_string();
+    // 起動時（相棒がオフ）は、索引を消し終えてから「オフ」になる
+    wait_until("起動時に索引を消し終えた状態", || (s.ok("get_search_index_status", json!({}))["state"] == "off").then_some(()));
+    std::fs::write(&answers, "{}").unwrap();
+    assert_eq!(s.ok("add_search_folder", json!({})), Value::Null, "ダイアログを取り消したら何も足さない");
+    std::fs::write(&answers, json!({ "folderPath": folder_path }).to_string()).unwrap();
+    let since = index_seen();
+    let status = s.ok("add_search_folder", json!({}));
+    assert_eq!(status["folders"][0]["path"], folder_path.as_str());
+    assert_eq!(status["folders"][0]["noContent"], false);
+    // 一覧を変えた知らせ（オフのまま）が届いてから、次の命令の知らせを数える（前の知らせで、次の待ち合わせが通らないように）
+    wait_until("フォルダを足した知らせ", || {
+        index_events(since).iter().any(|status| status["state"] == "off" && status["folders"][0]["path"] == folder_path.as_str()).then_some(())
+    });
+    // 相棒をオフにしてから、オンにして保存すると、索引を作る
+    let mut companion = settings.clone();
+    companion["companion"] = json!(false);
+    let since = index_seen();
+    s.ok("save_settings", json!({ "settings": companion }));
+    wait_until("オフにしたあとの、索引を消し終えた知らせ", || {
+        index_events(since).iter().any(|status| status["state"] == "off").then_some(())
+    });
+    companion["companion"] = json!(true);
+    let since = index_seen();
+    s.ok("save_settings", json!({ "settings": companion }));
+    wait_until("索引の作成", || {
+        index_events(since).iter().any(|status| status["state"] == "ready" && status["files"] == 1).then_some(())
+    });
+    assert!(index_events(since).iter().any(|status| status["state"] == "building"));
+    let status = s.ok("get_search_index_status", json!({}));
+    assert_eq!(status["folders"][0]["files"], 1);
+    let ready_at = status["updatedAt"].clone();
+    // 一覧にあるフォルダを選び直しても、何も変えない（調べ直さない）
+    let since = index_seen();
+    let status = s.ok("add_search_folder", json!({}));
+    assert_eq!(status["state"], "ready");
+    assert_eq!(status["folders"].as_array().unwrap().len(), 1);
+    // 一覧のフォルダの中のフォルダは足さない
+    std::fs::write(&answers, json!({ "folderPath": folder.join("人事").to_string_lossy() }).to_string()).unwrap();
+    let refused = s.call("add_search_folder", json!({})).unwrap_err();
+    assert!(refused.contains("中身が重なる"), "{refused}");
+    std::fs::remove_file(&answers).unwrap();
+    // 「中身を送らない」は、調べ直さず、状態と更新した時刻も変えない
+    let status = s.ok("set_search_folder_no_content", json!({ "path": folder_path, "value": true }));
+    assert_eq!(status["folders"][0]["noContent"], true);
+    assert_eq!(status["state"], "ready");
+    assert_eq!(status["updatedAt"], ready_at);
+    assert_eq!(index_events(since), Vec::<Value>::new(), "選び直しと「中身を送らない」では、調べ直さない");
+    let since = index_seen();
+    let status = s.ok("rebuild_search_index", json!({}));
+    assert_eq!(status["state"], "building", "戻り値は、作り直しを始めた直後の状態");
+    wait_until("索引の作り直し", || {
+        index_events(since).iter().any(|status| status["state"] == "ready" && status["files"] == 1).then_some(())
+    });
+    // 足したときの実体を記録する前の設定のフォルダは、中身を読まずに「確認が必要」にする。
+    // 選び直すと、実体を記録して索引に入れる（「中身を送らない」は引き継ぐ）
+    let legacy = vec![kiroscribe_core::search::SearchFolder { path: folder_path.clone(), no_content: true, place: None }];
+    app.state::<AppState>().db().save_search_folders(&legacy).unwrap();
+    let since = index_seen();
+    app.state::<crate::companion::CompanionState>().indexer.set_folders(legacy);
+    wait_until("確認が必要な表示", || {
+        let unconfirmed = |status: &Value| status["state"] == "ready" && status["folders"][0]["unconfirmed"] == true && status["files"] == 0;
+        index_events(since).iter().any(unconfirmed).then_some(())
+    });
+    std::fs::write(&answers, json!({ "folderPath": folder_path }).to_string()).unwrap();
+    let since = index_seen();
+    let status = s.ok("add_search_folder", json!({}));
+    std::fs::remove_file(&answers).unwrap();
+    assert_eq!(status["folders"].as_array().unwrap().len(), 1);
+    assert_eq!((&status["folders"][0]["unconfirmed"], &status["folders"][0]["noContent"]), (&json!(false), &json!(true)));
+    wait_until("選び直したフォルダの索引", || {
+        index_events(since).iter().any(|status| status["state"] == "ready" && status["files"] == 1).then_some(())
+    });
+    assert!(app.state::<AppState>().db().load_search_folders().unwrap()[0].place.is_some(), "選び直したフォルダの実体を保存する");
+    let since = index_seen();
+    let status = s.ok("remove_search_folder", json!({ "path": folder_path }));
+    assert_eq!(status["folders"], json!([]));
+    assert_eq!(status["state"], "building", "戻り値は、一覧を変えた直後の状態");
+    wait_until("フォルダを外したあとの索引", || {
+        index_events(since).iter().any(|status| status["state"] == "ready").then_some(())
+    });
+    companion["companion"] = json!(false);
+    let since = index_seen();
+    s.ok("save_settings", json!({ "settings": companion }));
+    let refused = s.call("rebuild_search_index", json!({})).unwrap_err();
+    assert!(refused.contains("会議の相棒がオフ"), "{refused}");
+    wait_until("オフにしたあとの、索引を消し終えた知らせ", || {
+        index_events(since).iter().any(|status| status["state"] == "off").then_some(())
+    });
+    // 相棒をオンに戻すと、空の索引を作る（終わるまで待つ）
+    let since = index_seen();
+    s.ok("save_settings", json!({ "settings": settings }));
+    wait_until("空の索引", || {
+        let ready = |status: &Value| status["state"] == "ready" && status["folders"] == json!([]);
+        index_events(since).iter().any(ready).then_some(())
+    });
+
     // ---- トレイのメニューでの切り替え（開いている設定画面に、変わった設定を知らせる）----
     crate::background::toggle_auto_record(app.handle()).unwrap();
     crate::background::toggle_auto_record(app.handle()).unwrap();

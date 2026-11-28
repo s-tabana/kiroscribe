@@ -164,9 +164,9 @@ export class Workspace {
     else fs.rmSync(this.file("meeting.txt"), { force: true });
   }
 
-  /** 確認ダイアログ・保存ダイアログへの答えを決める（アプリが次にダイアログを出すときから有効） */
-  answerDialogs({ confirm = false, savePath = null } = {}) {
-    writeFileAtomic(this.file("dialogs.json"), JSON.stringify({ confirm, savePath }));
+  /** 確認ダイアログ・保存ダイアログ・フォルダを選ぶダイアログへの答えを決める（アプリが次にダイアログを出すときから有効） */
+  answerDialogs({ confirm = false, savePath = null, folderPath = null } = {}) {
+    writeFileAtomic(this.file("dialogs.json"), JSON.stringify({ confirm, savePath, folderPath }));
   }
 
   /** アプリが出そうとしたダイアログ（古い順） */

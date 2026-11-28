@@ -20,6 +20,8 @@ import {
   type Provider,
   type RecordingErrorEvent,
   type RecordingStatus,
+  type SearchFolderStatus,
+  type SearchIndexStatus,
   type ReleaseNote,
   type Segment,
   type TranscriptBreak,
@@ -45,8 +47,14 @@ interface MemoryOptions {
   version?: string;
   /** 更新のダウンロードを 10% ずつ進める間隔（ミリ秒）。テストでは 0 */
   updateStepDelayMs?: number;
+  /** 更新のインストールの段階（「インストールしています」）を続ける時間（ミリ秒。既定は updateStepDelayMs と同じ） */
+  installStepDelayMs?: number;
+  /** テスト用に、インストール中の状態を保つ間に待つもの（解決するとインストールを終える） */
+  installGate?: () => Promise<void>;
   /** 設定の初期値（指定した項目だけ既定値から変える） */
   settings?: Partial<Settings>;
+  /** 「フォルダを追加…」のダイアログで選ぶフォルダ（null なら取り消し。既定はプレビュー用のフォルダ） */
+  pickFolder?: () => string | null;
   /**
    * デバッグ用のログの提出を差し替える（テスト用）。progress で進み具合を知らせ、提出の番号を返す。
    * 既定は、進み具合を 4 回知らせてから、プレビュー用の番号を返す
@@ -95,6 +103,8 @@ export interface MemoryBackend extends Backend {
   setWindowVisible(visible: boolean): void;
   /** 「更新を確認」を失敗させる（null で元に戻す） */
   setUpdateCheckError(message: string | null): void;
+  /** 資料の索引の状態を差し替えて知らせる（作っている途中・見つからないフォルダなどの再現） */
+  setSearchIndexStatus(status: Partial<SearchIndexStatus>): void;
 }
 
 class Emitter<T> {
@@ -270,6 +280,36 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
   let updatedNotice: string | null = null;
   const mainShownEvents = new Emitter<void>();
   const settingsEvents = new Emitter<Settings>();
+  /** プレビューで、索引に入っていることにするファイルの件数（フォルダごと） */
+  const FOLDER_FILES = 12;
+  let searchFolders: SearchFolderStatus[] = [];
+  let searchIndex: SearchIndexStatus = {
+    state: settings.companion ? "ready" : "off",
+    done: 0,
+    total: 0,
+    files: 0,
+    updatedAt: settings.companion ? now() : null,
+    folders: [],
+    revision: 0,
+  };
+  const searchIndexEvents = new Emitter<SearchIndexStatus>();
+  const publishSearchIndex = (next: Partial<SearchIndexStatus> = {}) => {
+    const on = settings.companion;
+    searchFolders = searchFolders.map((folder) => ({ ...folder, files: on ? FOLDER_FILES : 0 }));
+    searchIndex = {
+      ...searchIndex,
+      state: on ? "ready" : "off",
+      done: 0,
+      total: 0,
+      updatedAt: on ? now() : null,
+      ...next,
+      folders: next.folders ?? searchFolders.map((folder) => ({ ...folder })),
+      revision: searchIndex.revision + 1,
+    };
+    searchIndex.files = searchIndex.folders.reduce((sum, folder) => sum + folder.files, 0);
+    searchIndexEvents.emit({ ...searchIndex });
+    return { ...searchIndex, folders: searchIndex.folders.map((folder) => ({ ...folder })) };
+  };
   const logSubmitEvents = new Emitter<LogSubmitProgress>();
   const UPDATE_BYTES = 8_400_000;
   const updateStep = () =>
@@ -507,6 +547,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
       return { ...settings };
     },
     async saveSettings(next) {
+      const companionBefore = settings.companion;
       settings = {
         ...next,
         language: next.language.trim() || DEFAULT_SETTINGS.language,
@@ -514,7 +555,9 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
         claudeModel: next.claudeModel.trim() || DEFAULT_SETTINGS.claudeModel,
         myName: next.myName.trim(),
         inputDeviceId: next.inputDeviceId?.trim() || null,
+        companionModel: next.companionModel.trim() || DEFAULT_SETTINGS.companionModel,
       };
+      if (settings.companion !== companionBefore) publishSearchIndex();
       // 自動更新の切り替えは、すぐに効く（オフにしたら、待っている自動インストールをやめる）
       if (!settings.autoUpdate && update.ready) setUpdate({ ...update, ready: false });
       void backgroundDownload();
@@ -529,6 +572,43 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
     },
     async confirm(message) {
       return options.confirm ? options.confirm(message) : window.confirm(message);
+    },
+
+    async getSearchIndexStatus() {
+      return { ...searchIndex, folders: searchIndex.folders.map((folder) => ({ ...folder })) };
+    },
+    async addSearchFolder() {
+      const path = options.pickFolder ? options.pickFolder() : "C:\\Users\\preview\\Documents\\共有資料";
+      if (!path) return null;
+      // 一覧にあるフォルダなら、何も変えない
+      if (searchFolders.some((folder) => folder.path === path)) return this.getSearchIndexStatus();
+      searchFolders.push({ path, noContent: false, files: 0, missing: false, truncated: false, unconfirmed: false });
+      return publishSearchIndex();
+    },
+    async removeSearchFolder(path) {
+      searchFolders = searchFolders.filter((folder) => folder.path !== path);
+      return publishSearchIndex();
+    },
+    async setSearchFolderNoContent(path, value) {
+      const folder = searchFolders.find((f) => f.path === path);
+      if (!folder) throw "このフォルダは一覧にありません";
+      folder.noContent = value;
+      // 調べ直さないので、状態と更新した時刻は変えない
+      return publishSearchIndex({ state: searchIndex.state, updatedAt: searchIndex.updatedAt });
+    },
+    async rebuildSearchIndex() {
+      if (!settings.companion) throw "会議の相棒がオフのときは、索引を作り直せません";
+      return publishSearchIndex();
+    },
+    onSearchIndexStatus: (cb, onReady) => {
+      const off = searchIndexEvents.on(cb);
+      if (onReady) queueMicrotask(onReady);
+      return off;
+    },
+    setSearchIndexStatus(status) {
+      if (status.folders) searchFolders = status.folders.map((folder) => ({ ...folder }));
+      searchIndex = { ...searchIndex, ...status, revision: status.revision ?? searchIndex.revision + 1 };
+      searchIndexEvents.emit({ ...searchIndex });
     },
 
     async listAudioDevices() {
@@ -848,7 +928,9 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
         }
       }
       setUpdate({ ...update, phase: "installing" });
-      await updateStep();
+      if (options.installGate) await options.installGate();
+      else if (options.installStepDelayMs !== undefined) await new Promise((resolve) => setTimeout(resolve, options.installStepDelayMs));
+      else await updateStep();
       // 実物はここでアプリが終了し、新しい版で起動し直される。その後の状態を再現する
       appVersion = target.version;
       published = null;

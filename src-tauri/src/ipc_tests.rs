@@ -131,7 +131,8 @@ fn parse_frontend(source: &str) -> Frontend {
             frontend.events.push(EventBinding {
                 method: method.clone(),
                 event: event.to_string(),
-                passes_payload: rest.trim_end().trim_end_matches(',') == ", cb)",
+                // 登録が済んだときのコールバック（`onReady`）を続けて渡すものも、内容をそのまま渡す
+                passes_payload: matches!(rest.trim_end().trim_end_matches(','), ", cb)" | ", cb, onReady)"),
             });
         }
     }
@@ -203,6 +204,7 @@ export function createTauriBackend(): Backend {
     updateNote: (id, patch) => invoke("update_note", { id, patch }),
     confirm: (message, title = "Kiroscribe") => ask(message, { title }),
     onSegment: (cb) => subscribe("transcript-segment", cb),
+    onReadySegment: (cb, onReady) => subscribe("ready-segment", cb, onReady),
     async saveMarkdown(noteId, options, fileName) {
       const path = await save({ defaultPath: fileName });
       await invoke("save_markdown", { noteId, options, path });
@@ -237,6 +239,11 @@ export function createDefaultBackend(): Backend {
             EventBinding {
                 method: "onSegment".into(),
                 event: "transcript-segment".into(),
+                passes_payload: true
+            },
+            EventBinding {
+                method: "onReadySegment".into(),
+                event: "ready-segment".into(),
                 passes_payload: true
             },
             EventBinding {
@@ -355,10 +362,44 @@ fn mock_app(update_endpoint: &str) -> (tauri::App<MockRuntime>, WebviewWindow<Mo
     app.manage(crate::meeting_watch::MeetingState::default());
     app.manage(UpdateState::new(false, None));
     app.manage(kiroscribe_core::debug_log::DebugLog::open(debug_log_dir()).expect("デバッグ用のログを用意できません"));
+    // 資料の索引は、テストごとのフォルダに作る（相棒がオフのまま始める）
+    let index_dir = index_root().join(uuid_like());
+    crate::companion::setup(app.handle(), &index_dir, &kiroscribe_core::settings::Settings { companion: false, ..Default::default() }, Vec::new());
     let window = WebviewWindowBuilder::new(&app, MAIN_LABEL, Default::default())
         .build()
         .expect("模擬のウィンドウを作れません");
     (app, window)
+}
+
+/// 資料の索引を作るフォルダ（target の下に、テストのプロセスごとに 1 つ）。
+/// 同じ target で同時に動くほかのテストの索引を消さないよう、消すのは自分のフォルダと、1 日より前に残ったフォルダだけ。
+fn index_root() -> &'static std::path::Path {
+    static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let exe = std::env::current_exe().expect("テストの実行ファイルの場所が分かりません");
+        let parent = exe
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("target の場所が分かりません")
+            .join("ipc-search-index");
+        let stale = std::time::Duration::from_secs(24 * 60 * 60);
+        for entry in std::fs::read_dir(&parent).into_iter().flatten().flatten() {
+            let old = entry.metadata().and_then(|meta| meta.modified()).is_ok_and(|at| at.elapsed().is_ok_and(|age| age > stale));
+            if old {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+        let dir = parent.join(std::process::id().to_string());
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    })
+}
+
+/// フォルダの名前に使う、ほかのテストと重ならない文字列。
+fn uuid_like() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!("{}-{}-{}", std::process::id(), kiroscribe_core::time::now_ms(), NEXT.fetch_add(1, Ordering::SeqCst))
 }
 
 /// 模擬のアプリごとの、デバッグ用のログのフォルダ（テストの実行ファイルの隣、target の中）。
@@ -514,7 +555,7 @@ fn normalize(value: &Value) -> Value {
 /// 1 つのメソッドの見本。
 #[derive(Default)]
 struct MethodSamples {
-    /// 配列でない値（重複を除き、出てきた順）
+    /// 配列でない値（重複を除く。見本には並べ替えて出す）
     values: Vec<String>,
     /// 配列の値は、すべての呼び出しの要素をまとめて 1 つの配列にする
     array_items: Option<BTreeSet<String>>,
@@ -528,7 +569,9 @@ impl MethodSamples {
     }
 
     fn lines(&self) -> Vec<String> {
+        // 出てきた順ではなく、並べ替えた順にする（裏で進む処理のイベントは、届く順がその時々で変わるため）
         let mut lines = self.values.clone();
+        lines.sort();
         if let Some(items) = &self.array_items {
             lines.push(format!("[{}]", items.iter().cloned().collect::<Vec<_>>().join(",")));
         }
