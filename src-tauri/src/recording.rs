@@ -383,9 +383,14 @@ impl RecorderSink for TauriSink {
     }
 }
 
+/// 録音なしの状態を知らせる（止める処理の知らせが遅れて届いたときを確かめるテスト用）。
+#[cfg(test)]
+pub fn emit_status_for_test(app: &AppHandle) {
+    emit_status(app, &RecordingStatus::idle());
+}
+
 fn emit_status(app: &AppHandle, status: &RecordingStatus) {
     recording_changed(app, status.state);
-    crate::companion::recording_changed(app, status.note_id.as_deref(), status.state == RecordingState::Idle);
     let _ = app.emit(EVENT_STATUS, status.clone());
 }
 
@@ -514,6 +519,8 @@ async fn start_inner(app: &AppHandle, note_id: String, auto: Option<MeetingApp>)
         resumed_break: resumed_break.map(|added| added.id),
     };
     let status = recording.status();
+    // 録音のロックの中で、録音を始めたノートを検索から外す（前の録音を止める処理の知らせと前後しないように）
+    crate::companion::recording_started(app, &recording.note_id);
     *active = Some(recording);
     emit_status(app, &status);
     Ok(status)
@@ -631,9 +638,10 @@ pub(crate) async fn finish_stop(app: &AppHandle, taken: TakenRecording) -> Stopp
         }
     }
 
-    *recorder.finishing.lock().unwrap() = None;
-    // 止めたノートを、残りの文字起こしまで含めて過去のノートの索引に入れ直す（すぐに別の録音が始まっていても）
+    // 止めたノートを、残りの文字起こしまで含めて過去のノートの索引に入れ直す。仕上げ中のうちに行う
+    // （仕上げ中は次の録音を始められないので、同じノートの録音をすぐに始め直しても、そちらを検索に戻さない）
     crate::companion::recording_stopped(app, &stopped.note_id);
+    *recorder.finishing.lock().unwrap() = None;
     emit_status(app, &recorder.status().await);
     stopped
 }

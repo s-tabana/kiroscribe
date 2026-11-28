@@ -3,7 +3,7 @@
 //! 索引への読み書きは、1 本の作業用のスレッドだけが行う。画面の操作と録音は止めない。
 //! 相棒がオフのあいだは、索引を作らず、見張りもしない（オフにしたときは、索引の中身を消す）。
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -152,12 +152,10 @@ enum Message {
     Rescan,
     /// 見張りに失敗した（見張りが止まったことがある）。見張り直して、すべてのフォルダを調べ直す
     WatchFailed,
-    /// 過去のノートの索引を空にする（その世代の [`Message::SyncNote`] で入れ直す）
+    /// 過去のノートの索引を空にし、その世代で、すべてのノートを原本から読んで入れ直す
     ResetNotes(u64),
-    /// 入れ直している途中の世代の、ノート 1 件（世代が古ければ入れない）
-    SyncNote(u64, NoteDoc),
-    /// ノートが保存された
-    UpsertNote(NoteDoc),
+    /// ノートが保存された（原本から読み直して入れる）
+    NoteChanged(String),
     /// ノートが削除された
     RemoveNote(String),
     /// 作業用のスレッドを止める
@@ -177,6 +175,13 @@ struct Shared {
     recording_note: Option<String>,
     /// ノートの索引を空にできず、古い行が残っているかもしれない（空にし直せるまで、ノートを探さない）
     notes_stale: bool,
+    /// ノートの索引を空にし終えた世代。いまの世代と同じになるまで、ノートを探さない
+    /// （前回の起動で消せなかった削除済みのノートなど、前の世代の行を出さない）
+    notes_cleared: u64,
+    /// 索引の行が原本より古いかもしれないノート（読む・書くのに失敗した。入れ直せるまで検索に出さない）
+    unsynced_notes: HashSet<String>,
+    /// 索引を開けず、行を消せていないフォルダ（消し終えるまで検索に出さない）
+    hidden_folders: HashSet<PathBuf>,
     folders: Vec<SearchFolder>,
     /// 命令を出すたびに増やす。作っている途中の処理は、これが変わったら途中でやめ、古い状態を知らせない
     generation: u64,
@@ -198,8 +203,15 @@ struct Reader {
     blocks: usize,
 }
 
-/// ノートの索引が、ノートの入れ直し以外で空になったときに呼ぶもの（アプリが、すべてのノートを入れ直す）。
-type NotesLost = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+/// 過去のノートの原本（アプリのノートのデータベース）。作業用のスレッドが、ノートを 1 件ずつ読む。
+pub trait NoteSource: Send + Sync {
+    /// すべてのノートの ID。読めなければエラー（あとで読み直す）。
+    fn note_ids(&self) -> crate::error::Result<Vec<String>>;
+    /// ノート 1 件の中身。削除されていれば None。一部でも読めなければエラー（あとで読み直す）。
+    fn note(&self, note_id: &str) -> crate::error::Result<Option<NoteDoc>>;
+}
+
+type SharedSource = Arc<Mutex<Option<Arc<dyn NoteSource>>>>;
 
 struct Inner {
     tx: Sender<Message>,
@@ -209,7 +221,7 @@ struct Inner {
     thread: Mutex<Option<JoinHandle<()>>>,
     index_path: PathBuf,
     reader: Arc<Mutex<Reader>>,
-    notes_lost: NotesLost,
+    note_source: SharedSource,
 }
 
 impl Drop for Inner {
@@ -263,21 +275,24 @@ impl Indexer {
             removed_notes: HashSet::new(),
             recording_note: None,
             notes_stale: false,
+            notes_cleared: 0,
+            unsynced_notes: HashSet::new(),
+            hidden_folders: HashSet::new(),
             folders: Vec::new(),
             generation: 0,
         }));
         let order = Arc::new(Mutex::new(()));
         let reader = Arc::new(Mutex::new(Reader::default()));
-        let notes_lost: NotesLost = Arc::new(Mutex::new(None));
+        let note_source: SharedSource = Arc::new(Mutex::new(None));
         let mut worker = Worker::new(index_path.clone(), limits, intervals, shared.clone(), order.clone(), Arc::new(on_status), tx.clone());
         worker.reader = reader.clone();
-        worker.notes_lost = notes_lost.clone();
+        worker.note_source = note_source.clone();
         let thread = std::thread::Builder::new()
             .name("search-index".into())
             .spawn(move || worker.run(rx))
             .expect("索引の作業用のスレッドを起こせません");
         Self {
-            inner: Arc::new(Inner { tx, shared, order, thread: Mutex::new(Some(thread)), index_path, reader, notes_lost }),
+            inner: Arc::new(Inner { tx, shared, order, thread: Mutex::new(Some(thread)), index_path, reader, note_source }),
         }
     }
 }
@@ -315,16 +330,20 @@ impl Worker {
             unverified: HashSet::new(),
             last_retry: Instant::now(),
             last_note_retry: Instant::now(),
+            last_reopen: Instant::now(),
+            reopen_pending: false,
             // 前回の起動で、索引を検索から外せないまま終わっていたら、消し終えるまで検索せずに消し直す
             suspended: is_search_suspended(&index_path),
             rescan: false,
             unplaced: HashSet::new(),
             reader: Arc::new(Mutex::new(Reader::default())),
-            notes_lost: Arc::new(Mutex::new(None)),
+            note_source: Arc::new(Mutex::new(None)),
             pending_removals: BTreeSet::new(),
             notes_clear_pending: false,
-            fresh_notes: HashSet::new(),
-            fresh_generation: 0,
+            note_queue: VecDeque::new(),
+            queue_generation: 0,
+            list_pending: None,
+            note_retry: BTreeSet::new(),
             index_path,
         }
     }
@@ -429,7 +448,8 @@ impl Indexer {
     }
 
     /// 過去のノートの索引を作るかを決め、ノートの索引を空にする。戻り値は、入れ直しの世代。
-    /// 作るなら、呼び出し側が、その世代でノートを 1 件ずつ [`Indexer::sync_note`] で入れる。
+    /// 作るなら、作業用のスレッドが、原本（[`Indexer::set_note_source`]）からすべてのノートを 1 件ずつ読んで入れる。
+    /// 同じ鍵の中で世代を進めるので、空にし終えるまで、前の世代の行は検索に出ない。
     pub fn set_notes(&self, on: bool) -> u64 {
         let mut shared = self.inner.shared.lock().unwrap();
         shared.notes = on;
@@ -440,14 +460,9 @@ impl Indexer {
         generation
     }
 
-    /// いまの、過去のノートの索引の世代（入れ直しを始めるたびに進む）。
-    pub fn notes_generation(&self) -> u64 {
-        self.inner.shared.lock().unwrap().notes_generation
-    }
-
-    /// 入れ直している途中のノートを 1 件入れる（あとで別の入れ直しが始まっていたら、入れない）。
-    pub fn sync_note(&self, generation: u64, note: NoteDoc) {
-        let _ = self.inner.tx.send(Message::SyncNote(generation, note));
+    /// 過去のノートの原本を決める（ノートの索引を作る前に呼ぶ）。
+    pub fn set_note_source(&self, source: Arc<dyn NoteSource>) {
+        *self.inner.note_source.lock().unwrap() = Some(source);
     }
 
     /// 過去のノートの索引を作っているか。
@@ -456,10 +471,10 @@ impl Indexer {
         shared.enabled && shared.notes
     }
 
-    /// 保存されたノートを索引に反映する（ノートの索引を作っていなければ何もしない）。
-    pub fn note_saved(&self, note: NoteDoc) {
+    /// 保存されたノートを、原本から読み直して索引に反映する（ノートの索引を作っていなければ何もしない）。
+    pub fn note_saved(&self, note_id: &str) {
         if self.notes_enabled() {
-            let _ = self.inner.tx.send(Message::UpsertNote(note));
+            let _ = self.inner.tx.send(Message::NoteChanged(note_id.to_string()));
         }
     }
 
@@ -472,12 +487,6 @@ impl Indexer {
     /// 録音中のノートを決める（録音中のあいだ、そのノートを検索に出さない）。
     pub fn set_recording_note(&self, note_id: Option<&str>) {
         self.inner.shared.lock().unwrap().recording_note = note_id.map(str::to_string);
-    }
-
-    /// ノートの索引が、ノートの入れ直し以外で空になったとき（索引を検索から外せず、空にして作り直したとき）に呼ぶものを決める。
-    /// 作業用のスレッドから呼ぶので、中では待たずに、入れ直しを別のスレッドで始める。
-    pub fn on_notes_lost(&self, callback: impl Fn() + Send + Sync + 'static) {
-        *self.inner.notes_lost.lock().unwrap() = Some(Arc::new(callback));
     }
 
     /// 検索語で、指定したフォルダと過去のノートを探す（相棒がオフなら、何も見つからない）。
@@ -497,12 +506,22 @@ impl Indexer {
     ) -> (Vec<Hit>, Vec<NoteHit>) {
         // 接続の鍵を持ってからオンかを読む（オフにする処理が接続を閉じたあとに、開き直さないように）
         let mut reader = self.inner.reader.lock().unwrap();
-        let (enabled, notes, exclude) = {
+        let (enabled, notes, exclude, scope) = {
             let shared = self.inner.shared.lock().unwrap();
             let mut exclude: Vec<String> = shared.removed_notes.iter().cloned().collect();
+            exclude.extend(shared.unsynced_notes.iter().cloned());
             exclude.extend(shared.recording_note.iter().cloned());
             exclude.extend(exclude_note.map(str::to_string));
-            (shared.enabled, shared.notes && !shared.notes_stale, exclude)
+            // ノートは、いまの世代の索引を空にし終えてから探す
+            let notes = shared.notes && !shared.notes_stale && shared.notes_cleared == shared.notes_generation;
+            // フォルダの資料は、いま登録しているフォルダの、足したときの実体から読んだ行だけを探す
+            let scope: Vec<(String, String)> = shared
+                .folders
+                .iter()
+                .filter(|f| !shared.hidden_folders.contains(Path::new(&f.path)))
+                .filter_map(|f| Some((f.path.clone(), place_key(f.place.as_ref()?))))
+                .collect();
+            (shared.enabled, notes, exclude, scope)
         };
         // 索引を空にする・消す処理の途中は、接続を開かない
         if !enabled || reader.blocks > 0 || !self.inner.index_path.exists() {
@@ -520,7 +539,7 @@ impl Indexer {
         let Some(index) = reader.index.as_ref() else {
             return (Vec::new(), Vec::new());
         };
-        let hits = index.search(terms, limit).unwrap_or_default();
+        let hits = index.search_in(terms, &scope, limit).unwrap_or_default();
         let note_hits = if notes { index.search_notes_by(terms, &exclude, limit, note_key).unwrap_or_default() } else { Vec::new() };
         (hits, note_hits)
     }
@@ -581,6 +600,10 @@ struct Worker {
     unverified: HashSet<PathBuf>,
     last_retry: Instant,
     last_note_retry: Instant,
+    last_reopen: Instant,
+    /// 索引を開けなかった（書き込みのロック・容量不足・版の移行の失敗など。壊れてはいない）。開き直す間隔で開き直し、
+    /// 開けたら一覧と照らし合わせて読み直す（ファイルは消さない）
+    reopen_pending: bool,
     /// 索引の資料を検索から外せず、索引ごと消去待ちにしている（消し終えるまで検索しない。記録のファイルで、起動し直しても続く）
     suspended: bool,
     /// 索引を空にしたので、すべてのフォルダを読み直す
@@ -589,14 +612,18 @@ struct Worker {
     unplaced: HashSet<PathBuf>,
     /// 検索用の接続（索引を空にする・消すあいだは閉じて、開かせない）
     reader: Arc<Mutex<Reader>>,
-    notes_lost: NotesLost,
+    note_source: SharedSource,
     /// 索引から消せなかった、削除したノート（消し直す間隔で消し直す。そのあいだも検索には出さない）
     pending_removals: BTreeSet<String>,
-    /// ノートの索引を空にできなかった（消し直す間隔で空にし直し、空にできたら入れ直してもらう）
+    /// ノートの索引を空にできなかった（消し直す間隔で空にし直し、空にできたら入れ直す）
     notes_clear_pending: bool,
-    /// いまの世代で、保存の知らせから入れたノート（入れ直しで読んだ、それより古い中身で上書きしない）
-    fresh_notes: HashSet<String>,
-    fresh_generation: u64,
+    /// 入れ直している途中の、まだ読んでいないノートの ID（`queue_generation` の世代のもの。1 件ずつ読む）
+    note_queue: VecDeque<String>,
+    queue_generation: u64,
+    /// 一覧を読めず、入れ直しを始められていない世代（読み直す間隔で読み直す）
+    list_pending: Option<u64>,
+    /// 読めなかった・書けなかったノート（読み直す間隔で、原本から読み直す。そのあいだは検索に出さない）
+    note_retry: BTreeSet<String>,
 }
 
 /// 探すフォルダの行を、どの実体から読むかの記録（足したときの実体と、開いたフォルダの識別子）。
@@ -656,20 +683,31 @@ impl Worker {
         let mut pending: BTreeSet<PathBuf> = BTreeSet::new();
         let mut pending_since: Option<Instant> = None;
         let mut watch_failed = false;
+        // 最後に変更の知らせを受けた時刻（知らせが途切れて CHANGE_DEBOUNCE たったら反映する）
+        let mut last_change = Instant::now();
         loop {
             let timeout = match pending_since {
                 None if self.erasure == Erasure::Pending
                     || !self.unverified.is_empty()
                     || self.suspended
                     || !self.pending_removals.is_empty()
-                    || self.notes_clear_pending =>
+                    || self.notes_clear_pending
+                    || !self.note_retry.is_empty()
+                    || self.list_pending.is_some()
+                    || self.reopen_pending =>
                 {
                     self.intervals.root_check.min(self.intervals.poll).min(self.intervals.purge_retry)
                 }
                 None => self.intervals.root_check.min(self.intervals.poll),
-                Some(since) => CHANGE_DEBOUNCE.min(MAX_CHANGE_DELAY.saturating_sub(since.elapsed())),
+                Some(since) => CHANGE_DEBOUNCE.saturating_sub(last_change.elapsed()).min(MAX_CHANGE_DELAY.saturating_sub(since.elapsed())),
             };
-            let flush = match rx.recv_timeout(timeout) {
+            // 入れ直しの途中のノートがあれば待たずに 1 件ずつ読む（届いた命令・知らせは、そのあいだにも受ける）
+            let timeout = if self.note_queue.is_empty() { timeout } else { Duration::ZERO };
+            let received = rx.recv_timeout(timeout);
+            if matches!(received, Ok(Message::Rescan | Message::WatchFailed | Message::Changed(_))) {
+                last_change = Instant::now();
+            }
+            let flush = match received {
                 Ok(Message::Shutdown) | Err(RecvTimeoutError::Disconnected) => return,
                 Ok(Message::Rescan) => {
                     pending.extend(self.folders().iter().map(|folder| PathBuf::from(&folder.path)));
@@ -691,12 +729,8 @@ impl Worker {
                     self.reset_notes(generation);
                     false
                 }
-                Ok(Message::SyncNote(generation, note)) => {
-                    self.put_note(Some(generation), note);
-                    false
-                }
-                Ok(Message::UpsertNote(note)) => {
-                    self.put_note(None, note);
+                Ok(Message::NoteChanged(id)) => {
+                    self.load_note(&id, None);
                     false
                 }
                 Ok(Message::RemoveNote(id)) => {
@@ -716,7 +750,10 @@ impl Worker {
                     }
                     false
                 }
-                Err(RecvTimeoutError::Timeout) => true,
+                // 知らせが途切れたか、最初の知らせから MAX_CHANGE_DELAY たったら反映する
+                // （ノートを読むために待たずに戻ったときは、まだ反映しない）
+                Err(RecvTimeoutError::Timeout) => pending_since
+                    .is_none_or(|since| last_change.elapsed() >= CHANGE_DEBOUNCE || since.elapsed() >= MAX_CHANGE_DELAY),
             };
             if flush {
                 pending_since = None;
@@ -742,8 +779,17 @@ impl Worker {
                 self.last_retry = Instant::now();
                 self.invalidate_all();
             }
-            if (!self.pending_removals.is_empty() || self.notes_clear_pending) && self.last_note_retry.elapsed() >= self.intervals.purge_retry {
+            if (!self.pending_removals.is_empty() || self.notes_clear_pending || !self.note_retry.is_empty() || self.list_pending.is_some())
+                && self.last_note_retry.elapsed() >= self.intervals.purge_retry
+            {
                 self.retry_notes();
+            }
+            if let Some(id) = self.note_queue.pop_front() {
+                let generation = self.queue_generation;
+                self.load_note(&id, Some(generation));
+            }
+            if self.enabled() && self.reopen_pending && self.last_reopen.elapsed() >= self.intervals.purge_retry {
+                self.reopen();
             }
             if self.enabled() && std::mem::take(&mut self.rescan) {
                 let all = self.folders().iter().map(|folder| PathBuf::from(&folder.path)).collect();
@@ -865,7 +911,11 @@ impl Worker {
             self.erasure = Erasure::Unknown;
             match SearchIndex::open(&self.index_path) {
                 Ok(index) => self.index = Some(index),
-                Err(err) => eprintln!("資料の索引を開けません: {err}"),
+                Err(err) => {
+                    // 壊れていない索引は消さずに、あとで開き直す（[`SearchIndex::open`]）
+                    eprintln!("資料の索引を開けません（あとで開き直します）: {err}");
+                    self.reopen_pending = true;
+                }
             }
         }
         self.index.as_ref()
@@ -942,29 +992,39 @@ impl Worker {
         self.shared.lock().unwrap().notes_stale = stale;
     }
 
-    /// ノートの索引が、入れ直し以外で空になった。ノートの索引を作っていれば、アプリに入れ直してもらう。
-    fn notes_lost(&self) {
-        let on = {
+    /// ノートの索引が、入れ直し以外で空になった（索引を空にした・消した）。設定は変えず、ノートの索引を作っていれば、
+    /// いまの世代のまま原本から入れ直す（オンかと世代は、同じ鍵の中で読む。あいだにオフにされたら入れ直さない）。
+    fn notes_lost(&mut self) {
+        let generation = {
             let shared = self.shared.lock().unwrap();
-            shared.enabled && shared.notes
+            (shared.enabled && shared.notes).then_some(shared.notes_generation)
         };
-        let callback = self.notes_lost.lock().unwrap().clone();
-        if let (true, Some(callback)) = (on, callback) {
-            callback();
+        if let Some(generation) = generation {
+            self.list_notes(generation);
         }
     }
 
-    /// 索引の中身がすべてなくなった（空にした・ファイルを消した）。消し残したノートの処理も済んだことになる。
+    /// 索引の中身がすべてなくなった（空にした・ファイルを消した）。消し残したノートの処理も済み、いまの世代の
+    /// ノートの索引も空になったことになる。
     fn notes_erased(&mut self) {
         self.pending_removals.clear();
         self.notes_clear_pending = false;
-        self.set_notes_stale(false);
+        self.note_retry.clear();
+        self.note_queue.clear();
+        self.list_pending = None;
+        let mut shared = self.shared.lock().unwrap();
+        shared.notes_stale = false;
+        shared.unsynced_notes.clear();
+        shared.notes_cleared = shared.notes_cleared.max(shared.notes_generation);
     }
 
-    /// ノートの索引を空にする（`generation` の入れ直しの始まり）。空にできなければ、空にし直すまでノートを探さない。
+    /// ノートの索引を空にする（`generation` の入れ直しの始まり）。空にし終えたら、その世代の検索を許し、
+    /// 原本からすべてのノートを入れ直す。空にできなければ、空にし直すまでノートを探さない。
     fn reset_notes(&mut self, generation: u64) {
-        self.fresh_notes.clear();
-        self.fresh_generation = generation;
+        self.note_queue.clear();
+        self.note_retry.clear();
+        self.list_pending = None;
+        self.shared.lock().unwrap().unsynced_notes.clear();
         if !self.enabled() && self.index.is_none() && !self.index_path.exists() {
             self.notes_erased();
             return;
@@ -972,7 +1032,12 @@ impl Worker {
         match self.open_index().map(SearchIndex::clear_notes) {
             Some(Ok(())) => {
                 self.notes_clear_pending = false;
-                self.set_notes_stale(false);
+                {
+                    let mut shared = self.shared.lock().unwrap();
+                    shared.notes_stale = false;
+                    shared.notes_cleared = shared.notes_cleared.max(generation);
+                }
+                self.list_notes(generation);
             }
             other => {
                 if let Some(Err(err)) = other {
@@ -984,41 +1049,83 @@ impl Worker {
         }
     }
 
-    /// ノートを索引に入れる。`generation` は入れ直しの世代（保存の知らせなら None）。
-    /// 入れ直しが古い・ノートの索引を作っていない・削除した・録音中のノートは入れない。
-    fn put_note(&mut self, generation: Option<u64>, note: NoteDoc) {
+    /// `generation` の入れ直しを始める: 原本からすべてのノートの ID を読み、1 件ずつ読む列に並べる
+    /// （本文は、列から取り出すときに読む。すべての本文を一度に持たない）。
+    /// 一覧を読めなければ、読み直す間隔で読み直す。世代が替わった・ノートの索引をやめたときは、何もしない。
+    fn list_notes(&mut self, generation: u64) {
         let current = {
             let shared = self.shared.lock().unwrap();
-            let skip = !shared.enabled
-                || !shared.notes
-                || shared.removed_notes.contains(&note.note_id)
-                || generation.is_some_and(|g| g != shared.notes_generation)
-                || (generation.is_some() && shared.recording_note.as_deref() == Some(note.note_id.as_str()));
-            if skip {
-                return;
-            }
-            shared.notes_generation
+            shared.enabled && shared.notes && shared.notes_generation == generation
         };
-        if self.fresh_generation != current {
-            self.fresh_notes.clear();
-            self.fresh_generation = current;
-        }
-        if generation.is_some() && self.fresh_notes.contains(&note.note_id) {
+        if !current {
+            self.list_pending = None;
             return;
         }
-        if generation.is_none() {
-            self.fresh_notes.insert(note.note_id.clone());
-        }
-        if let Some(index) = self.open_index() {
-            if let Err(err) = index.upsert_note(&note) {
-                eprintln!("過去のノートを索引に入れられません: {err}");
+        let source = self.note_source.lock().unwrap().clone();
+        match source.map(|source| source.note_ids()) {
+            Some(Ok(ids)) => {
+                self.note_queue = ids.into();
+                self.queue_generation = generation;
+                self.list_pending = None;
             }
+            Some(Err(err)) => {
+                eprintln!("過去のノートの一覧を読めません（あとで読み直します）: {err}");
+                self.list_pending = Some(generation);
+            }
+            None => self.list_pending = Some(generation),
+        }
+    }
+
+    /// ノートを原本から読み、索引に入れる。`generation` は入れ直しの世代（保存の知らせ・読み直しなら None）。
+    /// 入れ直しが古い・ノートの索引を作っていない・削除した・録音中のノートは入れない。
+    /// 原本で削除されていたら、索引からも消す。読めない・書けないときは、そのノートを検索から外し（索引の行が
+    /// 古いかもしれない）、読み直す間隔で原本から読み直す。
+    fn load_note(&mut self, note_id: &str, generation: Option<u64>) {
+        let skip = {
+            let shared = self.shared.lock().unwrap();
+            !shared.enabled
+                || !shared.notes
+                || shared.removed_notes.contains(note_id)
+                || generation.is_some_and(|g| g != shared.notes_generation)
+                || shared.recording_note.as_deref() == Some(note_id)
+        };
+        if skip {
+            return;
+        }
+        let source = self.note_source.lock().unwrap().clone();
+        let loaded = match source {
+            Some(source) => source.note(note_id),
+            None => Err(crate::CoreError::Other("過去のノートの原本が決まっていません".into())),
+        };
+        let stored = match loaded {
+            Ok(Some(doc)) => self.open_index().map(|index| index.upsert_note(&doc)),
+            Ok(None) => {
+                self.shared.lock().unwrap().removed_notes.insert(note_id.to_string());
+                self.remove_note(note_id.to_string());
+                return;
+            }
+            Err(err) => {
+                eprintln!("過去のノートを読めません（あとで読み直します）: {err}");
+                None
+            }
+        };
+        if matches!(stored, Some(Ok(()))) {
+            self.note_retry.remove(note_id);
+            self.shared.lock().unwrap().unsynced_notes.remove(note_id);
+        } else {
+            if let Some(Err(err)) = stored {
+                eprintln!("過去のノートを索引に入れられません（あとで入れ直します）: {err}");
+            }
+            self.note_retry.insert(note_id.to_string());
+            self.shared.lock().unwrap().unsynced_notes.insert(note_id.to_string());
         }
     }
 
     /// 削除したノートを索引から消す。消せなければ、消し直す間隔で消し直す（そのあいだも検索には出さない）。
     fn remove_note(&mut self, note_id: String) {
-        self.fresh_notes.remove(&note_id);
+        self.note_retry.remove(&note_id);
+        self.note_queue.retain(|id| *id != note_id);
+        self.shared.lock().unwrap().unsynced_notes.remove(&note_id);
         if self.index.is_none() && !self.index_path.exists() {
             return;
         }
@@ -1031,9 +1138,18 @@ impl Worker {
         }
     }
 
-    /// 消せなかったノートと、空にできなかったノートの索引を、消し直す。
+    /// 読めなかったノートの一覧とノートを原本から読み直し、消せなかったノートと、空にできなかったノートの索引を、消し直す。
     fn retry_notes(&mut self) {
         self.last_note_retry = Instant::now();
+        if let Some(generation) = self.list_pending {
+            self.list_notes(generation);
+        }
+        for id in std::mem::take(&mut self.note_retry) {
+            self.load_note(&id, None);
+        }
+        if self.pending_removals.is_empty() && !self.notes_clear_pending {
+            return;
+        }
         if self.index.is_none() && !self.index_path.exists() {
             self.notes_erased();
             return;
@@ -1048,11 +1164,29 @@ impl Worker {
         let cleared = clear && index.clear_notes().is_ok();
         self.pending_removals = left;
         if cleared {
-            // 空にし直すあいだに入れたノートも消えたので、入れ直してもらう
+            // 空にし直すあいだに入れたノートも消えたので、いまの世代のまま入れ直す
             self.notes_clear_pending = false;
-            self.set_notes_stale(false);
+            {
+                let mut shared = self.shared.lock().unwrap();
+                shared.notes_stale = false;
+                shared.unsynced_notes.clear();
+                shared.notes_cleared = shared.notes_cleared.max(shared.notes_generation);
+            }
+            self.note_retry.clear();
             self.notes_lost();
         }
+    }
+
+    /// 開けなかった索引を開き直す。開けたら、一覧にないフォルダ・実体が替わったフォルダの行を外し、すべて調べ直す。
+    fn reopen(&mut self) {
+        self.last_reopen = Instant::now();
+        self.reopen_pending = false;
+        if self.open_index().is_none() {
+            return;
+        }
+        let folders = self.folders();
+        self.retire(&folders);
+        self.rescan = true;
     }
 
     /// 索引の中身を消し、ファイルも消す。消せなかったら、あとで消し直す。
@@ -1062,6 +1196,7 @@ impl Worker {
         self.unblock_reader();
         if self.erasure == Erasure::Erased {
             self.notes_erased();
+            self.shared.lock().unwrap().hidden_folders.clear();
         }
     }
 
@@ -1112,6 +1247,7 @@ impl Worker {
         self.unblock_reader();
         if reset {
             self.notes_erased();
+            self.shared.lock().unwrap().hidden_folders.clear();
         }
         reset
     }
@@ -1168,8 +1304,8 @@ impl Worker {
         self.incomplete.retain(is_listed);
         self.unplaced.retain(is_listed);
         let Some(index) = self.open_index() else {
-            // 索引を開けず、どのフォルダの行があるかを確かめられない
-            self.invalidate_all();
+            // 索引を開けず、どのフォルダの行があるかを確かめられない。ファイルは消さず、開き直してから外す
+            // （検索は、いま登録しているフォルダと実体が記録と一致する行だけを探すので、外したフォルダの行は出ない）
             return;
         };
         let folders = match index.folders() {
@@ -1204,17 +1340,21 @@ impl Worker {
     /// 消せたら true。
     fn erase_folder(&mut self, folder: &Path) -> bool {
         let Some(index) = self.open_index() else {
-            self.invalidate_all();
-            return !self.suspended;
+            // 索引を開けない（壊れてはいない）。ファイルは消さず、消し終えるまで検索に出さずに、あとで消し直す
+            self.shared.lock().unwrap().hidden_folders.insert(folder.to_path_buf());
+            self.unverified.insert(folder.to_path_buf());
+            return false;
         };
         // 行も記録もないと確かめられたときだけ、消すものがないとする（読めなければ消しにいく）
         if matches!(index.stored_rows(folder), Ok(0)) && matches!(index.binding(folder), Ok(None)) {
             self.unverified.remove(folder);
+            self.shared.lock().unwrap().hidden_folders.remove(folder);
             return true;
         }
         match index.remove_folder(folder) {
             Ok(()) => {
                 self.unverified.remove(folder);
+                self.shared.lock().unwrap().hidden_folders.remove(folder);
                 self.changes += 1;
                 true
             }
@@ -1866,9 +2006,57 @@ mod tests {
             removed_notes: HashSet::new(),
             recording_note: None,
             notes_stale: false,
+            notes_cleared: 0,
+            unsynced_notes: HashSet::new(),
+            hidden_folders: HashSet::new(),
             folders: Vec::new(),
             generation,
         }))
+    }
+
+    /// テスト用のノートの原本（一覧やノートを、読めなくすることもできる）。
+    #[derive(Default)]
+    struct MemoryNotes {
+        notes: Mutex<Vec<NoteDoc>>,
+        failing: std::sync::atomic::AtomicBool,
+    }
+
+    impl MemoryNotes {
+        fn with(notes: Vec<NoteDoc>) -> Arc<Self> {
+            Arc::new(Self { notes: Mutex::new(notes), ..Default::default() })
+        }
+
+        fn fail(&self, failing: bool) {
+            self.failing.store(failing, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl NoteSource for MemoryNotes {
+        fn note_ids(&self) -> crate::error::Result<Vec<String>> {
+            if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(crate::CoreError::Other("読めません".into()));
+            }
+            Ok(self.notes.lock().unwrap().iter().map(|n| n.note_id.clone()).collect())
+        }
+
+        fn note(&self, note_id: &str) -> crate::error::Result<Option<NoteDoc>> {
+            if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(crate::CoreError::Other("読めません".into()));
+            }
+            Ok(self.notes.lock().unwrap().iter().find(|n| n.note_id == note_id).cloned())
+        }
+    }
+
+    fn note_doc(id: &str, memo: &str) -> NoteDoc {
+        NoteDoc { note_id: id.into(), title: "定例".into(), created_at: 1, memo: memo.into(), minutes: String::new(), transcript: String::new() }
+    }
+
+    fn wait_until(what: &str, check: impl Fn() -> bool) {
+        let start = Instant::now();
+        while !check() {
+            assert!(start.elapsed() < Duration::from_secs(20), "{what} になりませんでした");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// オンかと世代を別々に読むと、あいだにオフにされたとき、新しい世代で消す前の「オフ」を知らせてしまう。
@@ -1965,37 +2153,137 @@ mod tests {
         assert!(!index_path.exists());
     }
 
-    /// 索引を検索から外せず、空にして作り直したときは、過去のノートも入れ直してもらう（フォルダだけを読み直さない）。
-    // [IDX-017]
+    /// 索引を検索から外せず、空にして作り直したときは、過去のノートも入れ直す（フォルダだけを読み直さない）。
+    /// 入れ直すときは設定を書き換えず、いまの世代のまま原本から読む（オフにされていたら、入れ直さない）。
+    // [IDX-016][IDX-017]
     #[test]
     fn notes_are_refilled_after_the_index_is_reset_by_recovery() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(INDEX_FILE_FOR_TEST);
         let state = shared(true, 1);
-        state.lock().unwrap().notes = true;
+        {
+            let mut shared = state.lock().unwrap();
+            shared.notes = true;
+            shared.notes_generation = 3;
+        }
         let mut worker = worker(path.clone(), state.clone(), Arc::new(Mutex::new(Vec::new())));
-        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counter = asked.clone();
-        *worker.notes_lost.lock().unwrap() = Some(Arc::new(move || {
-            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }));
-        worker.put_note(None, NoteDoc {
-            note_id: "a".into(),
-            title: "定例".into(),
-            created_at: 1,
-            memo: "予算".into(),
-            minutes: String::new(),
-            transcript: String::new(),
-        });
+        *worker.note_source.lock().unwrap() = Some(MemoryNotes::with(vec![note_doc("a", "予算")]));
+        worker.load_note("a", None);
         assert_eq!(worker.open_index().unwrap().count_notes().unwrap(), 1);
         worker.invalidate_all();
         assert_eq!(worker.open_index().unwrap().count_notes().unwrap(), 0);
-        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1, "入れ直しを求める");
+        assert_eq!(worker.note_queue, ["a"], "入れ直す");
+        assert_eq!(worker.queue_generation, 3, "いまの世代のまま");
+        {
+            let shared = state.lock().unwrap();
+            assert_eq!(shared.notes_generation, 3, "世代を進めない（設定を書き換えない）");
+            assert_eq!(shared.notes_cleared, 3, "空にし終えた");
+        }
 
-        // ノートの索引を作っていなければ、求めない
-        state.lock().unwrap().notes = false;
+        // 復旧の途中でオフにされていたら、オンに戻さず、入れ直さない
+        worker.note_queue.clear();
+        {
+            let mut shared = state.lock().unwrap();
+            shared.notes = false;
+            shared.notes_generation = 4;
+        }
         worker.invalidate_all();
-        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(worker.note_queue.is_empty());
+        assert!(!state.lock().unwrap().notes, "オフのまま");
+    }
+
+    /// ノートの索引をオンにしたら、その世代の索引を空にし終えるまで、ノートを探さない
+    /// （前回の起動で消せなかった削除済みのノートの行を、起動直後の全フォルダの走査のあいだに出さない）。
+    // [NOTE-015][IDX-017]
+    #[test]
+    fn notes_from_before_the_reset_are_not_searched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(INDEX_FILE_FOR_TEST);
+        {
+            let index = SearchIndex::open(&path).unwrap();
+            index.upsert_note(&note_doc("gone", "予算")).unwrap();
+            index.close().unwrap();
+        }
+        let folder = dir.path().join("資料");
+        std::fs::create_dir_all(&folder).unwrap();
+        for i in 0..300 {
+            std::fs::write(folder.join(format!("{i}.txt")), "本文").unwrap();
+        }
+        let indexer = Indexer::spawn(path.clone(), |_| {});
+        indexer.set_note_source(MemoryNotes::with(vec![note_doc("a", "予算")]));
+        indexer.enable(vec![SearchFolder::register(&folder).unwrap()]);
+        indexer.set_notes(true);
+        let found = || indexer.search(&["予算".to_string()], None, 8).1.into_iter().map(|h| h.note_id).collect::<Vec<_>>();
+        let start = Instant::now();
+        loop {
+            let ids = found();
+            assert!(!ids.contains(&"gone".to_string()), "空にする前の行を出さない");
+            if ids == ["a"] {
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(20), "{ids:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(indexer.shutdown_and_wait(Duration::from_secs(5)));
+    }
+
+    /// 一覧やノートを原本から読めないときは、読み直す。読めない・書けないノートは、読み直せるまで検索に出さない。
+    // [IDX-017]
+    #[test]
+    fn notes_that_cannot_be_read_are_read_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(INDEX_FILE_FOR_TEST);
+        let intervals = Intervals { purge_retry: Duration::from_millis(100), ..Default::default() };
+        let indexer = Indexer::spawn_with_intervals(path.clone(), Limits::default(), intervals, |_| {});
+        let source = MemoryNotes::with(vec![note_doc("a", "予算")]);
+        source.fail(true);
+        indexer.set_note_source(source.clone());
+        indexer.enable(Vec::new());
+        indexer.set_notes(true);
+        let found = |term: &str| indexer.search(&[term.to_string()], None, 8).1.into_iter().map(|h| h.note_id).collect::<Vec<_>>();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(found("予算").is_empty(), "一覧を読めない");
+        source.fail(false);
+        wait_until("一覧を読み直す", || found("予算") == ["a"]);
+
+        // 読めなかったノートは、古い行を検索に出さず、読めるようになったら原本の最新の中身を入れる
+        source.fail(true);
+        source.notes.lock().unwrap()[0].memo = "経費".into();
+        indexer.note_saved("a");
+        wait_until("古い行を出さない", || found("予算").is_empty());
+        assert!(found("経費").is_empty());
+        source.fail(false);
+        wait_until("読み直す", || found("経費") == ["a"]);
+        assert!(found("予算").is_empty());
+
+        // 原本で削除されていたら、索引からも消す
+        source.notes.lock().unwrap().clear();
+        indexer.note_saved("a");
+        wait_until("消す", || SearchIndex::open_existing(&path).unwrap().note_ids().unwrap().is_empty());
+        assert!(found("経費").is_empty());
+        assert!(indexer.shutdown_and_wait(Duration::from_secs(5)));
+    }
+
+    /// 同じパスに別の実体を登録し直したら、索引の行を外す前でも、前の実体の行は探さない。
+    // [IDX-027][IDX-034]
+    #[test]
+    fn rows_of_a_previous_place_at_the_same_path_are_not_searched() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("資料");
+        let other = dir.path().join("別");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(folder.join("a.txt"), "予算の資料").unwrap();
+        let indexer = Indexer::spawn(dir.path().join(INDEX_FILE_FOR_TEST), |_| {});
+        indexer.enable(vec![SearchFolder::register(&folder).unwrap()]);
+        let hits = || indexer.search(&["予算".to_string()], None, 8).0.len();
+        wait_until("索引ができる", || hits() == 1);
+        // 作業用のスレッドが行を外す前に、同じパスの登録が別の実体に替わった
+        indexer.inner.shared.lock().unwrap().folders[0].place = SearchFolder::register(&other).unwrap().place;
+        assert_eq!(hits(), 0);
+        indexer.inner.shared.lock().unwrap().folders.clear();
+        assert_eq!(hits(), 0, "外したフォルダの行も探さない");
+        assert!(indexer.shutdown_and_wait(Duration::from_secs(5)));
     }
 
     /// 索引を空にする・消すあいだは、検索用の接続を開かない（作り直す命令を出してから、作業用のスレッドが空にし終えるまで）。
@@ -2005,16 +2293,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(INDEX_FILE_FOR_TEST);
         let indexer = Indexer::spawn(path.clone(), |_| {});
+        indexer.set_note_source(MemoryNotes::with(vec![note_doc("a", "予算")]));
         indexer.enable(Vec::new());
-        let generation = indexer.set_notes(true);
-        indexer.sync_note(generation, NoteDoc {
-            note_id: "a".into(),
-            title: "定例".into(),
-            created_at: 1,
-            memo: "予算".into(),
-            minutes: String::new(),
-            transcript: String::new(),
-        });
+        indexer.set_notes(true);
         let found = || indexer.search(&["予算".to_string()], None, 8).1.len();
         let start = Instant::now();
         while found() != 1 {

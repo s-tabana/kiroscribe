@@ -574,7 +574,8 @@ fn past_notes_are_indexed_while_both_settings_are_on() {
 }
 
 /// 録音を始めたノートは、すぐに検索から外す（索引にある前の中身も出さない）。止め終えたら、止めたノートを入れ直す。
-/// 止めた直後に別のノートの録音が始まり、止まった状態を知らせる前に録音中の状態になっても、止めたノートを入れ直す。
+/// 止めた直後に別のノートの録音が始まり、A を止める処理の知らせ（録音なし）が B の開始のあとに届いても、
+/// B を検索に戻さない（索引の状態は、録音の開始と、止めたノートを指定した完了の処理だけで変える）。
 // [IDX-016][IDX-017]
 #[test]
 fn recording_notes_are_hidden_and_reindexed_when_stopped() {
@@ -612,17 +613,19 @@ fn recording_notes_are_hidden_and_reindexed_when_stopped() {
     wait_for("予算", both.clone());
 
     // A の録音を始めると、索引にある A は出さない。録音中の保存は、止めるまで入れない
-    crate::companion::recording_changed(app.handle(), Some(&a), false);
+    crate::companion::recording_started(app.handle(), &a);
     assert_eq!(search("予算"), vec![b.clone()]);
     invoke(&window, "update_note", json!({ "id": a, "patch": { "userNotes": "予算と交通費" } })).unwrap();
     assert!(search("交通費").is_empty());
 
-    // A を止めた直後に B の録音が始まり、止まった状態の知らせが B の録音中になった
-    crate::companion::recording_changed(app.handle(), Some(&b), false);
+    // A を止め終えてから B の録音が始まり、そのあとに A を止める処理の古い知らせ（録音なし）が届いた
     crate::companion::recording_stopped(app.handle(), &a);
+    crate::companion::recording_started(app.handle(), &b);
+    crate::recording::emit_status_for_test(app.handle());
     wait_for("交通費", vec![a.clone()]);
-    assert_eq!(search("予算"), vec![a.clone()], "B は録音中なので出さない");
-    crate::companion::recording_changed(app.handle(), None, true);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(search("予算"), vec![a.clone()], "B は録音中なので、古い知らせが届いても出さない");
+    crate::companion::recording_stopped(app.handle(), &b);
     wait_for("予算", both);
 }
 

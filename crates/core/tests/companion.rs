@@ -8,13 +8,39 @@ use std::time::{Duration, Instant};
 use kiroscribe_core::claude::{ClaudeClient, ANTHROPIC_VERSION};
 use kiroscribe_core::companion::{ai, candidates, Assistant, CurrentNote, JudgeInput, SourceKind};
 use kiroscribe_core::search::store::NoteDoc;
-use kiroscribe_core::search::{IndexState, Indexer, SearchFolder, INDEX_FILE};
+use kiroscribe_core::search::{IndexState, Indexer, NoteSource, SearchFolder, INDEX_FILE};
 use kiroscribe_core::transcript::Speaker;
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const KEY: &str = "sk-ant-test";
+
+/// テスト用のノートの原本。
+#[derive(Default)]
+struct MemoryNotes(std::sync::Mutex<Vec<NoteDoc>>);
+
+impl MemoryNotes {
+    fn with(notes: Vec<NoteDoc>) -> Arc<Self> {
+        Arc::new(Self(std::sync::Mutex::new(notes)))
+    }
+
+    fn put(&self, note: NoteDoc) {
+        let mut notes = self.0.lock().unwrap();
+        notes.retain(|n| n.note_id != note.note_id);
+        notes.push(note);
+    }
+}
+
+impl NoteSource for MemoryNotes {
+    fn note_ids(&self) -> kiroscribe_core::Result<Vec<String>> {
+        Ok(self.0.lock().unwrap().iter().map(|n| n.note_id.clone()).collect())
+    }
+
+    fn note(&self, note_id: &str) -> kiroscribe_core::Result<Option<NoteDoc>> {
+        Ok(self.0.lock().unwrap().iter().find(|n| n.note_id == note_id).cloned())
+    }
+}
 
 fn reply(answer: Value) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(json!({
@@ -180,10 +206,8 @@ fn folders_and_past_notes_are_searched_together() {
         minutes: minutes.into(),
         transcript: String::new(),
     };
-    let generation = indexer.set_notes(true);
-    for doc in [note("past", "経理の定例", "## 決定事項\n- 経費精算は新システムで行う"), note("now", "録音中", "経費精算")] {
-        indexer.sync_note(generation, doc);
-    }
+    indexer.set_note_source(MemoryNotes::with(vec![note("past", "経理の定例", "## 決定事項\n- 経費精算は新システムで行う"), note("now", "録音中", "経費精算")]));
+    indexer.set_notes(true);
     let start = Instant::now();
     loop {
         let (hits, notes) = indexer.search(&["経費精算".to_string()], Some("now"), 8);
@@ -217,11 +241,11 @@ fn deleted_and_recording_notes_leave_search_at_once() {
     let path = dir.path().join(INDEX_FILE);
     let intervals = kiroscribe_core::search::Intervals { purge_retry: Duration::from_millis(200), ..Default::default() };
     let indexer = Indexer::spawn_with_intervals(path.clone(), kiroscribe_core::search::walk::Limits::default(), intervals, |_| {});
-    indexer.enable(Vec::new());
     let note = |id: &str| NoteDoc { note_id: id.into(), title: "定例".into(), created_at: 1, memo: "予算".into(), minutes: String::new(), transcript: String::new() };
-    let generation = indexer.set_notes(true);
-    indexer.sync_note(generation, note("a"));
-    indexer.sync_note(generation, note("b"));
+    let source = MemoryNotes::with(vec![note("a"), note("b")]);
+    indexer.set_note_source(source.clone());
+    indexer.enable(Vec::new());
+    indexer.set_notes(true);
     let found = || {
         let mut ids: Vec<String> = indexer.search(&["予算".to_string()], None, 8).1.into_iter().map(|h| h.note_id).collect();
         ids.sort();
@@ -251,10 +275,10 @@ fn deleted_and_recording_notes_leave_search_at_once() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // 削除の前に読んだ中身が、あとから届いても入れない
-    indexer.sync_note(generation, note("a"));
-    indexer.note_saved(note("a"));
-    indexer.note_saved(NoteDoc { memo: "予算と経費".into(), ..note("b") });
+    // 削除したノートの保存の知らせが、あとから届いても入れない
+    indexer.note_saved("a");
+    source.put(NoteDoc { memo: "予算と経費".into(), ..note("b") });
+    indexer.note_saved("b");
     let start = Instant::now();
     while indexer.search(&["経費".to_string()], None, 8).1.is_empty() {
         assert!(start.elapsed() < Duration::from_secs(20));
@@ -271,7 +295,8 @@ fn previous_meeting_survives_the_candidate_limit() {
     let dir = tempfile::tempdir().unwrap();
     let indexer = Indexer::spawn(dir.path().join(INDEX_FILE), |_| {});
     indexer.enable(Vec::new());
-    let generation = indexer.set_notes(true);
+    let source = MemoryNotes::with(Vec::new());
+    indexer.set_note_source(source.clone());
     let note = |id: &str, title: &str, created_at: i64, memo: &str| NoteDoc {
         note_id: id.into(),
         title: title.into(),
@@ -281,9 +306,10 @@ fn previous_meeting_survives_the_candidate_limit() {
         transcript: String::new(),
     };
     for i in 0..9 {
-        indexer.sync_note(generation, note(&format!("n{i}"), "採用面談", 1_000 + i, "予算 経費 精算"));
+        source.put(note(&format!("n{i}"), "採用面談", 1_000 + i, "予算 経費 精算"));
     }
-    indexer.sync_note(generation, note("prev", "週次定例（11月20日）", 500, "予算"));
+    source.put(note("prev", "週次定例（11月20日）", 500, "予算"));
+    indexer.set_notes(true);
     let current = CurrentNote { id: "now".into(), title: "週次定例（11月27日）".into(), created_at: 10_000 };
     let terms = vec!["予算".to_string(), "経費".to_string(), "精算".to_string()];
     let start = Instant::now();

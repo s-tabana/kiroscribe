@@ -7,14 +7,19 @@ use super::normalize::fold;
 
 const SCHEMES: [&str; 2] = ["https://", "http://"];
 
-/// URL の終わりとみなす文字（空白・引用符・山括弧・全角の丸括弧と、全角の英数・記号を除く ASCII でない文字。
-/// 文の中の URL は、ふつう「https://a.jp/x?k=1を見る」のように日本語の文が続くため）。
+/// URL の終わりとみなす文字（空白・ASCII の二重引用符と山括弧・全角の括弧と鉤括弧）。
+/// 日本語などの ASCII でない文字とアポストロフィは、URL のパスやクエリの値にも現れるため、URL の一部として扱う。
+/// そのため「https://a.jp/x?k=1を見る」のように文が続くときは、URL とその後ろの文の境界を判別できない。
+/// 送るための文字列では、クエリとフラグメントを、その後ろの文ごと保守的に省く（クエリの値を送らないように）。
 fn ends_url(c: char) -> bool {
-    if matches!(c, '（' | '）') {
+    if matches!(
+        c,
+        '（' | '）' | '［' | '］' | '｛' | '｝' | '「' | '」' | '『' | '』' | '【' | '】' | '〈' | '〉' | '《' | '》' | '〔' | '〕'
+    ) {
         return true;
     }
     let c = fold(c);
-    c.is_whitespace() || !c.is_ascii() || matches!(c, '"' | '\'' | '<' | '>')
+    c.is_whitespace() || c.is_control() || matches!(c, '"' | '<' | '>')
 }
 
 /// `chars[at..]` が URL の始まりなら、スキームの文字数。
@@ -67,12 +72,27 @@ mod tests {
     // [CMP-043]
     #[test]
     fn queries_are_found_regardless_of_case_and_width() {
-        assert_eq!(strip_queries("見て https://a.example.com/x?y=1#z と http://b.example.com/p#frag。"), "見て https://a.example.com/x と http://b.example.com/p。");
+        assert_eq!(strip_queries("見て https://a.example.com/x?y=1#z と http://b.example.com/p#frag。"), "見て https://a.example.com/x と http://b.example.com/p");
         assert_eq!(strip_queries("HTTPS://A.example.com/x?token=1 と Http://b/c#d"), "HTTPS://A.example.com/x と Http://b/c");
         assert_eq!(strip_queries("ｈｔｔｐｓ：／／ａ．ｊｐ／ｘ？ｔｏｋｅｎ＝１ を見る"), "ｈｔｔｐｓ：／／ａ．ｊｐ／ｘ を見る");
         assert_eq!(strip_queries("URL なし。?や#は残す"), "URL なし。?や#は残す");
         assert_eq!(strip_queries("（https://a.jp/x?k=1）"), "（https://a.jp/x）");
-        assert_eq!(strip_queries("https://a.jp/x?k=1を見る。"), "https://a.jp/xを見る。");
+        assert_eq!(strip_queries("「https://a.jp/x#y」を開く"), "「https://a.jp/x」を開く");
         assert_eq!(strip_queries("<https://a.jp/x#y>"), "<https://a.jp/x>");
+    }
+
+    /// 日本語のパス・クエリの値、アポストロフィを含む URL も、クエリとフラグメントを残さない。
+    /// URL と後ろの文の境界を判別できないときは、後ろの文ごと省く。
+    // [CMP-043]
+    #[test]
+    fn queries_after_non_ascii_or_apostrophes_are_dropped() {
+        assert_eq!(strip_queries("https://example.test/資料?token=EXAMPLE"), "https://example.test/資料");
+        assert_eq!(strip_queries("https://example.test/x?q=東京&token=EXAMPLE を見る"), "https://example.test/x を見る");
+        assert_eq!(strip_queries("https://example.test/x?q=it's&token=EXAMPLE"), "https://example.test/x");
+        assert_eq!(strip_queries("https://example.test/x?k=1を見る。次も"), "https://example.test/x");
+        assert_eq!(strip_queries("https://example.test/議事録#token=EXAMPLE、以上"), "https://example.test/議事録");
+        for text in ["https://example.test/資料?token=EXAMPLE", "x https://example.test/a?q=日本&token=EXAMPLE。", "https://example.test/x?q=it's&token=EXAMPLE"] {
+            assert!(!strip_queries(text).contains("EXAMPLE"), "{text}");
+        }
     }
 }

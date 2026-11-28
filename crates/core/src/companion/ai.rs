@@ -12,6 +12,7 @@ use crate::claude::ClaudeClient;
 use crate::error::{CoreError, Result};
 use crate::retry::is_retryable;
 use crate::search::normalize::normalize;
+use crate::search::url::strip_queries;
 use crate::transcript::Speaker;
 
 /// 判定・選択を打ち切るまでの時間（再試行を含む）。
@@ -121,17 +122,20 @@ pub fn context_utterances(previous: &[(Speaker, String)]) -> Vec<(Speaker, Strin
     picked
 }
 
+/// 判定の要求の本文。題名・発言の中の URL は、クエリとフラグメントを除いて送る（CMP-043）。
+/// 組み立てたあとの本文全体も、同じ形に整える（どの欄から入った URL も送らないように）。
 pub fn judge_user_message(input: &JudgeInput) -> String {
-    let mut out = format!("ノートの題名: {}\n", if input.note_title.trim().is_empty() { "（なし）" } else { input.note_title.trim() });
+    let title = strip_queries(input.note_title.trim());
+    let mut out = format!("ノートの題名: {}\n", if title.trim().is_empty() { "（なし）" } else { title.trim() });
     let context = context_utterances(&input.previous);
     if !context.is_empty() {
         out.push_str("直前の発言（古い順）:\n");
         for (speaker, text) in &context {
-            out.push_str(&format!("- {}: {}\n", speaker_label(*speaker), text));
+            out.push_str(&format!("- {}: {}\n", speaker_label(*speaker), strip_queries(text)));
         }
     }
-    out.push_str(&format!("判定する発言: {}: {}", speaker_label(input.speaker), input.text));
-    out
+    out.push_str(&format!("判定する発言: {}: {}", speaker_label(input.speaker), strip_queries(&input.text)));
+    strip_queries(&out)
 }
 
 pub fn judge_schema() -> Value {
@@ -161,8 +165,10 @@ pub fn select_schema() -> Value {
     })
 }
 
+/// 選択の要求の本文。発言・探すもの・候補の題名・場所・抜粋の中の URL は、クエリとフラグメントを除いて送る（CMP-043）。
+/// 組み立てたあとの本文全体も、同じ形に整える。
 pub fn select_user_message(utterance: &str, target: &str, candidates: &[Candidate]) -> String {
-    let mut out = format!("発言: {utterance}\n探すもの: {target}\n候補:\n");
+    let mut out = format!("発言: {}\n探すもの: {}\n候補:\n", strip_queries(utterance), strip_queries(target));
     for (i, c) in candidates.iter().enumerate() {
         let source = match c.kind {
             super::candidates::SourceKind::Folder => "ローカルのフォルダ",
@@ -177,7 +183,7 @@ pub fn select_user_message(utterance: &str, target: &str, candidates: &[Candidat
             None => out.push_str("抜粋: （なし）\n"),
         }
     }
-    out
+    strip_queries(&out)
 }
 
 /// 決まった形の出力を求める `POST /messages` の本文（モデルは送るときに入れる）。
@@ -384,6 +390,32 @@ mod tests {
         assert!(!message.contains("token=1"));
         assert!(message.contains("[3] 題名: HTTPS://Sheets.example.com/s\n"), "題名の中の URL も整える: {message}");
         assert!(!message.contains("Key=9"), "場所の中の URL も整える");
+    }
+
+    /// 判定と選択の要求は、題名・発言・直前の発言・探すものの中の URL も、クエリとフラグメントを除いて送る。
+    // [CMP-043]
+    #[test]
+    fn every_request_field_drops_url_queries() {
+        let judge = judge_user_message(&JudgeInput {
+            note_title: "https://meet.example.test/abc?pwd=TITLESECRET の定例".into(),
+            speaker: Speaker::Them,
+            text: "資料は https://example.test/資料?token=TEXTSECRET を見て".into(),
+            previous: vec![(Speaker::Me, "前に https://docs.example.test/d#key=PREVSECRET を貼った".into())],
+        });
+        for secret in ["TITLESECRET", "TEXTSECRET", "PREVSECRET", "pwd=", "token="] {
+            assert!(!judge.contains(secret), "{secret}: {judge}");
+        }
+        assert!(judge.contains("https://meet.example.test/abc") && judge.contains("https://example.test/資料"), "{judge}");
+
+        let select = select_user_message(
+            "https://wiki.example.test/x?q=it's&sig=UTTERSECRET の続き",
+            "https://example.test/表?k=TARGETSECRET",
+            &[candidate("https://example.test/題名?id=CANDSECRET", Some("本文 https://example.test/抜粋?t=EXCERPTSECRET"))],
+        );
+        for secret in ["UTTERSECRET", "TARGETSECRET", "CANDSECRET", "EXCERPTSECRET"] {
+            assert!(!select.contains(secret), "{secret}: {select}");
+        }
+        assert!(select.contains("発言: https://wiki.example.test/x の続き\n"), "{select}");
     }
 
     // [CMP-014]

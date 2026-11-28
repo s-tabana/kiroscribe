@@ -13,7 +13,7 @@ pub mod store;
 pub mod url;
 pub mod walk;
 
-pub use indexer::{FolderStatus, IndexState, IndexStatus, Indexer, Intervals, SearchFolder};
+pub use indexer::{FolderStatus, IndexState, IndexStatus, Indexer, Intervals, NoteSource, SearchFolder};
 pub use store::{Hit, SearchIndex, INDEX_FILE};
 
 use crate::db::Database;

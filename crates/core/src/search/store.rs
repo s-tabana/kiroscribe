@@ -15,8 +15,6 @@ use crate::error::Result;
 pub const INDEX_FILE: &str = "search-index.db";
 /// 抜粋の長さの上限（文字）。
 pub const EXCERPT_CHARS: usize = 600;
-/// 抜粋の位置を決めるときに数える、1 つの検索語の一致の数の上限。
-const MAX_HITS_PER_TERM: usize = 5_000;
 
 const SCHEMA_VERSION: i64 = 4;
 /// 過去のノートの表がない版（指定したフォルダの資料と、どの実体から読んだかの記録だけを持つ）。
@@ -198,18 +196,34 @@ pub fn remove_index_files(path: &Path) -> std::io::Result<()> {
     result
 }
 
+/// 索引が壊れていることを表すエラーの文。
+const CORRUPT: &str = "索引が壊れています";
+
+/// 索引が壊れていると確かめられたエラーか（SQLite のファイルでない・壊れている・中身の検査に通らない）。
+fn is_corrupt(err: &crate::CoreError) -> bool {
+    match err {
+        crate::CoreError::Database(rusqlite::Error::SqliteFailure(failure, _)) => {
+            matches!(failure.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+        }
+        crate::CoreError::Other(message) => message == CORRUPT,
+        _ => false,
+    }
+}
+
 impl SearchIndex {
-    /// 索引を開く（なければ作る）。開けない・壊れているときは、ファイルを消して作り直す。
+    /// 索引を開く（なければ作る）。壊れている（SQLite のファイルでない・中身の検査に通らない）ときだけ、ファイルを消して作り直す。
+    /// 書き込みのロック・容量不足・版の移行の失敗など、壊れていると確かめられない失敗では、ファイルを残してエラーにする
+    /// （接続していないドライブの資料など、読み直せない行を消さないように。呼び出し側が、あとで開き直す）。
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         match Self::try_open(path) {
-            Ok(index) => Ok(index),
-            Err(_) => {
+            Err(err) if is_corrupt(&err) => {
                 let _ = remove_index_files(path);
                 Self::try_open(path)
             }
+            other => other,
         }
     }
 
@@ -245,7 +259,7 @@ impl SearchIndex {
         let conn = Connection::open(path)?;
         let ok: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
         if ok != "ok" {
-            return Err(crate::CoreError::Other("索引が壊れています".into()));
+            return Err(crate::CoreError::Other(CORRUPT.into()));
         }
         conn.pragma_update(None, "journal_mode", "WAL")?;
         Self::init(conn, Some(path.to_path_buf()), epoch)
@@ -422,6 +436,17 @@ impl SearchIndex {
     /// 消去待ちの索引（[`suspend_search`]）と、索引のファイルを消す前に開いた接続からは、何も返さない
     /// （開き直した接続で検索する）。
     pub fn search(&self, terms: &[String], limit: usize) -> Result<Vec<Hit>> {
+        self.search_scoped(terms, None, limit)
+    }
+
+    /// [`SearchIndex::search`] と同じく探し、`scope` のフォルダの行だけを返す。`scope` は、いま登録しているフォルダと、
+    /// その足したときの実体（索引の記録 `bindings.place` と同じ形）の組。記録の実体が一致するフォルダの行だけを、
+    /// 件数を絞る前に選ぶ（外したフォルダ・別の実体を同じパスに登録し直したフォルダの古い行で、上限を埋めないように）。
+    pub fn search_in(&self, terms: &[String], scope: &[(String, String)], limit: usize) -> Result<Vec<Hit>> {
+        self.search_scoped(terms, Some(scope), limit)
+    }
+
+    fn search_scoped(&self, terms: &[String], scope: Option<&[(String, String)]>, limit: usize) -> Result<Vec<Hit>> {
         // 検索を終えるまで、索引のファイルを消させない
         let epochs = EPOCHS.read().unwrap_or_else(|e| e.into_inner());
         if let Some(path) = self.path.as_deref() {
@@ -432,21 +457,37 @@ impl SearchIndex {
         let mut terms: Vec<String> = terms.iter().map(|t| normalize(t.trim())).filter(|t| !t.is_empty()).collect();
         terms.sort();
         terms.dedup();
-        if terms.is_empty() || limit == 0 {
+        if terms.is_empty() || limit == 0 || scope.is_some_and(<[_]>::is_empty) {
             return Ok(Vec::new());
         }
+        let n = terms.len();
         let any = |i: usize| format!("(instr(norm_title, ?{i}) > 0 OR instr(norm_name, ?{i}) > 0 OR instr(norm_body, ?{i}) > 0)");
         let in_name = |i: usize| format!("(instr(norm_title, ?{i}) > 0 OR instr(norm_name, ?{i}) > 0)");
-        let matched = (1..=terms.len()).map(any).collect::<Vec<_>>().join(" + ");
-        let named = (1..=terms.len()).map(in_name).collect::<Vec<_>>().join(" OR ");
+        let matched = (1..=n).map(any).collect::<Vec<_>>().join(" + ");
+        let named = (1..=n).map(in_name).collect::<Vec<_>>().join(" OR ");
+        let bound = match scope {
+            None => "SELECT folder FROM bindings".to_string(),
+            Some(scope) => {
+                let pairs = (0..scope.len())
+                    .map(|j| format!("(folder = ?{} AND place = ?{})", n + 2 * j + 1, n + 2 * j + 2))
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                format!("SELECT folder FROM bindings WHERE {pairs}")
+            }
+        };
         let sql = format!(
             "SELECT path, folder, title, file_name, body, name_only, modified, matched, named FROM (
                SELECT path, folder, title, file_name, body, name_only, modified, ({matched}) AS matched, ({named}) AS named FROM docs
-               WHERE folder IN (SELECT folder FROM bindings)
+               WHERE folder IN ({bound})
              ) WHERE matched > 0 ORDER BY matched DESC, named DESC, modified DESC LIMIT {limit}"
         );
+        let values: Vec<&str> = terms
+            .iter()
+            .map(String::as_str)
+            .chain(scope.unwrap_or_default().iter().flat_map(|(folder, place)| [folder.as_str(), place.as_str()]))
+            .collect();
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(terms.iter()), |row| {
+        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
             let name_only: bool = row.get(5)?;
             let body: String = row.get(4)?;
             let cut = if name_only { None } else { cut_excerpt(&body, &terms, EXCERPT_CHARS) };
@@ -681,32 +722,33 @@ fn scored_excerpt(body: &str, terms: &[String], max_chars: usize) -> Option<(Sco
     }
     let (normalized, map) = normalize_with_map(&body);
     let normalized: Vec<char> = normalized.chars().collect();
-    // 一致した位置（元の文字の位置。始まりと終わり）と、どの検索語か
-    let mut hits: Vec<(usize, usize, usize)> = Vec::new();
-    for (index, term) in terms.iter().enumerate() {
-        let needle: Vec<char> = term.chars().collect();
-        if needle.is_empty() || needle.len() > normalized.len() {
-            continue;
-        }
-        // 語ごとに上限を付ける（よく出る語が、ほかの語の一致を数えさせなくしないように）
-        let mut found = 0;
-        let mut i = 0;
-        while i + needle.len() <= normalized.len() && found < MAX_HITS_PER_TERM {
+    let needles: Vec<Vec<char>> = terms.iter().map(|term| term.chars().collect()).collect();
+    // 一致した位置（元の文字の位置。始まりと終わり）と、どの検索語かを、始まりの順に作り、幅 `max_chars` の窓で数える
+    // （一致の数に上限を付けず、本文の終わりまで、最も集まっている部分を探す。窓から出た一致は捨てる）
+    let mut window = Densest::new(terms.len(), max_chars);
+    // 語ごとに、次に一致を探してよい位置（同じ語の一致は重ねない）
+    let mut next_at = vec![0usize; needles.len()];
+    let mut at_once: Vec<(usize, usize, usize)> = Vec::new();
+    for i in 0..normalized.len() {
+        at_once.clear();
+        for (index, needle) in needles.iter().enumerate() {
+            if needle.is_empty() || i < next_at[index] || i + needle.len() > normalized.len() {
+                continue;
+            }
             if normalized[i..i + needle.len()] == needle[..] {
                 let end = map.get(i + needle.len()).copied().unwrap_or(original.len());
-                hits.push((map[i], end, index));
-                found += 1;
-                i += needle.len();
-            } else {
-                i += 1;
+                at_once.push((map[i], end, index));
+                next_at[index] = i + needle.len();
             }
         }
+        at_once.sort();
+        for &hit in &at_once {
+            window.push(hit);
+        }
     }
-    hits.sort();
-    let (score, start, end) = match densest(&hits, terms.len(), max_chars) {
+    let (score, start, end) = match window.finish() {
         None => ((0, 0), 0, original.len().min(max_chars)),
-        Some((score, first, last)) => {
-            let (from, to) = (hits[first].0, hits[last].1.max(hits[first].1));
+        Some((score, from, to)) => {
             let center = (from + to) / 2;
             let start = center.saturating_sub(max_chars / 2);
             let end = (start + max_chars).min(original.len());
@@ -732,34 +774,57 @@ fn scored_excerpt(body: &str, terms: &[String], max_chars: usize) -> Option<(Sco
     Some((score, Excerpt { text, send }))
 }
 
-/// 幅 `max_chars` の中に入る一致の並びのうち、異なる検索語の数、一致の数の順に最も多いもの（多さ、最初、最後）。
-fn densest(hits: &[(usize, usize, usize)], terms: usize, max_chars: usize) -> Option<(Score, usize, usize)> {
-    let mut best: Option<(Score, usize, usize)> = None;
-    let mut counts = vec![0usize; terms];
-    let mut distinct = 0;
-    // 窓に入っている一致は hits[first..next]
-    let mut next = 0;
-    for first in 0..hits.len() {
-        if next <= first {
-            next = first;
-        }
-        while next < hits.len() && (next == first || hits[next].1 - hits[first].0 <= max_chars) {
-            counts[hits[next].2] += 1;
-            if counts[hits[next].2] == 1 {
-                distinct += 1;
+/// 幅 `max_chars` の中に入る一致の並びのうち、異なる検索語の数、一致の数の順に最も多いもの（同じなら最初のもの）を、
+/// 始まりの順に届く一致から求める。窓は、先頭の一致から、終わりが先頭の始まりから `max_chars` 以内の一致まで。
+/// 窓に入らなくなった先頭の一致は、その窓の多さを比べてから捨てる（持つのは、窓の中の一致だけ）。
+struct Densest {
+    max_chars: usize,
+    window: std::collections::VecDeque<(usize, usize, usize)>,
+    counts: Vec<usize>,
+    distinct: usize,
+    /// これまでで最も多い窓（多さ、最初の一致の始まり、最後の一致の終わり）
+    best: Option<(Score, usize, usize)>,
+}
+
+impl Densest {
+    fn new(terms: usize, max_chars: usize) -> Self {
+        Self { max_chars, window: std::collections::VecDeque::new(), counts: vec![0; terms], distinct: 0, best: None }
+    }
+
+    fn push(&mut self, hit: (usize, usize, usize)) {
+        while let Some(&first) = self.window.front() {
+            if hit.1.saturating_sub(first.0) <= self.max_chars {
+                break;
             }
-            next += 1;
+            self.close_first();
         }
-        let score = (distinct, next - first);
-        if best.is_none_or(|(b, _, _)| score > b) {
-            best = Some((score, first, next - 1));
+        self.counts[hit.2] += 1;
+        if self.counts[hit.2] == 1 {
+            self.distinct += 1;
         }
-        counts[hits[first].2] -= 1;
-        if counts[hits[first].2] == 0 {
-            distinct -= 1;
+        self.window.push_back(hit);
+    }
+
+    /// 先頭の一致から始まる窓の多さを比べ、先頭の一致を捨てる。
+    fn close_first(&mut self) {
+        let (Some(&first), Some(&last)) = (self.window.front(), self.window.back()) else { return };
+        let score = (self.distinct, self.window.len());
+        if self.best.is_none_or(|(b, _, _)| score > b) {
+            self.best = Some((score, first.0, last.1.max(first.1)));
+        }
+        self.window.pop_front();
+        self.counts[first.2] -= 1;
+        if self.counts[first.2] == 0 {
+            self.distinct -= 1;
         }
     }
-    best
+
+    fn finish(mut self) -> Option<(Score, usize, usize)> {
+        while !self.window.is_empty() {
+            self.close_first();
+        }
+        self.best
+    }
 }
 
 #[cfg(test)]
@@ -1092,9 +1157,88 @@ mod tests {
         assert_eq!(excerpt(&spaced, &terms(&["どこにもない"]), EXCERPT_CHARS).unwrap(), "経費の手順");
 
         // よく出る語があっても、ほかの語が集まっている部分を選ぶ
-        let body = format!("{}経費と精算と申請", format!("また{}", "ー".repeat(30)).repeat(MAX_HITS_PER_TERM + 10));
+        let body = format!("{}経費と精算と申請", format!("また{}", "ー".repeat(30)).repeat(5_010));
         let text = excerpt(&body, &terms(&["また", "経費", "精算", "申請"]), 20).unwrap();
         assert!(text.contains("経費と精算と申請"), "{text}");
+    }
+
+    /// 同じ語が本文の前のほうに疎らに何千回も出ても、後ろの 600 文字に集まった部分を選ぶ（一致の数で打ち切らない）。
+    // [IDX-015][IDX-019]
+    #[test]
+    fn excerpt_finds_the_densest_part_after_many_sparse_hits() {
+        let sparse = format!("予算{}", "ー".repeat(120)).repeat(5_100);
+        let dense = format!("{}ここが本題{}", "予算 ".repeat(100), "ー".repeat(700));
+        let body = format!("{sparse}{dense}");
+        let text = excerpt(&body, &terms(&["予算"]), EXCERPT_CHARS).unwrap();
+        assert!(text.matches("予算").count() >= 90, "密な部分を選ぶ: {}", text.matches("予算").count());
+    }
+
+    /// 検索の範囲を、いま登録しているフォルダと実体の組に絞る。絞るのは件数の上限より前。
+    // [IDX-027][IDX-034][CMP-012]
+    #[test]
+    fn scoped_search_matches_the_registered_place_before_the_limit() {
+        let index = SearchIndex::open_in_memory().unwrap();
+        let old = Path::new("/data/old");
+        let kept = Path::new("/data/kept");
+        index.rebind(old, &Binding { place: "old-place".into(), root: "1:1".into() }).unwrap();
+        index.rebind(kept, &Binding { place: "kept-place".into(), root: "1:2".into() }).unwrap();
+        for i in 0..8 {
+            index.upsert(old, &entry(&format!("/data/old/{i}.txt"), 10 + i), &content(None, "予算 経費 精算")).unwrap();
+        }
+        index.upsert(kept, &entry("/data/kept/a.txt", 1), &content(None, "予算")).unwrap();
+        let terms = terms(&["予算", "経費", "精算"]);
+        assert!(index.search(&terms, 8).unwrap().iter().all(|h| h.folder == old), "絞らなければ、外したフォルダの行で上限が埋まる");
+        let scope = vec![("/data/kept".to_string(), "kept-place".to_string())];
+        let hits = index.search_in(&terms, &scope, 8).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].folder, kept);
+        // 同じパスに別の実体を登録し直したときは、古い実体の行を返さない
+        let rebound = vec![("/data/old".to_string(), "new-place".to_string()), ("/data/kept".to_string(), "kept-place".to_string())];
+        assert!(index.search_in(&terms, &rebound, 8).unwrap().iter().all(|h| h.folder == kept));
+        assert!(index.search_in(&terms, &[], 8).unwrap().is_empty());
+    }
+
+    /// 版 3 の索引を版 4 に移せないとき（書き込めない）は、ファイルを消さずに残す。書けるようになれば資料を残して移す。
+    // [IDX-009][IDX-010]
+    #[cfg(unix)]
+    #[test]
+    fn failed_migration_keeps_the_old_index() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(INDEX_FILE);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION_WITHOUT_NOTES).unwrap();
+            conn.execute(
+                "INSERT INTO docs (source, folder, path, title, file_name, body, norm_title, norm_name, norm_body, name_only, modified, size, online_only)
+                 VALUES ('folder', '/d', '/d/a.txt', 'a', 'a.txt', '予算', 'a', 'a.txt', '予算', 0, 1, 1, 0)",
+                [],
+            )
+            .unwrap();
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        // 管理者の権限では書き込めてしまうので、確かめられない
+        if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+            return;
+        }
+        assert!(SearchIndex::open(&path).is_err(), "移せなければエラー");
+        assert!(path.exists(), "壊れていない旧い索引は消さない");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let index = SearchIndex::open(&path).unwrap();
+        assert_eq!(index.count().unwrap(), 1, "資料の行を残して移す");
+        assert_eq!(index.count_notes().unwrap(), 0);
+    }
+
+    /// SQLite のファイルでない（壊れた）索引は、消して作り直す。
+    // [IDX-009]
+    #[test]
+    fn corrupt_index_is_recreated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(INDEX_FILE);
+        std::fs::write(&path, vec![0x42u8; 8192]).unwrap();
+        let index = SearchIndex::open(&path).unwrap();
+        assert_eq!(index.count().unwrap(), 0);
     }
 
     /// 一致したノートをすべて鍵で並べてから件数を絞る（一致した語の少ないノートでも、鍵が大きければ残す）。抜粋は残したものだけに作る。

@@ -344,7 +344,7 @@ mod tests {
         );
         assert_eq!(
             strip_url_queries("見て https://a.example.com/x?y=1#z と HTTP://b.example.com/p#frag。"),
-            "見て https://a.example.com/x と HTTP://b.example.com/p。"
+            "見て https://a.example.com/x と HTTP://b.example.com/p"
         );
         assert_eq!(strip_url_queries("URL なし"), "URL なし");
 
