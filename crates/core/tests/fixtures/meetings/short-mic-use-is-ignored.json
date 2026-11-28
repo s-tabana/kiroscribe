@@ -1,33 +1,34 @@
 {
-  "format": "kiroscribe-meeting-record/1",
-  "appVersion": "0.3.0",
-  "ownExe": "kiroscribe.exe",
+  "format": "kiroscribe-meeting-record/2",
+  "appVersion": "0.4.3",
+  "rulesVersion": 1,
   "entries": [
     {
       "at": 1795000000000,
-      "observation": {
-        "micUsers": [
-          {
-            "app": "slack.exe",
-            "inUse": true
-          }
-        ],
-        "windows": []
-      }
+      "services": [
+        {
+          "app": "slackHuddle",
+          "contexts": [
+            {
+              "app": "slack.exe",
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "Slack のマイク",
+                  "strength": "weak",
+                  "kind": "session"
+                }
+              ]
+            }
+          ]
+        }
+      ]
     },
     {
-      "at": 1795000002000,
-      "observation": {
-        "micUsers": [
-          {
-            "app": "slack.exe",
-            "inUse": false
-          }
-        ],
-        "windows": []
-      }
+      "at": 1795000030000,
+      "services": []
     }
   ],
   "expected": [],
-  "description": "会議アプリが一瞬（4 秒未満）マイクを使っただけでは、会議とみなさない（例: 設定画面のマイクのテスト）"
+  "description": "Slack のマイクのテスト（マイクだけ、弱い印 1 つ）では始めない。チェックボックスは退出ボタンに数えない"
 }

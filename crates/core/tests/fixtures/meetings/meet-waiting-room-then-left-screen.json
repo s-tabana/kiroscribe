@@ -1,0 +1,152 @@
+{
+  "format": "kiroscribe-meeting-record/2",
+  "appVersion": "0.4.3",
+  "rulesVersion": 1,
+  "entries": [
+    {
+      "at": 1795000000000,
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "chrome.exe",
+              "window": 300,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "Meet のタブの題",
+                  "strength": "medium",
+                  "kind": "window"
+                },
+                {
+                  "name": "ブラウザのマイク",
+                  "strength": "weak",
+                  "kind": "session"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000002000,
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "chrome.exe",
+              "window": 300,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "待機画面の参加ボタン",
+                  "strength": "veto",
+                  "kind": "control"
+                },
+                {
+                  "name": "Meet のタブの題",
+                  "strength": "medium",
+                  "kind": "window"
+                },
+                {
+                  "name": "ブラウザのマイク",
+                  "strength": "weak",
+                  "kind": "session"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000030000,
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "chrome.exe",
+              "window": 300,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "退出ボタン",
+                  "strength": "strong",
+                  "kind": "control"
+                },
+                {
+                  "name": "Meet のタブの題",
+                  "strength": "medium",
+                  "kind": "window"
+                },
+                {
+                  "name": "ブラウザのマイク",
+                  "strength": "weak",
+                  "kind": "session"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000120000,
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "chrome.exe",
+              "window": 300,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "退出後の画面",
+                  "strength": "veto",
+                  "kind": "control"
+                },
+                {
+                  "name": "Meet のタブの題",
+                  "strength": "medium",
+                  "kind": "window"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000150000,
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "chrome.exe",
+              "window": 300,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "Meet のタブの題",
+                  "strength": "medium",
+                  "kind": "window"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "expected": [
+    "started:googleMeet",
+    "ended:googleMeet"
+  ],
+  "description": "Google Meet（Chrome）: 待機画面を開いた直後の 1 回目の走査では部品が読めず、2 回目で参加ボタン（打ち消し）が見える。参加して退出ボタンで始まり、退出後の画面（打ち消し）ですぐ終わる"
+}

@@ -1,56 +1,64 @@
 {
-  "format": "kiroscribe-meeting-record/1",
-  "appVersion": "0.3.0",
-  "ownExe": "kiroscribe.exe",
+  "format": "kiroscribe-meeting-record/2",
+  "appVersion": "0.4.3",
+  "rulesVersion": 1,
   "entries": [
     {
       "at": 1795000000000,
-      "observation": {
-        "micUsers": [
-          {
-            "app": "zoom.exe",
-            "inUse": true
-          }
-        ],
-        "windows": []
-      }
+      "services": [
+        {
+          "app": "zoom",
+          "contexts": [
+            {
+              "app": "zoom.exe",
+              "window": 400,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "ミーティングの窓",
+                  "strength": "strong",
+                  "kind": "window"
+                }
+              ]
+            }
+          ]
+        }
+      ]
     },
     {
-      "at": 1795000040000,
-      "observation": {
-        "micUsers": [
-          {
-            "app": "zoom.exe",
-            "inUse": false
-          },
-          {
-            "app": "chrome.exe",
-            "inUse": true
-          }
-        ],
-        "windows": [
-          {
-            "exe": "chrome.exe",
-            "title": "Meet - xyz-abcd-efg - Google Chrome"
-          }
-        ]
-      }
+      "at": 1795000060000,
+      "services": []
     },
     {
-      "at": 1795000100000,
-      "observation": {
-        "micUsers": [
-          {
-            "app": "zoom.exe",
-            "inUse": false
-          },
-          {
-            "app": "chrome.exe",
-            "inUse": false
-          }
-        ],
-        "windows": []
-      }
+      "at": 1795000066000,
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "chrome.exe",
+              "window": 300,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "退出ボタン",
+                  "strength": "strong",
+                  "kind": "control"
+                },
+                {
+                  "name": "Meet のタブの題",
+                  "strength": "medium",
+                  "kind": "window"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000130000,
+      "services": []
     }
   ],
   "expected": [
@@ -59,5 +67,5 @@
     "started:googleMeet",
     "ended:googleMeet"
   ],
-  "description": "Zoom を抜けてすぐ（終わりの猶予のうちに）ブラウザの Google Meet に入ると、Zoom の会議を終わらせてから、Meet の会議を始める"
+  "description": "Zoom のミーティングの窓を閉じて、20 秒たたないうちに Google Meet に入る。Zoom を終えて、Meet の会議を始める"
 }

@@ -376,7 +376,7 @@ describe("SettingsDialog: デバッグ用のログ", () => {
     expect(saveBundle).toHaveBeenCalledWith(expect.stringMatching(/^kiroscribe-debug-\d{8}-\d{4}\.zip$/));
     expect(await screen.findByText("デバッグ用のログを保存しました: C:\\Users\\me\\debug.zip")).toBeInTheDocument();
     // 何が入るか（会議の検出の記録を含む）と、何が入らないかを、押す前に読める
-    expect(screen.getByText(/会議の検出の記録（マイクを使ったアプリの名前と、マイクを使っているブラウザのタブの名前）/)).toBeInTheDocument();
+    expect(screen.getByText(/会議の検出の記録（判定に使ったアプリの名前と印の名前。「詳しい記録」がオンのときは、印の立っている窓やタブの名前も）/)).toBeInTheDocument();
     expect(screen.getByText(/録音・ノート・文字起こし・議事録・AI チャットの内容と API キーは入りません。/)).toBeInTheDocument();
     // タブの名前に、会議でないページやメールの件名が入りうることと、人に渡す前に確かめることを添える
     expect(

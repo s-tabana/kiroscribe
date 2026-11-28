@@ -248,9 +248,9 @@ mod tests {
         use std::time::Duration;
         assert_eq!(crate::update::first_check_delay(), Duration::from_secs(20), "起動から最初の更新の確認まで");
         assert_eq!(crate::meeting_watch::poll_interval(), Duration::from_secs(2), "会議の検出を調べる間隔");
-        let tracker = kiroscribe_core::meetings::MeetingTracker::default();
-        assert_eq!(tracker.start_confirm_ms, 4_000, "会議の開始を確定するまで");
-        assert_eq!(tracker.end_grace_ms, 20_000, "会議が見えなくなってから録音を止めるまで");
+        let rules = kiroscribe_core::meeting_rules::Rules::builtin();
+        assert_eq!(rules.combination_ms, 4_000, "中・弱い印の組み合わせで会議の開始を確定するまで");
+        assert_eq!(rules.end_after_ms, 20_000, "会議の印が消えてから録音を止めるまで");
         let retry = kiroscribe_core::retry::RetryPolicy::default();
         assert_eq!(retry.max_attempts, 4);
         assert_eq!((retry.base_delay, retry.max_delay), (Duration::from_secs(1), Duration::from_secs(8)));

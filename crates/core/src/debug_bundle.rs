@@ -97,7 +97,7 @@ fn readme(environment: &Environment) -> String {
          不具合の原因を調べるための記録です。中身は次のとおりです。\n\
          \n\
          - {ENVIRONMENT}: アプリと OS のバージョン、設定（API キーは設定済みかどうかだけ）\n\
-         - {MEETING_RECORD}: 会議の検出の記録（マイクを使ったアプリの名前と、マイクを使っているブラウザのタブの名前）\n\
+         - {MEETING_RECORD}: 会議の検出の記録（判定に使ったアプリの名前と印の名前。「詳しい記録」がオンのときは、印の立っている窓やタブの名前も）\n\
          - {LOG_DIR}/: アプリの動き（起動と終了、更新の確認、会議の検出の判断、録音、文字起こしと AI の処理の成否と時間、エラー）\n\
          \n\
          API キー、録音した音声、文字起こし・メモ・議事録・AI チャットの本文は入っていません。\n\
@@ -230,8 +230,10 @@ mod tests {
         assert_eq!(build_number("", 0), None);
         assert_eq!(build_number("  ", 5), None);
     }
+    use crate::meeting_facts::{Facts, WindowFact};
     use crate::meeting_record::MeetingRecorder;
-    use crate::meetings::{MicUser, Observation, WindowInfo};
+    use crate::meeting_rules::{Context, Evaluation, Held, Kind, ServiceEvaluation, Strength};
+    use crate::meetings::MeetingApp;
 
     fn settings() -> Settings {
         Settings {
@@ -266,15 +268,30 @@ mod tests {
             settings: Some(SafeSettings::new(&settings(), Some(&keys))),
         };
         let mut recorder = MeetingRecorder::default();
-        let meeting = Observation {
-            mic_users: vec![MicUser { id: "chrome.exe".into(), in_use: true }],
-            windows: vec![WindowInfo {
+        let facts = Facts {
+            windows: vec![WindowFact {
+                hwnd: 7,
                 exe: "chrome.exe".into(),
+                class: "Chrome_WidgetWin_1".into(),
                 title: "https://meet.google.com/abc-defg-hij?authuser=SECRETQUERY - Google Chrome".into(),
+                visible: true,
+            }],
+            ..Default::default()
+        };
+        let meeting = Evaluation {
+            services: vec![ServiceEvaluation {
+                app: MeetingApp::GoogleMeet,
+                contexts: vec![Context {
+                    app: "chrome.exe".into(),
+                    window: Some(7),
+                    scanned: true,
+                    signals: vec![Held { name: "Meet のタブの題".into(), strength: Strength::Medium, kind: Kind::Window, after_start: false }],
+                }],
             }],
         };
-        recorder.record(0, &meeting, None);
-        let record = recorder.export("0.4.1", None);
+        // 詳しい記録のときの記録（窓の題が入る）
+        recorder.record(0, &meeting, &facts, &[], true);
+        let record = recorder.export("0.4.1");
         let out = dir.path().join("debug.zip");
         let names = write_bundle(
             &out,
@@ -312,8 +329,8 @@ mod tests {
         assert!(!env_text.contains("山田") && !env_text.contains("Realtek"), "{env_text}");
         let record: MeetingRecord = serde_json::from_str(&read(MEETING_RECORD)).unwrap();
         assert_eq!(record.format, crate::meeting_record::FORMAT, "回帰テストの材料と同じ形");
-        // ウィンドウのタイトルは伏せて入れる（判定に使う部分は残す）
-        let title = &record.entries[0].observation.windows[0].title;
+        // 窓の題は伏せて入れる
+        let title = &record.entries[0].titles[0].title;
         assert_eq!(title, "https://meet.google.com/abc-defg-hij?<query> - Google Chrome");
         assert_eq!(read("logs/kiroscribe-20261127.log"), "{\"event\":\"app.exit\"}\n");
         let readme = read(README);

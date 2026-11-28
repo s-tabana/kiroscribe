@@ -4,12 +4,13 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::Local;
+use kiroscribe_core::audio_sessions;
 use kiroscribe_core::debug_log::MAX_VALUES;
-use kiroscribe_core::meeting_record::{MeetingRecord, MeetingRecorder};
+use kiroscribe_core::meeting_record::{self, MeetingRecord, MeetingRecorder};
+use kiroscribe_core::meeting_rules::Rules;
 use kiroscribe_core::meetings::{
-    browser_titles, diagnose, observe_detailed, MeetingApp, MeetingEvent, MeetingTracker, MicSources, Observation,
+    simulated_evaluation, Browsers, Decision, Judge, MeetingApp, MeetingDetector, MeetingEvent, ServiceState, Step,
 };
-use kiroscribe_core::{mic_sessions, mic_store};
 use kiroscribe_core::notes::{Note, NotePatch};
 use kiroscribe_core::secrets::{require_api_key, Provider};
 use kiroscribe_core::settings::Settings;
@@ -24,7 +25,7 @@ use crate::runtime::AppHandle;
 use crate::state::AppState;
 
 pub const EVENT_NOTE_CREATED: &str = "note-created";
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
+const POLL_INTERVAL: Duration = Duration::from_millis(kiroscribe_core::meetings::POLL_MS as u64);
 
 /// 会議の検出の状態。
 #[derive(Default)]
@@ -46,8 +47,8 @@ impl MeetingState {
 
 /// 順に処理すること。
 enum Job {
-    /// 会議の開始・終了が確定した
-    Event(MeetingEvent),
+    /// 会議の開始・終了が確定した（理由は、ログに書く形）
+    Event(MeetingEvent, Option<Value>),
     /// 設定の「会議の自動検出」がオフからオンに変わった
     AutoRecordEnabled,
 }
@@ -63,7 +64,7 @@ fn enqueue(app: &AppHandle, job: Job) {
         tauri::async_runtime::spawn(async move {
             while let Some(job) = jobs.recv().await {
                 match job {
-                    Job::Event(event) => handle(&app, event).await,
+                    Job::Event(event, reason) => handle_event(&app, event, reason).await,
                     Job::AutoRecordEnabled => on_auto_record_enabled(&app).await,
                 }
             }
@@ -75,7 +76,16 @@ fn enqueue(app: &AppHandle, job: Job) {
 
 /// 確定した会議の開始・終了を、順番待ちの列に入れる。
 pub fn submit(app: &AppHandle, event: MeetingEvent) {
-    enqueue(app, Job::Event(event));
+    enqueue(app, Job::Event(event, None));
+}
+
+/// 判定が確定した開始・終了を、理由と一緒に順番待ちの列に入れる。
+fn submit_decision(app: &AppHandle, decision: Decision) {
+    let reason = json!({
+        "reason": serde_json::to_value(&decision.reason).unwrap_or(Value::Null),
+        "why": decision.reason.describe(),
+    });
+    enqueue(app, Job::Event(decision.event, Some(reason)));
 }
 
 /// 設定が保存された。「会議の自動検出」がオフからオンに変わったら、いま続いている会議の録音を始める。
@@ -87,51 +97,51 @@ pub fn settings_changed(app: &AppHandle, was_enabled: bool, settings: &Settings)
 
 /// 検出を続けるスレッドを起動する。
 pub fn spawn(app: AppHandle) {
-    let own_exe = std::env::current_exe()
-        .ok()
-        .map(|p| p.to_string_lossy().to_string());
     let spawned = std::thread::Builder::new()
         .name("kiroscribe-meetings".into())
         .spawn(move || {
+            // 検出の道具（UI Automation の部品を含む）は、このスレッドで作り、このスレッドだけで使う
             #[allow(unused_mut)]
-            let mut tracker = MeetingTracker::default();
+            let mut detector = MeetingDetector::new(Browsers::builtin());
             // 判定の様子を、変わったときと、一定の間隔ごとに書く
             let mut check_log = CheckLog::default();
             // E2E テスト用のビルドでだけ、待ち時間を縮め、実際の検出の代わりにテストが決めた状態を使う（src/e2e.rs）
             #[cfg(feature = "e2e")]
-            crate::e2e::tune_tracker(&mut tracker);
+            crate::e2e::tune_judge(&mut detector.judge);
             loop {
                 std::thread::sleep(poll_interval());
+                let now = now_ms();
                 #[cfg(feature = "e2e")]
-                let simulated = crate::e2e::simulated_detection(tracker.active());
+                let simulated = crate::e2e::simulated_meeting();
                 #[cfg(not(feature = "e2e"))]
-                let simulated: Option<(Option<kiroscribe_core::meetings::Detection>, bool)> = None;
-                let event = match simulated {
-                    Some((detected, continuing)) => tracker.tick(detected, continuing, now_ms()),
+                let simulated: Option<Option<MeetingApp>> = None;
+                let decisions = match simulated {
+                    Some(meeting) => detector.judge.tick(&simulated_evaluation(meeting), now),
                     None => {
-                        let now = now_ms();
-                        let (observation, sources) = observe_detailed();
-                        let event = tracker.observe(&observation, own_exe.as_deref(), now);
-                        app.state::<MeetingState>()
-                            .record
-                            .lock()
-                            .unwrap()
-                            .record(now, &observation, event);
+                        let step = detector.step(now);
+                        let verbose = crate::debug::verbose(&app);
+                        app.state::<MeetingState>().record.lock().unwrap().record(
+                            now,
+                            &step.evaluation,
+                            &step.facts,
+                            &step.decisions,
+                            verbose,
+                        );
                         let check = Check {
-                            observation: &observation,
-                            sources: sources.as_ref(),
-                            own_exe: own_exe.as_deref(),
-                            tracker: &tracker,
-                            verbose: crate::debug::verbose(&app),
+                            step: &step,
+                            judge: &detector.judge,
+                            rules: detector.rules(),
+                            browsers: detector.browsers(),
+                            verbose,
                         };
                         if let Some(fields) = check_log.next(&check, now) {
                             crate::debug::info(&app, "meeting.check", fields);
                         }
-                        event
+                        step.decisions
                     }
                 };
-                if let Some(event) = event {
-                    submit(&app, event);
+                for decision in decisions {
+                    submit_decision(&app, decision);
                 }
             }
         });
@@ -151,40 +161,85 @@ const CHECK_HEARTBEAT_VERBOSE_MS: i64 = 15_000;
 
 /// 1 回分の判定の材料。
 pub(crate) struct Check<'a> {
-    pub observation: &'a Observation,
-    /// マイクを使っているアプリの手がかり（オーディオのセッションと ConsentStore）の生の値（Windows 以外では `None`）
-    pub sources: Option<&'a MicSources>,
-    pub own_exe: Option<&'a str>,
-    pub tracker: &'a MeetingTracker,
+    pub step: &'a Step,
+    pub judge: &'a Judge,
+    pub rules: &'a Rules,
+    pub browsers: &'a Browsers,
     pub verbose: bool,
 }
 
 /// 会議の検出の判定の様子を、ログに書く形にする。なぜ録音を始めた・始めなかったかが後から分かるように、
-/// マイクを使っているアプリの名前、見たブラウザのウィンドウの数、判定とその理由、開始・終了の確定の段階、
-/// 判定に使った手がかり、オーディオのセッションの一覧（実行ファイルの名前・パッケージファミリー名・状態）、
-/// マイクの使用状況の記録（開けたか、会議アプリに見える記録ごとの Stop の値・名前の分類・置き場所の区分）を入れる。
-/// ウィンドウのタイトル（メールの件名なども入りうる）は、「詳しい記録」のときだけ入れる。
-/// `now` を渡すと、調べるたびに変わる値（Stop からの経過秒、開始の確定を待ち始めてからのミリ秒）も入れる。
+/// 段階（いまの会議・ほかの会議）、サービスごとの判定と立っている印と文脈、録音・再生のオーディオのセッションの様子を入れる。
+/// 窓やタブの題と、当たった部品の名前は、「詳しい記録」のときだけ入れる。利用者の名前を含むフルパスは入れない。
+/// `now` を渡すと、比べない値（確定待ちのミリ秒、再生の音の有無、窓の中を調べた様子とかかった時間）も入れる。
+/// 参加中のサービスの印は、比べる値には入れない（話すたびに再生の音の印が変わって、書きすぎないため）。
 pub(crate) fn check_fields(check: &Check<'_>, now: Option<i64>) -> Value {
-    let diagnosis = diagnose(check.observation, check.own_exe);
-    let phase = check.tracker.phase();
+    let judge = check.judge;
+    let phase = judge.phase();
+    let services: Vec<Value> = judge
+        .statuses()
+        .into_iter()
+        .filter(|status| status.state != ServiceState::None)
+        .map(|status| {
+            let mut service = json!({
+                "app": status.app,
+                "state": status.state,
+                "context": status.context.as_ref().map(|context| context.describe()),
+            });
+            if now.is_some() || status.state != ServiceState::Joined {
+                service["signals"] = json!(status.signals);
+            }
+            service
+        })
+        .collect();
+    let facts = &check.step.facts;
+    let target = |exe: &str| check.rules.is_target(exe, check.browsers);
+    let peak = check.rules.audible_peak;
+    let mut render = serde_json::to_value(audio_sessions::report(&facts.render, &target, peak, false)).unwrap_or(Value::Null);
+    if now.is_none() {
+        if let Some(rows) = render.get_mut("sessions").and_then(Value::as_array_mut) {
+            for row in rows {
+                if let Some(row) = row.as_object_mut() {
+                    row.remove("audible");
+                }
+            }
+        }
+    }
     let mut fields = json!({
-        "micInUse": diagnosis.mic_in_use,
-        "browserWindows": diagnosis.browser_windows,
-        "verdict": diagnosis.verdict,
-        "why": diagnosis.verdict.describe(),
-        "app": app_value(diagnosis.app),
         "phase": phase.name(),
         "phaseApp": app_value(phase.app()),
-        "micSource": check.sources.map(MicSources::source),
-        "micSessions": check.sources.map(|sources| mic_sessions::report(&sources.sessions, false)),
-        "micStore": check.sources.map(|sources| mic_store::report(&sources.store, now)),
+        "otherMeetings": judge.others(),
+        "services": services,
+        "capture": audio_sessions::report(&facts.capture, &target, peak, false),
+        "render": render,
     });
-    if let (Some(now), Some(since)) = (now, check.tracker.confirming_since()) {
-        fields["confirmingMs"] = json!(now - since);
+    if let Some(now) = now {
+        if let Some(since) = judge.confirming_since() {
+            fields["confirmingMs"] = json!(now - since);
+        }
+        if let Some(scan) = &facts.scan {
+            fields["controls"] = json!({
+                "windows": scan.windows.len(),
+                "failedWindows": scan.windows.iter().filter(|window| window.error.is_some()).count(),
+                "elapsedMs": scan.elapsed_ms,
+                "error": scan.error,
+            });
+        }
     }
     if check.verbose {
-        fields["browserTitles"] = json!(browser_titles(check.observation, check.own_exe));
+        let titles = meeting_record::titles(&check.step.evaluation, facts);
+        fields["windowTitles"] = json!(titles.iter().map(|title| format!("{}: {}", title.app, title.title)).collect::<Vec<_>>());
+        let names: Vec<String> = facts
+            .scan
+            .iter()
+            .flat_map(|scan| scan.windows.iter())
+            .filter(|scanned| titles.iter().any(|title| title.window == scanned.hwnd))
+            .flat_map(|scanned| {
+                let exe = facts.windows.iter().find(|w| w.hwnd == scanned.hwnd).map(|w| w.exe.clone()).unwrap_or_default();
+                scanned.controls.iter().map(move |control| format!("{exe}: {}（{}）", control.name, control.kind.name()))
+            })
+            .collect();
+        fields["controlNames"] = json!(names);
     }
     fields
 }
@@ -197,20 +252,28 @@ fn value_count(value: &Value) -> usize {
     }
 }
 
-/// ログの値数の上限に合わせて、一覧の末尾から行単位で減らす。
-/// 各一覧の先頭は残し、セッションと ConsentStore の両方に記録があれば比較できるようにする。
+/// ログの値数の上限に合わせて、一覧の末尾から行単位で減らす（各一覧の先頭は残す）。
 fn limit_check_fields(fields: &mut Value) {
     let mut count = value_count(fields);
-    for path in ["/browserTitles", "/micInUse", "/micStore/entries", "/micSessions/sessions"] {
+    for path in ["/controlNames", "/windowTitles", "/render/sessions", "/capture/sessions", "/services"] {
         if let Some(rows) = fields.pointer_mut(path).and_then(Value::as_array_mut) {
             while count > MAX_VALUES && rows.len() > 1 {
                 count -= value_count(&rows.pop().unwrap());
             }
         }
     }
+    if let Some(services) = fields.pointer_mut("/services").and_then(Value::as_array_mut) {
+        for service in services {
+            if let Some(rows) = service.get_mut("signals").and_then(Value::as_array_mut) {
+                while count > MAX_VALUES && rows.len() > 1 {
+                    count -= value_count(&rows.pop().unwrap());
+                }
+            }
+        }
+    }
 }
 
-/// 判定の様子を書くかどうかを決める: 様子が変わったとき（調べるたびに変わる値は比べない）と、
+/// 判定の様子を書くかどうかを決める: 様子が変わったとき（比べない値は比べない）と、
 /// 前に書いてから一定の時間（[`CHECK_HEARTBEAT_MS`]）がたったとき。
 #[derive(Default)]
 pub(crate) struct CheckLog {
@@ -236,12 +299,19 @@ impl CheckLog {
     }
 }
 
-/// 確定した会議の開始・終了を書く。
-fn log_event(app: &AppHandle, event: MeetingEvent) {
-    match event {
-        MeetingEvent::Started(meeting) => crate::debug::info(app, "meeting.started", json!({ "app": meeting })),
-        MeetingEvent::Ended(meeting) => crate::debug::info(app, "meeting.ended", json!({ "app": meeting })),
+/// 確定した会議の開始・終了を書く（判定が確定したものは、理由も書く）。
+fn log_event(app: &AppHandle, event: MeetingEvent, reason: Option<Value>) {
+    let (name, meeting) = match event {
+        MeetingEvent::Started(meeting) => ("meeting.started", meeting),
+        MeetingEvent::Ended(meeting) => ("meeting.ended", meeting),
+    };
+    let mut fields = json!({ "app": meeting });
+    if let Some(Value::Object(reason)) = reason {
+        for (key, value) in reason {
+            fields[key] = value;
+        }
     }
+    crate::debug::info(app, name, fields);
 }
 
 /// 会議の開始を受けて、自動で録音を始めなかった理由を書く。
@@ -283,7 +353,11 @@ fn create_meeting_note(app: &AppHandle, meeting: MeetingApp) -> Result<Note, Str
 
 /// 確定した会議の開始・終了を処理する。
 pub(crate) async fn handle(app: &AppHandle, event: MeetingEvent) {
-    log_event(app, event);
+    handle_event(app, event, None).await
+}
+
+async fn handle_event(app: &AppHandle, event: MeetingEvent, reason: Option<Value>) {
+    log_event(app, event, reason);
     match event {
         MeetingEvent::Started(meeting) => {
             *app.state::<MeetingState>().current.lock().unwrap() = Some(meeting);
@@ -429,246 +503,195 @@ async fn on_ended(app: &AppHandle, meeting: MeetingApp) {
 
 /// 会議の検出の記録（デバッグ用のログの書き出しに入れる）。
 pub fn export_record(app: &AppHandle) -> MeetingRecord {
-    let own_exe = std::env::current_exe().ok().map(|p| p.to_string_lossy().to_string());
-    app.state::<MeetingState>()
-        .record
-        .lock()
-        .unwrap()
-        .export(&app.package_info().version.to_string(), own_exe.as_deref())
+    app.state::<MeetingState>().record.lock().unwrap().export(&app.package_info().version.to_string())
 }
+
 
 #[cfg(test)]
 mod tests {
-    use kiroscribe_core::meetings::{MicUser, WindowInfo};
-    use kiroscribe_core::mic_sessions::{MicSession, MicSessions, SessionState};
-    use kiroscribe_core::mic_store::MicStore;
+    use kiroscribe_core::audio_sessions::{AudioSession, AudioSessions, SessionState};
+    use kiroscribe_core::meeting_facts::{ControlFact, ControlScan, ControlType, Facts, ScannedWindow, WindowFact};
+    use kiroscribe_core::meeting_rules::evaluate;
 
     use super::*;
 
-    fn observation() -> Observation {
-        Observation {
-            mic_users: vec![MicUser {
-                id: r"C:\Users\山田 太郎\AppData\Local\Google\Chrome\Application\chrome.exe".into(),
-                in_use: true,
-            }],
-            windows: vec![WindowInfo {
+    fn session(path: &str, state: SessionState, peak: Option<f32>) -> AudioSession {
+        AudioSession { pid: 1200, exe_path: path.into(), package: None, state, peak }
+    }
+
+    /// Meet のタブ（題と退出ボタン）と、ブラウザのマイク・再生の音。ほかに、会議でないアプリのセッション。
+    fn meeting_facts(peak: f32) -> Facts {
+        Facts {
+            windows: vec![WindowFact {
+                hwnd: 77,
                 exe: "chrome.exe".into(),
-                title: "受信トレイ - yamada@example.com - Gmail - Google Chrome".into(),
+                class: "Chrome_WidgetWin_1".into(),
+                title: "Meet - abc-defg-hij - yamada@example.com - Google Chrome".into(),
+                visible: true,
             }],
-        }
-    }
-
-    fn store() -> MicStore {
-        MicStore {
-            opened: true,
-            entries: vec![kiroscribe_core::mic_store::MicEntry {
-                id: r"C:\Users\山田 太郎\AppData\Local\slack\app-4.53.292\slack.exe".into(),
-                last_start: 134_402_000_000_000_000,
-                last_stop: Some(134_402_100_000_000_000),
-            }],
-        }
-    }
-
-    fn sources_with(store: MicStore) -> MicSources {
-        MicSources {
-            sessions: MicSessions {
+            capture: AudioSessions {
                 available: true,
                 endpoints: 1,
-                sessions: vec![MicSession {
-                    pid: 1200,
-                    exe_path: r"C:\Users\山田 太郎\AppData\Local\Google\Chrome\Application\chrome.exe".into(),
-                    package: None,
-                    state: SessionState::Active,
-                }],
+                sessions: vec![
+                    session(r"C:\Users\山田 太郎\AppData\Local\Google\Chrome\Application\chrome.exe", SessionState::Active, None),
+                    session(r"C:\Users\山田 太郎\AppData\Local\Recorder\rec.exe", SessionState::Active, None),
+                ],
                 ..Default::default()
             },
-            store,
+            render: AudioSessions {
+                available: true,
+                endpoints: 1,
+                sessions: vec![session(r"C:\Users\山田 太郎\AppData\Local\Google\Chrome\Application\chrome.exe", SessionState::Active, Some(peak))],
+                ..Default::default()
+            },
+            scan: Some(ControlScan {
+                windows: vec![ScannedWindow {
+                    hwnd: 77,
+                    controls: vec![ControlFact { kind: ControlType::Button, name: "通話から退出".into() }],
+                    seen: 120,
+                    error: None,
+                }],
+                elapsed_ms: 85,
+                error: None,
+            }),
         }
     }
 
-    fn sources() -> MicSources {
-        sources_with(store())
+    fn step(facts: Facts, judge: &mut Judge, now: i64) -> Step {
+        let evaluation = evaluate(Rules::builtin(), &facts, &Browsers::builtin());
+        let decisions = judge.tick(&evaluation, now);
+        Step { facts, evaluation, decisions }
     }
 
-    /// ログに書く判定の様子: マイクを使っているアプリの名前、見たウィンドウの数、判定と理由、段階、
-    /// 判定に使った手がかり、オーディオのセッションの一覧（実行ファイルの名前・パッケージファミリー名・状態）、
-    /// マイクの使用状況の記録（開けたか、会議アプリに見える記録の Stop の値と経過秒、名前の分類、置き場所の区分）、
-    /// 開始の確定を待ち始めてからのミリ秒。ウィンドウのタイトルは、「詳しい記録」のときだけ入れる。
-    /// 利用者の名前を含むフルパスは入れない。
+    /// ログに書く判定の様子: 段階、サービスごとの判定と立っている印と文脈、対象のアプリの録音・再生のセッション、
+    /// 窓の中を調べた様子。窓の題と部品の名前は、「詳しい記録」のときだけ入れる。利用者の名前を含むフルパスは入れない。
     // [LOG-005][LOG-010]
     #[test]
     fn check_fields_tell_why_and_include_titles_only_when_verbose() {
-        let observation = observation();
-        let sources = sources();
-        let tracker = MeetingTracker::default();
-        let check = |verbose| Check {
-            observation: &observation,
-            sources: Some(&sources),
-            own_exe: None,
-            tracker: &tracker,
-            verbose,
-        };
-        let normal = check_fields(&check(false), Some(kiroscribe_core::mic_store::filetime_to_unix_ms(134_402_160_000_000_000)));
-        assert_eq!(normal["micInUse"], json!(["chrome.exe"]));
-        assert_eq!(normal["browserWindows"], 1);
-        assert_eq!(normal["verdict"], "noMeetingTab");
-        assert_eq!(normal["why"], "ブラウザがマイクを使っているが、そのブラウザに会議のタブが見えない");
-        assert_eq!(normal["app"], Value::Null);
-        assert_eq!(normal["phase"], "idle");
-        assert_eq!(normal["micSource"], "audioSessions");
-        assert_eq!(normal["micSessions"]["available"], true);
-        assert_eq!(normal["micSessions"]["status"], "ok");
-        assert_eq!(normal["micSessions"]["endpoints"], 1);
-        assert_eq!(normal["micSessions"]["total"], 1);
+        let mut judge = Judge::new(Rules::builtin());
+        let step = step(meeting_facts(0.2), &mut judge, 0);
+        let browsers = Browsers::builtin();
+        let check = |verbose| Check { step: &step, judge: &judge, rules: Rules::builtin(), browsers: &browsers, verbose };
+        let normal = check_fields(&check(false), Some(1_000));
+        assert_eq!((&normal["phase"], &normal["phaseApp"]), (&json!("active"), &json!("googleMeet")));
+        assert_eq!(normal["otherMeetings"], json!([]));
+        let meet = &normal["services"][0];
+        assert_eq!((&meet["app"], &meet["state"], &meet["context"]), (&json!("googleMeet"), &json!("joined"), &json!("chrome.exe の窓")));
         assert_eq!(
-            normal["micSessions"]["sessions"],
-            json!([{ "exe": "chrome.exe", "state": "active", "browser": true }])
+            meet["signals"],
+            json!(["退出ボタン（強）", "Meet のタブの題（中）", "ブラウザのマイク（弱）", "ブラウザの再生の音（弱）"])
         );
-        assert_eq!(normal["micStore"]["opened"], true);
-        let slack = &normal["micStore"]["entries"][0];
-        assert_eq!(slack["name"], "slack.exe");
-        assert_eq!((&slack["nameKind"], &slack["location"]), (&json!("exe"), &json!("AppDataLocal")));
-        assert_eq!(slack["stop"], "134402100000000000");
-        assert_eq!(slack["sinceStopSec"], 6_000);
-        assert_eq!(slack["inUse"], false);
+        assert_eq!(normal["capture"]["status"], "ok");
+        assert_eq!(normal["capture"]["total"], 2);
+        assert_eq!(normal["capture"]["sessions"], json!([{ "exe": "chrome.exe", "state": "active" }]), "対象のアプリのセッションだけ");
+        assert_eq!(normal["render"]["sessions"], json!([{ "exe": "chrome.exe", "state": "active", "audible": true }]));
+        assert_eq!(normal["controls"], json!({ "windows": 1, "failedWindows": 0, "elapsedMs": 85, "error": null }));
         let text = normal.to_string();
-        assert!(!text.contains("山田") && !text.contains("Gmail"), "{text}");
+        assert!(!text.contains("山田") && !text.contains("example.com") && !text.contains("通話から退出"), "{text}");
 
-        let verbose = check_fields(&check(true), None);
-        assert_eq!(
-            verbose["browserTitles"],
-            json!(["chrome.exe: 受信トレイ - yamada@example.com - Gmail - Google Chrome"])
-        );
-        assert!(verbose["micStore"]["entries"][0].get("sinceStopSec").is_none());
+        let verbose = check_fields(&check(true), Some(1_000));
+        assert_eq!(verbose["windowTitles"], json!(["chrome.exe: Meet - abc-defg-hij - yamada@example.com - Google Chrome"]));
+        assert_eq!(verbose["controlNames"], json!(["chrome.exe: 通話から退出（Button）"]));
     }
 
-    /// 開始の確定を待っている間は、待ち始めてからのミリ秒を書く。
+    /// 組み合わせで開始の確定を待っている間は、待ち始めてからのミリ秒を書く。
     // [LOG-005]
     #[test]
     fn confirming_time_is_logged() {
-        let meeting = Observation {
-            mic_users: vec![MicUser { id: r"C:\x\slack.exe".into(), in_use: true }],
-            windows: vec![],
-        };
-        let mut tracker = MeetingTracker::default();
-        tracker.observe(&meeting, None, 10_000);
-        let check = Check { observation: &meeting, sources: None, own_exe: None, tracker: &tracker, verbose: false };
+        let mut facts = meeting_facts(0.0);
+        facts.scan.as_mut().unwrap().windows[0].controls.clear();
+        let mut judge = Judge::new(Rules::builtin());
+        let step = step(facts, &mut judge, 10_000);
+        let browsers = Browsers::builtin();
+        let check = Check { step: &step, judge: &judge, rules: Rules::builtin(), browsers: &browsers, verbose: false };
         let fields = check_fields(&check, Some(12_000));
         assert_eq!((&fields["phase"], &fields["confirmingMs"]), (&json!("confirming"), &json!(2_000)));
-        assert_eq!(fields["micStore"], Value::Null, "Windows 以外では、記録はない");
-        assert_eq!((&fields["micSource"], &fields["micSessions"]), (&Value::Null, &Value::Null));
+        assert_eq!(fields["services"][0]["state"], "confirming");
     }
 
     /// 判定の様子は、変わったときと、変わらなくても 60 秒（詳しい記録のときは 15 秒）ごとに書く。
-    /// 調べるたびに変わる値（経過秒）だけが変わっても、書き直さない。
+    /// 参加中に再生の音が鳴ったり止んだりしただけでは、書き直さない。
     // [LOG-005][LOG-010]
     #[test]
     fn check_log_writes_on_change_and_at_a_heartbeat() {
-        let observation = observation();
-        let sources = sources();
-        let tracker = MeetingTracker::default();
-        let check = |verbose| Check { observation: &observation, sources: Some(&sources), own_exe: None, tracker: &tracker, verbose };
+        let browsers = Browsers::builtin();
+        let mut judge = Judge::new(Rules::builtin());
+        let loud = step(meeting_facts(0.2), &mut judge, 0);
         let mut log = CheckLog::default();
-        let first = log.next(&check(false), 1_000_000).expect("最初は書く");
+        let first = log.next(&check_of(&loud, &judge, &browsers, false), 1_000_000).expect("最初は書く");
         assert_eq!(first["changed"], true);
-        assert!(log.next(&check(false), 1_002_000).is_none(), "様子が同じなら書かない");
-        assert!(log.next(&check(false), 1_059_999).is_none());
-        let beat = log.next(&check(false), 1_060_000).expect("60 秒たったら書く");
+        let quiet = step(meeting_facts(0.0), &mut judge, 2_000);
+        assert!(log.next(&check_of(&quiet, &judge, &browsers, false), 1_002_000).is_none(), "再生の音の有無だけの変化");
+        assert!(log.next(&check_of(&quiet, &judge, &browsers, false), 1_059_999).is_none());
+        let beat = log.next(&check_of(&quiet, &judge, &browsers, false), 1_060_000).expect("60 秒たったら書く");
         assert_eq!(beat["changed"], false);
 
-        let changed = Observation::default();
-        let check2 = Check { observation: &changed, sources: Some(&sources), own_exe: None, tracker: &tracker, verbose: false };
-        assert_eq!(log.next(&check2, 1_062_000).unwrap()["changed"], true, "変わったらすぐ書く");
-
-        // オーディオのセッションの状態が変わったときも、すぐ書く
-        let mut ended = sources.clone();
-        ended.sessions.sessions[0].state = SessionState::Inactive;
-        let check3 = Check { observation: &changed, sources: Some(&ended), own_exe: None, tracker: &tracker, verbose: false };
-        assert_eq!(log.next(&check3, 1_064_000).unwrap()["changed"], true, "セッションの状態が変わったらすぐ書く");
+        let left = step(Facts::default(), &mut judge, 4_000);
+        assert_eq!(log.next(&check_of(&left, &judge, &browsers, false), 1_062_000).unwrap()["changed"], true, "変わったらすぐ書く");
 
         let mut verbose_log = CheckLog::default();
-        verbose_log.next(&check(true), 0);
-        assert!(verbose_log.next(&check(true), 14_999).is_none());
-        assert!(verbose_log.next(&check(true), 15_000).is_some(), "詳しい記録のときは 15 秒ごと");
+        verbose_log.next(&check_of(&left, &judge, &browsers, true), 0);
+        assert!(verbose_log.next(&check_of(&left, &judge, &browsers, true), 14_999).is_none());
+        assert!(verbose_log.next(&check_of(&left, &judge, &browsers, true), 15_000).is_some(), "詳しい記録のときは 15 秒ごと");
     }
 
-    /// 会議アプリに見える記録やブラウザのウィンドウが多く、値の数の上限を超えても、ログのファイルに書いた行には
-    /// 判定・理由・段階と、記録を開けたか・記録の件数が残る。
+    fn check_of<'a>(step: &'a Step, judge: &'a Judge, browsers: &'a Browsers, verbose: bool) -> Check<'a> {
+        Check { step, judge, rules: Rules::builtin(), browsers, verbose }
+    }
+
+    /// 対象のアプリのセッションや窓が多く、値の数の上限を超えても、ログのファイルに書いた行には、
+    /// 段階と、サービスの判定と、セッションの件数が残る。
     // [LOG-005][LOG-009]
     #[test]
-    fn a_check_with_many_entries_keeps_the_verdict_in_the_log_file() {
+    fn a_check_with_many_sessions_keeps_the_verdict_in_the_log_file() {
         use kiroscribe_core::debug_log::{DebugLog, Level, Source};
-        use kiroscribe_core::mic_store::MicEntry;
 
-        let names = ["slack.exe", "ms-teams.exe", "zoom.exe", "discord.exe", "webexmta.exe", "chrome.exe", "msedge.exe"];
-        let mut entries: Vec<MicEntry> = (0..12)
-            .map(|i| MicEntry {
-                id: format!(r"C:\Users\山田 太郎\AppData\Local\app{i}\{}", names[i % names.len()]),
-                last_start: 134_402_000_000_000_000 + i as u64,
-                last_stop: Some(134_402_100_000_000_000),
-            })
-            .collect();
-        // 会議アプリに見えない記録も、件数には入る
-        entries.push(MicEntry { id: r"C:\Program Files\Recorder\rec.exe".into(), last_start: 1, last_stop: Some(2) });
-        let mut sources = sources_with(MicStore { opened: true, entries });
-        sources.sessions.sessions.extend((0..12).map(|i| MicSession {
-            pid: 2000 + i,
-            exe_path: format!(r"C:\Program Files\Tool{i}\tool{i}.exe"),
-            package: None,
-            state: SessionState::Active,
-        }));
-        let observation = Observation {
-            mic_users: vec![MicUser { id: r"C:\x\chrome.exe".into(), in_use: true }],
-            windows: (0..12)
-                .map(|i| WindowInfo { exe: "chrome.exe".into(), title: format!("タブ {i} - Google Chrome") })
-                .collect(),
-        };
-        let tracker = MeetingTracker::default();
+        let mut facts = meeting_facts(0.2);
+        let names = ["slack.exe", "ms-teams.exe", "zoom.exe", "discord.exe", "chrome.exe", "msedge.exe", "zen.exe", "firefox.exe"];
+        for (i, name) in names.iter().cycle().take(20).enumerate() {
+            let path = format!(r"C:\Users\山田 太郎\AppData\Local\app{i}\{name}");
+            facts.capture.sessions.push(session(&path, SessionState::Inactive, None));
+            facts.render.sessions.push(session(&path, SessionState::Active, Some(0.3)));
+        }
+        let mut judge = Judge::new(Rules::builtin());
+        let step = step(facts, &mut judge, 0);
+        let browsers = Browsers::builtin();
         let dir = tempfile::tempdir().unwrap();
         let log = DebugLog::open(dir.path()).unwrap();
         for verbose in [false, true] {
-            let check = Check { observation: &observation, sources: Some(&sources), own_exe: None, tracker: &tracker, verbose };
-            let now = kiroscribe_core::mic_store::filetime_to_unix_ms(134_402_160_000_000_000);
-            let fields = CheckLog::default().next(&check, now).unwrap();
+            let check = Check { step: &step, judge: &judge, rules: Rules::builtin(), browsers: &browsers, verbose };
+            let fields = CheckLog::default().next(&check, 1_000).unwrap();
             assert!(value_count(&fields) <= MAX_VALUES, "{fields}");
             log.write(Level::Info, Source::App, "meeting.check", fields);
         }
-
         let text = std::fs::read_to_string(&log.files()[0]).unwrap();
         let lines: Vec<Value> = text.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
         assert_eq!(lines.len(), 2);
         for line in &lines {
             let fields = &line["fields"];
-            assert_eq!(fields["verdict"], "noMeetingTab", "{line}");
-            assert_eq!(fields["why"], "ブラウザがマイクを使っているが、そのブラウザに会議のタブが見えない");
-            assert_eq!(fields["phase"], "idle");
-            assert_eq!(fields["micSource"], "audioSessions");
-            assert_eq!(fields["micSessions"]["available"], true);
-            assert_eq!(fields["micSessions"]["total"], 13);
-            assert_eq!(fields["micSessions"]["sessions"][0]["exe"], "chrome.exe");
-            assert_eq!(fields["micSessions"]["sessions"][0]["state"], "active");
-            assert_eq!(fields["micStore"]["opened"], true);
-            assert_eq!(fields["micStore"]["total"], 13);
-            assert_eq!(fields["micStore"]["entries"][0]["sinceStopSec"], 6_000);
+            assert_eq!(fields["phase"], "active", "{line}");
+            assert_eq!(fields["services"][0]["app"], "googleMeet");
+            assert_eq!(fields["capture"]["total"], 22);
+            assert_eq!(fields["render"]["total"], 21);
+            assert!(fields["capture"]["sessions"].as_array().is_some_and(|rows| !rows.is_empty()));
         }
         assert!(!text.contains("山田"), "{text}");
     }
 
+    /// 録音のセッションの一覧を読めなかったときは、その理由を書き、ほかの印で判定を続ける。
     // [LOG-005][MTG-020]
     #[test]
-    fn check_logs_the_fallback_source_and_read_failure() {
-        let mut sources = sources();
-        sources.sessions = mic_sessions::summarize(vec![Err("0x80070005".into())]);
-        sources.store.entries[0].last_stop = Some(0);
-        let observation = Observation { mic_users: sources.mic_users(), windows: vec![] };
-        let tracker = MeetingTracker::default();
-        let check = Check { observation: &observation, sources: Some(&sources), own_exe: None, tracker: &tracker, verbose: false };
+    fn check_logs_a_session_read_failure() {
+        let mut facts = meeting_facts(0.2);
+        facts.capture = audio_sessions::summarize(vec![Err("0x80070005".into())]);
+        let mut judge = Judge::new(Rules::builtin());
+        let step = step(facts, &mut judge, 0);
+        let browsers = Browsers::builtin();
+        let check = Check { step: &step, judge: &judge, rules: Rules::builtin(), browsers: &browsers, verbose: false };
         let fields = CheckLog::default().next(&check, 1_000).unwrap();
-        assert_eq!(fields["micSource"], "consentStore");
-        assert_eq!(fields["micSessions"]["status"], "failed");
-        assert_eq!(fields["micSessions"]["failedEndpoints"], 1);
-        assert_eq!(fields["micSessions"]["error"], "0x80070005");
-        assert_eq!(fields["micStore"]["entries"][0]["inUse"], true);
-        assert_eq!(fields["verdict"], "desktopApp");
+        assert_eq!(fields["capture"]["status"], "failed");
+        assert_eq!(fields["capture"]["failedEndpoints"], 1);
+        assert_eq!(fields["capture"]["error"], "0x80070005");
+        assert_eq!(fields["phase"], "active", "退出ボタンで判定を続ける");
     }
 }

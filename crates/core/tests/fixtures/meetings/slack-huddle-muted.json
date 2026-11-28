@@ -1,0 +1,90 @@
+{
+  "format": "kiroscribe-meeting-record/2",
+  "appVersion": "0.4.3",
+  "rulesVersion": 1,
+  "entries": [
+    {
+      "at": 1795000000000,
+      "services": []
+    },
+    {
+      "at": 1795000002000,
+      "services": [
+        {
+          "app": "slackHuddle",
+          "contexts": [
+            {
+              "app": "slack.exe",
+              "window": 200,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "退出ボタン",
+                  "strength": "strong",
+                  "kind": "control"
+                },
+                {
+                  "name": "ハドルの窓",
+                  "strength": "medium",
+                  "kind": "window"
+                },
+                {
+                  "name": "Slack のマイク",
+                  "strength": "weak",
+                  "kind": "session"
+                }
+              ]
+            },
+            {
+              "app": "slack.exe",
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "Slack のマイク",
+                  "strength": "weak",
+                  "kind": "session"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000010000,
+      "services": [
+        {
+          "app": "slackHuddle",
+          "contexts": [
+            {
+              "app": "slack.exe",
+              "window": 200,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "退出ボタン",
+                  "strength": "strong",
+                  "kind": "control"
+                },
+                {
+                  "name": "ハドルの窓",
+                  "strength": "medium",
+                  "kind": "window"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000160000,
+      "services": []
+    }
+  ],
+  "expected": [
+    "started:slackHuddle",
+    "ended:slackHuddle"
+  ],
+  "description": "Slack ハドルにミュートのまま 2 分半いる（マイクのセッションは Inactive）。退出ボタンで続き、退出の 20 秒後に終わる"
+}

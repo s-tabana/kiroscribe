@@ -1,0 +1,49 @@
+{
+  "format": "kiroscribe-meeting-record/2",
+  "appVersion": "0.4.3",
+  "rulesVersion": 1,
+  "entries": [
+    {
+      "at": 1795000000000,
+      "services": [
+        {
+          "app": "discord",
+          "contexts": [
+            {
+              "app": "discord.exe",
+              "window": 500,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "切断ボタン",
+                  "strength": "strong",
+                  "kind": "control"
+                }
+              ]
+            },
+            {
+              "app": "discord.exe",
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "Discord のマイク",
+                  "strength": "weak",
+                  "kind": "session"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000180000,
+      "services": []
+    }
+  ],
+  "expected": [
+    "started:discord",
+    "ended:discord"
+  ],
+  "description": "Discord の通話で、ミュートを外して黙っている（マイクのセッションは Active のまま、音はない）。切断ボタンで続く"
+}

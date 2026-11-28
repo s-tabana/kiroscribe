@@ -1,364 +1,444 @@
-//! 会議の自動検出の判定（どのアプリ・どのタイトルを会議とみなすか）の仕様のテスト。
+//! 会議の自動検出の仕様のテスト: PC の様子（窓・部品・オーディオのセッション）に組み込みの判定表を当てはめ、
+//! 開始・継続・終了が仕様どおりになることを確かめる。実機で判定が外れた場面は、ここで回帰のテストにする。
 
-use kiroscribe_core::meetings::{
-    detect, observe, web_meeting, Detection, MeetingApp, MeetingEvent, MeetingTracker, MicUser,
-    Observation, WindowInfo,
-};
+use kiroscribe_core::audio_sessions::{AudioSession, AudioSessions, SessionState};
+use kiroscribe_core::meeting_facts::{ControlFact, ControlScan, ControlType, Facts, ScannedWindow, WindowFact};
+use kiroscribe_core::meeting_rules::{evaluate, Evaluation, Rules};
+use kiroscribe_core::meetings::{Browsers, Judge, MeetingApp, MeetingEvent, Phase, Reason, ServiceState, POLL_MS};
 
-fn mic(id: &str) -> MicUser {
-    MicUser {
-        id: id.to_string(),
-        in_use: true,
+const CHROME: &str = "Chrome_WidgetWin_1";
+const FIREFOX: &str = "MozillaWindowClass";
+
+fn window(hwnd: u64, exe: &str, class: &str, title: &str) -> WindowFact {
+    WindowFact { hwnd, exe: exe.into(), class: class.into(), title: title.into(), visible: true }
+}
+
+fn hidden(hwnd: u64, exe: &str, class: &str, title: &str) -> WindowFact {
+    WindowFact { visible: false, ..window(hwnd, exe, class, title) }
+}
+
+fn button(name: &str) -> ControlFact {
+    ControlFact { kind: ControlType::Button, name: name.into() }
+}
+
+fn control(kind: ControlType, name: &str) -> ControlFact {
+    ControlFact { kind, name: name.into() }
+}
+
+fn session(exe: &str, state: SessionState, peak: Option<f32>) -> AudioSession {
+    AudioSession { pid: 1, exe_path: format!(r"C:\Program Files\App\{exe}"), package: None, state, peak }
+}
+
+fn sessions(list: Vec<AudioSession>) -> AudioSessions {
+    AudioSessions { available: true, endpoints: 1, sessions: list, ..Default::default() }
+}
+
+/// PC の様子を組み立てる。
+#[derive(Default, Clone)]
+struct Pc {
+    windows: Vec<WindowFact>,
+    mics: Vec<AudioSession>,
+    sounds: Vec<AudioSession>,
+    /// 窓の中を調べた結果（`None` ならこの回は調べていない）
+    scan: Option<Vec<ScannedWindow>>,
+}
+
+impl Pc {
+    fn new() -> Self {
+        Pc { scan: Some(Vec::new()), ..Default::default() }
+    }
+
+    fn window(mut self, window: WindowFact, controls: Vec<ControlFact>) -> Self {
+        if let Some(scan) = &mut self.scan {
+            if window.visible {
+                scan.push(ScannedWindow { hwnd: window.hwnd, controls, seen: 10, error: None });
+            }
+        }
+        self.windows.push(window);
+        self
+    }
+
+    fn mic(mut self, exe: &str) -> Self {
+        self.mics.push(session(exe, SessionState::Active, None));
+        self
+    }
+
+    fn sound(mut self, exe: &str, peak: f32) -> Self {
+        self.sounds.push(session(exe, SessionState::Active, Some(peak)));
+        self
+    }
+
+    fn unscanned(mut self) -> Self {
+        self.scan = None;
+        self
+    }
+
+    fn facts(&self) -> Facts {
+        Facts {
+            windows: self.windows.clone(),
+            capture: sessions(self.mics.clone()),
+            render: sessions(self.sounds.clone()),
+            scan: self.scan.clone().map(|windows| ControlScan { windows, elapsed_ms: 50, error: None }),
+        }
+    }
+
+    fn evaluation(&self) -> Evaluation {
+        evaluate(Rules::builtin(), &self.facts(), &Browsers::builtin())
     }
 }
 
-fn window(exe: &str, title: &str) -> WindowInfo {
-    WindowInfo {
-        exe: exe.to_string(),
-        title: title.to_string(),
+/// 判定を、製品と同じ 2 秒ごとに進める。
+struct Run {
+    judge: Judge,
+    now: i64,
+}
+
+impl Run {
+    fn new() -> Self {
+        Run { judge: Judge::new(Rules::builtin()), now: 0 }
+    }
+
+    /// 1 回進め、知らせる出来事を返す。
+    fn tick(&mut self, pc: &Pc) -> Vec<MeetingEvent> {
+        let events = self.judge.tick(&pc.evaluation(), self.now).into_iter().map(|d| d.event).collect();
+        self.now += POLL_MS;
+        events
+    }
+
+    /// `seconds` 秒のあいだ同じ様子で進め、起きた出来事をまとめて返す。
+    fn hold(&mut self, pc: &Pc, seconds: i64) -> Vec<MeetingEvent> {
+        (0..seconds * 1000 / POLL_MS).flat_map(|_| self.tick(pc)).collect()
+    }
+
+    fn state(&self, app: MeetingApp) -> ServiceState {
+        self.judge.statuses().into_iter().find(|status| status.app == app).map(|status| status.state).unwrap()
     }
 }
 
-fn observation(mic_users: Vec<MicUser>, windows: Vec<WindowInfo>) -> Observation {
-    Observation { mic_users, windows }
+fn started(app: MeetingApp) -> Vec<MeetingEvent> {
+    vec![MeetingEvent::Started(app)]
 }
 
-fn desktop(app: MeetingApp) -> Option<Detection> {
-    Some(Detection::desktop(app))
+fn ended(app: MeetingApp) -> Vec<MeetingEvent> {
+    vec![MeetingEvent::Ended(app)]
 }
 
-/// Chrome での会議。
-fn browser(app: MeetingApp) -> Option<Detection> {
-    browser_in(app, "chrome.exe")
+const MEET: MeetingApp = MeetingApp::GoogleMeet;
+const SLACK: MeetingApp = MeetingApp::SlackHuddle;
+
+fn meet_in_chrome(controls: Vec<ControlFact>) -> Pc {
+    Pc::new().window(window(10, "chrome.exe", CHROME, "Meet - abc-defg-hij - Google Chrome"), controls)
 }
 
-fn browser_in(app: MeetingApp, exe: &str) -> Option<Detection> {
-    Some(Detection::in_browser(app, exe))
-}
-
-// [MTG-001][MTG-003]
+/// デスクトップの会議アプリは、実行ファイルの名前（大文字小文字は区別しない）の窓・部品・セッションで判定する。
+// [MTG-001]
 #[test]
-fn every_listed_desktop_app_is_a_meeting_while_it_uses_the_mic() {
-    let cases = [
-        (r"C:\Users\me\AppData\Local\slack\app-4.41.105\slack.exe", MeetingApp::SlackHuddle),
-        // Slack の Microsoft Store 版・MSIX 版は、パッケージ名で記録される
-        ("91750D7E.Slack_8she8kybcnzg4", MeetingApp::SlackHuddle),
-        ("91750d7e.slack_8she8kybcnzg4", MeetingApp::SlackHuddle),
-        ("com.tinyspeck.slackdesktop_8yrtsj140pw4g", MeetingApp::SlackHuddle),
-        ("Com.TinySpeck.SlackDesktop_8yrtsj140pw4g", MeetingApp::SlackHuddle),
-        (r"C:\Program Files\WindowsApps\com.tinyspeck.slackdesktop_4.41.105.0_x64__8yrtsj140pw4g\app\slack.exe", MeetingApp::SlackHuddle),
-        (r"C:\Program Files\Slack\slack.exe", MeetingApp::SlackHuddle),
-        (r"C:\Users\me\AppData\Roaming\Zoom\bin\Zoom.exe", MeetingApp::Zoom),
-        (r"C:\Users\me\AppData\Roaming\Zoom\bin\CptHost.exe", MeetingApp::Zoom),
-        (r"C:\Program Files\WindowsApps\MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe\ms-teams.exe", MeetingApp::Teams),
-        // 新しい Teams の通話を受け持つプロセス
-        (r"C:\Program Files\WindowsApps\MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe\ms-teams_modulehost.exe", MeetingApp::Teams),
-        (r"C:\Program Files\WindowsApps\MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe\MS-Teams_ModuleHost.EXE", MeetingApp::Teams),
-        (r"C:\Users\me\AppData\Local\Microsoft\Teams\current\Teams.exe", MeetingApp::Teams),
-        // 記録で実行ファイル名だけに縮めたもの
-        ("slack.exe", MeetingApp::SlackHuddle),
-        ("ms-teams.exe", MeetingApp::Teams),
-        ("ms-teams_modulehost.exe", MeetingApp::Teams),
-        ("MSTeams_8wekyb3d8bbwe", MeetingApp::Teams),
-        ("MicrosoftTeams_8wekyb3d8bbwe", MeetingApp::Teams),
-        ("msteams_8wekyb3d8bbwe", MeetingApp::Teams),
-        (r"C:\Users\me\AppData\Local\Discord\app-1.0.9163\Discord.exe", MeetingApp::Discord),
-        (r"C:\Users\me\AppData\Local\DiscordPTB\app-1.0.1\DiscordPTB.exe", MeetingApp::Discord),
-        (r"C:\Users\me\AppData\Local\DiscordCanary\app-1.0.1\DISCORDCANARY.EXE", MeetingApp::Discord),
-        (r"C:\Users\me\AppData\Local\DiscordDevelopment\app-1.0.1\DiscordDevelopment.exe", MeetingApp::Discord),
-    ];
-    for (id, app) in cases {
-        assert_eq!(detect(&observation(vec![mic(id)], vec![]), None), desktop(app), "{id}");
-        // マイクを使っていなければ対象にしない
-        let idle = MicUser {
-            id: id.to_string(),
-            in_use: false,
-        };
-        assert_eq!(detect(&observation(vec![idle], vec![]), None), None, "{id}");
-    }
-    // 名前が似ているだけのアプリは対象にしない
-    for id in [
-        r"C:\Tools\zoomit.exe",
-        r"C:\Tools\slack-helper.exe",
-        "MSTeamsX",
-        r"C:\Apps\Audacity\audacity.exe",
-        // Slack のパッケージ名に似ているだけのもの
-        "91750D7E.SlackTools_abcdefghijklm",
-        "Contoso.Slack_abcdefghijklm",
-        "com.tinyspeck.slackdesktopbeta",
-        "com.tinyspeck.slackdesktopbeta_8yrtsj140pw4g",
-        // 接頭辞だけで、続きのないもの
-        "91750D7E.Slack_",
-        "MSTeams_",
-        "com.tinyspeck.other_8yrtsj140pw4g",
-        r"C:\Tools\ms-teams_helper.exe",
-        // 会議アプリと一緒に入る更新・起動のためのプロセスと、ほかのアプリも使う部品
-        r"C:\Users\me\AppData\Local\slack\Update.exe",
-        r"C:\Program Files\WindowsApps\MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe\ms-teamsupdate.exe",
-        r"C:\Program Files\WindowsApps\MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe\msteams_autostarter.exe",
-        r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\131.0.2903.112\msedgewebview2.exe",
-        r"C:\Program Files\Contoso\zcscpthost.exe",
-        // 記録ではフルパスを実行ファイル名だけに縮める。パッケージ名で始まる実行ファイル名・相対パスは、パッケージ名とみなさない
-        "msteams_autostarter.exe",
-        "MSTeams_autostarter.exe",
-        "ms-teamsupdate.exe",
-        "update.exe",
-        r"MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe\msteams_autostarter.exe",
-        "MSTeams_25000.1.2.3_x64__8wekyb3d8bbwe/msteams_autostarter.exe",
-        r"91750D7E.Slack_8she8kybcnzg4\Update.exe",
+fn desktop_meeting_apps_are_judged_by_their_exe_names() {
+    let mut run = Run::new();
+    let slack = Pc::new().window(window(1, "slack.exe", CHROME, "Huddle: 山田 - Acme - Slack"), vec![button("退出")]);
+    assert_eq!(run.tick(&slack), started(SLACK));
+
+    let mut run = Run::new();
+    let discord = Pc::new().window(window(2, "discordptb.exe", CHROME, "#一般 | 開発 - Discord"), vec![button("Disconnect")]);
+    assert_eq!(run.tick(&discord), started(MeetingApp::Discord));
+
+    let mut run = Run::new();
+    let teams = Pc::new().window(window(3, "ms-teams.exe", CHROME, "会議 | Microsoft Teams"), vec![button("退出")]);
+    assert_eq!(run.tick(&teams), started(MeetingApp::Teams));
+
+    // パッケージのアプリで実行ファイルのパスを読めないときは、パッケージファミリー名から Slack とする
+    let store_slack = AudioSession { package: Some("91750D7E.Slack_8she8kybcnzg4".into()), exe_path: String::new(), ..session("x", SessionState::Active, None) };
+    let mut pc = Pc::new().window(window(4, "slack.exe", CHROME, "Huddle: 山田 - Acme - Slack"), vec![]);
+    pc.mics.push(store_slack);
+    let mut run = Run::new();
+    assert_eq!(run.hold(&pc, 6), started(SLACK), "ハドルの窓とマイクの組み合わせ");
+}
+
+/// 対象のブラウザ（Zen を含む）で、Meet のタブの退出ボタンが見えたら参加中。区切りが「 — 」の題でもよい。
+// [MTG-002][MTG-028]
+#[test]
+fn meet_is_detected_in_every_listed_browser() {
+    for (exe, class, title) in [
+        ("chrome.exe", CHROME, "Meet - abc-defg-hij - Google Chrome"),
+        ("msedge.exe", CHROME, "Meet - abc-defg-hij - 個人 - Microsoft\u{200b} Edge"),
+        ("zen.exe", FIREFOX, "Meet – abc-defg-hij — Zen Browser"),
+        ("firefox.exe", FIREFOX, "Meet - abc-defg-hij — Mozilla Firefox"),
+        ("brave.exe", CHROME, "Google Meet - Brave"),
     ] {
-        assert_eq!(detect(&observation(vec![mic(id)], vec![]), None), None, "{id}");
+        let mut run = Run::new();
+        let pc = Pc::new().window(window(5, exe, class, title), vec![button("通話から退出")]);
+        assert_eq!(run.tick(&pc), started(MEET), "{exe}");
     }
+    // 一覧にないアプリは、ブラウザとして扱わない
+    let mut run = Run::new();
+    let unknown = Pc::new().window(window(5, "newbrowser.exe", CHROME, "Meet - abc-defg-hij - New Browser"), vec![button("通話から退出")]).mic("newbrowser.exe");
+    assert!(run.hold(&unknown, 10).is_empty());
 }
 
-// [MTG-002]
+/// 一覧にないアプリ（Aqua Voice・Thunderbird）のマイクと再生の音は数えない。退出したあとの Meet のタブの題が残っていても、
+/// それと組み合わせて始めない。ブラウザのマイクだけ、
+/// 補助のプロセスのマイクも会議にしない。
+// [MTG-003]
 #[test]
-fn browser_titles_that_count_as_meetings() {
-    let cases = [
-        ("Meet - abc-defg-hij - Google Chrome", Some(MeetingApp::GoogleMeet)),
-        ("Meet – 週次定例", Some(MeetingApp::GoogleMeet)),
-        ("Meet: 週次定例", Some(MeetingApp::GoogleMeet)),
-        ("Meet：週次定例", Some(MeetingApp::GoogleMeet)),
-        ("Google Meet", Some(MeetingApp::GoogleMeet)),
-        ("週次定例 - Meet - Microsoft Edge", Some(MeetingApp::GoogleMeet)),
-        ("meet.google.com/abc-defg-hij", Some(MeetingApp::GoogleMeet)),
-        ("Huddle with 田中 - Slack", Some(MeetingApp::SlackHuddle)),
-        ("Slack | ハドルミーティング", Some(MeetingApp::SlackHuddle)),
-        // ハドルを別のウィンドウにしたときの題
-        ("Huddle: 田中 - Acme - Slack 🎤", Some(MeetingApp::SlackHuddle)),
-        ("Huddle: 田中 - Acme - Slack - Google Chrome", Some(MeetingApp::SlackHuddle)),
-        ("ハドル: #dev - Acme - Slack - Microsoft Edge", Some(MeetingApp::SlackHuddle)),
-        ("Meeting with 田中 | Microsoft Teams", Some(MeetingApp::Teams)),
-        ("会議 | Microsoft Teams", Some(MeetingApp::Teams)),
-        ("Call with 田中 | Microsoft Teams", Some(MeetingApp::Teams)),
-        ("通話 | Microsoft Teams", Some(MeetingApp::Teams)),
-        ("Zoom Meeting", Some(MeetingApp::Zoom)),
-        ("Zoom ミーティング", Some(MeetingApp::Zoom)),
-        ("Discord | #雑談 | 開発チーム", Some(MeetingApp::Discord)),
-        ("Discord | #雑談 | 開発チーム - Google Chrome", Some(MeetingApp::Discord)),
-        ("#general | Acme - Discord - Google Chrome", Some(MeetingApp::Discord)),
-        ("#general | Acme - Discord", Some(MeetingApp::Discord)),
-        ("フレンド | Discord — Mozilla Firefox", Some(MeetingApp::Discord)),
-        ("(3) Discord | #general | Dev Team", Some(MeetingApp::Discord)),
-        ("• Discord | フレンド", Some(MeetingApp::Discord)),
-        ("(99+) • Discord | 🔊 作業部屋 | 開発チーム — Mozilla Firefox", Some(MeetingApp::Discord)),
-        // 会議とみなさないもの
-        // Discord についての記事・検索結果・ヘルプのページ（タイトルに「discord」を含むだけ）
-        ("How to use Discord - Google 検索", None),
-        ("How to use Discord - Google 検索 - Google Chrome", None),
-        ("Discord とは - Wikipedia - Microsoft Edge", None),
-        ("Discord とは - Wikipedia", None),
-        ("Voice Channels FAQ – Discord", None),
-        ("Discord - Group Chat That’s All Fun & Games", None),
-        ("Discord の使い方 | 技術ブログ", None),
-        ("(メモ) Discord | の設定", None),
-        ("Slack | general | 開発チーム", None),
-        // ハドルを示す語のない Slack の画面（ハドル中のメインのタブも、ただのチャットも同じ題になる）
-        ("田中 - Acme - Slack", None),
-        ("田中 - Acme - Slack - Google Chrome", None),
-        // Slack 以外の「Huddle」
-        ("Huddle - ファイル共有", None),
-        ("チャット | Microsoft Teams", None),
-        ("Zoom - 料金プラン", None),
-        ("Meetup - 東京の勉強会", None),
-        ("Gmail - 受信トレイ", None),
-    ];
-    for (title, expected) in cases {
-        assert_eq!(web_meeting(title), expected, "{title}");
-    }
+fn other_apps_microphones_and_sounds_are_not_meeting_signals() {
+    let stale_meet = Pc::new()
+        .window(window(10, "zen.exe", FIREFOX, "Meet – abc-defg-hij — Zen Browser"), vec![])
+        .window(window(11, "thunderbird.exe", FIREFOX, "受信トレイ - Mozilla Thunderbird"), vec![])
+        .mic("aquawindowsbridge.exe")
+        .sound("thunderbird.exe", 0.4)
+        .sound("aquavoice.exe", 0.4);
+    let mut run = Run::new();
+    assert!(run.hold(&stale_meet, 60).is_empty());
+    assert_eq!(run.state(MEET), ServiceState::Waiting, "題だけ（中が 1 つ）");
+
+    let only_mic = Pc::new().window(window(12, "chrome.exe", CHROME, "受信トレイ - Gmail - Google Chrome"), vec![]).mic("chrome.exe").sound("chrome.exe", 0.3);
+    let mut run = Run::new();
+    assert!(run.hold(&only_mic, 30).is_empty(), "会議のタブのない窓の、ブラウザのマイクと再生の音");
+    assert_eq!(run.state(MEET), ServiceState::None);
+
+    let helpers = Pc::new().mic("msedgewebview2.exe").mic("update.exe").mic("ms-teamsupdate.exe").mic("zcscpthost.exe").sound("msedgewebview2.exe", 0.5);
+    assert!(helpers.evaluation().services.is_empty());
 }
 
-// [MTG-002]
+/// 印は同じ窓の中だけで組み合わせる。Zen の別の窓の「退出」ボタンで、待機画面の Meet を始めない。
+/// Edge の待機画面の参加ボタン（打ち消し）で、Zen で続いている Meet を終えない。
+// [MTG-004]
 #[test]
-fn every_listed_browser_is_checked_and_other_apps_are_not() {
-    for exe in ["chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "vivaldi.exe", "opera.exe", "arc.exe"] {
-        let seen = observation(
-            vec![mic(&format!(r"C:\Program Files\Browser\{exe}"))],
-            vec![window(exe, "Meet - abc-defg-hij")],
-        );
-        assert_eq!(detect(&seen, None), browser_in(MeetingApp::GoogleMeet, exe), "{exe}");
-    }
-    // ブラウザでないアプリのウィンドウのタイトルは見ない
-    let other = observation(
-        vec![mic(r"C:\Program Files\Google\Chrome\Application\chrome.exe")],
-        vec![window("notepad.exe", "Meet - メモ.txt")],
-    );
-    assert_eq!(detect(&other, None), None);
-    // ブラウザでないアプリがマイクを使っていても、ブラウザの会議にはしない
-    let recorder = observation(
-        vec![mic(r"C:\Apps\Audacity\audacity.exe")],
-        vec![window("chrome.exe", "Meet - abc-defg-hij")],
-    );
-    assert_eq!(detect(&recorder, None), None);
+fn signals_and_vetoes_combine_only_within_one_window() {
+    let waiting = Pc::new()
+        .window(window(20, "zen.exe", FIREFOX, "Meet – abc-defg-hij — Zen Browser"), vec![button("今すぐ参加")])
+        .window(window(21, "zen.exe", FIREFOX, "設定 — Zen Browser"), vec![button("退出")])
+        .mic("zen.exe");
+    let mut run = Run::new();
+    assert!(run.hold(&waiting, 20).is_empty(), "別の窓の退出ボタン");
+
+    let joined_in_zen = Pc::new().window(window(20, "zen.exe", FIREFOX, "Meet – abc-defg-hij — Zen Browser"), vec![button("通話から退出")]).mic("zen.exe");
+    let mut run = Run::new();
+    assert_eq!(run.tick(&joined_in_zen), started(MEET));
+    let edge_waiting = joined_in_zen
+        .clone()
+        .window(window(30, "msedge.exe", CHROME, "Meet - xyz-abcd-efg - Microsoft\u{200b} Edge"), vec![button("参加をリクエスト")]);
+    assert!(run.hold(&edge_waiting, 60).is_empty(), "Edge の待機画面で、Zen の会議を終えない");
+    assert_eq!(run.judge.phase(), Phase::Active(MEET));
 }
 
-// [MTG-002]
+/// Kiroscribe 自身（録音中）のマイクと窓は、判定に入れない。
+// [MTG-005]
 #[test]
-fn the_meeting_title_must_belong_to_the_browser_that_uses_the_mic() {
-    const CHROME: &str = r"C:\Program Files\Google\Chrome\Application\chrome.exe";
-    let titles = [
-        ("Meet - abc-defg-hij", MeetingApp::GoogleMeet),
-        ("Huddle with 田中 - Slack", MeetingApp::SlackHuddle),
-        ("Meeting with 田中 | Microsoft Teams", MeetingApp::Teams),
-        ("Zoom Meeting", MeetingApp::Zoom),
-        ("Discord | #雑談 | 開発チーム", MeetingApp::Discord),
-    ];
-    for (title, app) in titles {
-        // Chrome がマイクを使っていて、会議のタブは Edge にある: 会議とみなさない
-        let other_browser = observation(vec![mic(CHROME)], vec![window("msedge.exe", title)]);
-        assert_eq!(detect(&other_browser, None), None, "{title}");
-
-        // 同じブラウザなら会議とみなす（ほかのブラウザのウィンドウが並んでいても）
-        let same_browser = observation(
-            vec![mic(CHROME)],
-            vec![window("msedge.exe", "ニュース - Microsoft Edge"), window("chrome.exe", title)],
-        );
-        assert_eq!(detect(&same_browser, None), browser(app), "{title}");
-    }
-
-    // 2 つのブラウザがどちらもマイクを使っているときは、どちらのタブでもよい
-    let both = observation(
-        vec![mic(CHROME), mic(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")],
-        vec![window("msedge.exe", "Zoom Meeting")],
-    );
-    assert_eq!(detect(&both, None), browser_in(MeetingApp::Zoom, "msedge.exe"));
+fn kiroscribe_itself_is_not_a_meeting() {
+    let own = Pc::new().window(window(40, "kiroscribe.exe", CHROME, "Kiroscribe - 会議の録音"), vec![button("録音を停止")]).mic("kiroscribe.exe").sound("kiroscribe.exe", 0.5);
+    assert!(own.evaluation().services.is_empty());
 }
 
-/// Discord についてのページを開いたまま、別のサイトでマイクを使っても、会議とみなさない。
-// [MTG-002]
-#[test]
-fn pages_about_discord_are_not_meetings() {
-    for title in [
-        "How to use Discord - Google 検索 - Google Chrome",
-        "Discord とは - Wikipedia - Google Chrome",
-        "Discord の使い方 - 技術ブログ - Google Chrome",
-    ] {
-        let seen = observation(
-            vec![mic(r"C:\Program Files\Google\Chrome\Application\chrome.exe")],
-            vec![window("chrome.exe", title)],
-        );
-        assert_eq!(detect(&seen, None), None, "{title}");
-    }
-}
-
+/// 部品の印は Button の部品だけ。Slack の環境設定のチェックボックス「ハドルミーティングから自動的に退出する」や、
+/// 名前に「自動的に」を含むボタンでは、参加中にしない。
 // [MTG-006]
 #[test]
-fn desktop_app_takes_priority_over_a_browser_meeting() {
-    let both = observation(
-        vec![
-            mic(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
-            mic(r"C:\Users\me\AppData\Roaming\Zoom\bin\Zoom.exe"),
-        ],
-        vec![window("chrome.exe", "Meet - abc-defg-hij - Google Chrome")],
-    );
-    assert_eq!(detect(&both, None), desktop(MeetingApp::Zoom));
+fn only_buttons_count_and_excluded_names_do_not() {
+    let preferences = |controls| Pc::new().window(window(50, "slack.exe", CHROME, "環境設定 - Acme - Slack"), controls).mic("slack.exe");
+    let mut run = Run::new();
+    assert!(run.hold(&preferences(vec![control(ControlType::CheckBox, "ハドルミーティングから自動的に退出する")]), 20).is_empty());
+    let mut run = Run::new();
+    assert!(run.hold(&preferences(vec![button("ハドルミーティングから自動的に退出する")]), 20).is_empty());
+    let mut run = Run::new();
+    assert!(run.hold(&preferences(vec![control(ControlType::MenuItem, "チャンネルから退出する")]), 20).is_empty());
+    // Discord のサーバーからの脱退は、通話の切断ではない
+    let mut run = Run::new();
+    let server = Pc::new().window(window(51, "discord.exe", CHROME, "Discord"), vec![button("Leave Server")]);
+    assert!(run.hold(&server, 20).is_empty());
+    let mut run = Run::new();
+    assert_eq!(run.tick(&preferences(vec![button("ハドルから退出する")])), started(SLACK));
 }
 
-// [MTG-010]
+/// 強い印は 1 つで、その回に開始。組み合わせ（中・弱 2 つ）は、4 秒続き、その間に部品を 2 回以上調べてから開始。
+/// 待機画面を開いた直後（部品をまだ読めない約 2 秒）や、タブを閉じる途中に、組み合わせだけで始めない。
+// [MTG-007]
 #[test]
-fn another_meeting_detected_while_one_continues_does_not_start_a_new_one() {
-    let meet = browser(MeetingApp::GoogleMeet);
-    let zoom = desktop(MeetingApp::Zoom);
-    let mut tracker = MeetingTracker::default();
-    assert_eq!(tracker.tick(meet, false, 0), None);
-    assert_eq!(tracker.tick(meet, true, 4_000), Some(MeetingEvent::Started(MeetingApp::GoogleMeet)));
+fn a_combination_waits_for_two_scans_and_a_strong_signal_starts_at_once() {
+    // 待機画面を開いた直後: 1 回目の走査では部品が読めず、2 回目で参加ボタン（打ち消し）が見える
+    let opening = meet_in_chrome(vec![]).mic("chrome.exe");
+    let waiting = meet_in_chrome(vec![button("今すぐ参加")]).mic("chrome.exe");
+    let mut run = Run::new();
+    assert!(run.tick(&opening).is_empty());
+    assert_eq!(run.state(MEET), ServiceState::Confirming);
+    assert!(run.hold(&waiting, 30).is_empty(), "待機画面");
+    assert_eq!(run.state(MEET), ServiceState::Waiting);
+    // 参加すると、退出ボタン（強）で、その回に始まる
+    assert_eq!(run.tick(&meet_in_chrome(vec![button("通話から退出")]).mic("chrome.exe")), started(MEET));
 
-    // 会議が続いている間に別の会議が検出されても、開始にはしない
-    for now in [6_000, 8_000, 30_000, 60_000] {
-        assert_eq!(tracker.tick(zoom, true, now), None);
-        assert_eq!(tracker.active().map(|d| d.app), Some(MeetingApp::GoogleMeet));
+    // 部品を調べない回は数えない。調べた回が 2 回になり、4 秒たってから始める
+    let mut run = Run::new();
+    let unscanned = opening.clone().unscanned();
+    assert!(run.tick(&opening).is_empty());
+    assert!(run.tick(&unscanned).is_empty());
+    assert!(run.tick(&unscanned).is_empty(), "4 秒たったが、調べたのは 1 回");
+    assert_eq!(run.tick(&opening), started(MEET));
+
+    // タブを閉じる途中（題とマイクが残り、部品が読めない）は、閉じ終わると数え直す
+    let mut run = Run::new();
+    assert!(run.tick(&opening).is_empty());
+    assert!(run.tick(&Pc::new()).is_empty());
+    assert!(run.tick(&opening).is_empty());
+    assert!(run.tick(&opening).is_empty());
+    assert_eq!(run.tick(&opening), started(MEET), "途切れてから 4 秒");
+
+    // マイクだけ（弱い印 1 つ）では始めない
+    let mut run = Run::new();
+    assert!(run.hold(&Pc::new().mic("slack.exe"), 60).is_empty());
+}
+
+/// 強い印も組み合わせもない状態が 20 秒続いたら終了。戻れば続き。Meet の退出後の画面（打ち消し）が出たら、すぐ終了。
+/// 退出したあともタブの題が残るだけでは、続いているとみなさない。
+// [MTG-008]
+#[test]
+fn a_meeting_ends_after_the_grace_period_or_at_once_on_the_left_screen() {
+    let joined = meet_in_chrome(vec![button("通話から退出")]).mic("chrome.exe");
+    let mut run = Run::new();
+    assert_eq!(run.tick(&joined), started(MEET));
+    // 退出したが、題が残っていて、部品は読めない
+    let title_only = meet_in_chrome(vec![]);
+    assert!(run.hold(&title_only, 18).is_empty());
+    assert!(run.tick(&joined).is_empty(), "20 秒以内に戻れば続き");
+    assert!(run.hold(&title_only, 18).is_empty());
+    assert_eq!(run.hold(&title_only, 4), ended(MEET));
+    assert!(run.hold(&title_only, 30).is_empty(), "題だけで始め直さない");
+
+    // 退出後の画面が出たら、すぐに終わる
+    let mut run = Run::new();
+    assert_eq!(run.tick(&joined), started(MEET));
+    for screen in [
+        vec![control(ControlType::Text, "ミーティングから退出しました"), button("再参加"), button("ホーム画面に戻る")],
+        vec![control(ControlType::Text, "You left the meeting"), button("Rejoin")],
+    ] {
+        let left = meet_in_chrome(screen).mic("chrome.exe");
+        let decisions = run.judge.tick(&left.evaluation(), run.now);
+        assert_eq!(decisions.iter().map(|d| d.event).collect::<Vec<_>>(), ended(MEET));
+        assert!(matches!(&decisions[0].reason, Reason::Veto { signal, .. } if signal == "退出後の画面"), "{:?}", decisions[0].reason);
+        run.now += POLL_MS;
+        assert!(run.hold(&left, 10).is_empty());
+        assert_eq!(run.tick(&joined), started(MEET), "再参加");
     }
 }
 
-/// 会議が終わって 20 秒たたないうちに別のアプリの会議が始まったら、前の会議を終わらせて、新しい会議を始める。
+/// 開始のあとは、背面を含むタブの印も数える。Meet のタブを背面にしても、タブの一覧にあり、マイクを使っている間は続く。
+/// 開始の前は、背面のタブの印では始めない。
+// [MTG-009]
+#[test]
+fn a_browser_meeting_continues_in_a_background_tab() {
+    let joined = meet_in_chrome(vec![button("通話から退出"), control(ControlType::TabItem, "Meet - abc-defg-hij")]).mic("chrome.exe");
+    let docs = |mic: bool| {
+        let pc = Pc::new().window(
+            window(10, "chrome.exe", CHROME, "企画書 - Google ドキュメント - Google Chrome"),
+            vec![control(ControlType::TabItem, "企画書 - Google ドキュメント"), control(ControlType::TabItem, "Meet - abc-defg-hij - マイクを使用中")],
+        );
+        if mic { pc.mic("chrome.exe") } else { pc }
+    };
+    let mut run = Run::new();
+    assert!(run.hold(&docs(true), 30).is_empty(), "開始の前は、背面のタブでは始めない");
+    assert_eq!(run.tick(&joined), started(MEET));
+    assert!(run.hold(&docs(true), 120).is_empty(), "背面のタブとマイクで続く");
+    assert_eq!(run.judge.phase(), Phase::Active(MEET));
+    assert_eq!(run.judge.meeting_windows(), vec![10], "会議の窓の中を調べ続ける");
+    assert_eq!(run.hold(&docs(false), 22), ended(MEET), "マイクも再生の音もなくなったら、猶予のあとで終わる");
+}
+
+/// 2 つの会議が重なったとき: あとの会議の開始は知らせないが、判定は続ける。先の会議が終わると、あとの会議に切り替わり、
+/// 段階が先の会議のまま残らない。
 // [MTG-010]
 #[test]
-fn a_meeting_in_another_app_right_after_one_ends_is_a_new_meeting() {
-    let meet = browser(MeetingApp::GoogleMeet);
-    let zoom = desktop(MeetingApp::Zoom);
-    let mut tracker = MeetingTracker::default();
-    tracker.tick(meet, false, 0);
-    assert_eq!(tracker.tick(meet, true, 4_000), Some(MeetingEvent::Started(MeetingApp::GoogleMeet)));
+fn overlapping_meetings_switch_to_the_one_still_going() {
+    let slack = |leave: bool| {
+        Pc::new().window(window(60, "slack.exe", CHROME, "Huddle: 山田 - Acme - Slack"), if leave { vec![button("退出")] } else { vec![] })
+    };
+    let with_meet = |pc: Pc| pc.window(window(10, "chrome.exe", CHROME, "Meet - abc-defg-hij - Google Chrome"), vec![button("通話から退出")]);
+    let mut run = Run::new();
+    assert_eq!(run.tick(&slack(true)), started(SLACK));
+    assert!(run.hold(&with_meet(slack(true)), 10).is_empty(), "あとの会議の開始は知らせない");
+    assert_eq!(run.judge.phase(), Phase::Active(SLACK));
+    assert_eq!(run.judge.others(), vec![MEET]);
+    // Slack のハドルを抜けた（ハドルの窓だけが少し残る）
+    let left_slack = with_meet(Pc::new().window(window(60, "slack.exe", CHROME, "Huddle: 山田 - Acme - Slack"), vec![]));
+    assert_eq!(run.tick(&left_slack), vec![MeetingEvent::Ended(SLACK), MeetingEvent::Started(MEET)]);
+    assert_eq!(run.judge.phase(), Phase::Active(MEET));
+    assert!(run.judge.others().is_empty());
+    assert!(run.hold(&left_slack, 30).is_empty());
+    assert_eq!(run.hold(&Pc::new(), 22), ended(MEET));
 
-    // Meet を抜けて、6 秒後（終了が確定する 20 秒より前）に Zoom の会議に入る
-    assert_eq!(tracker.tick(None, false, 10_000), None);
-    assert_eq!(tracker.tick(zoom, false, 16_000), None, "一瞬の検出では切り替えない");
-    assert_eq!(tracker.tick(zoom, false, 18_000), None);
-    // Zoom が 4 秒続いたら、前の会議の終了を知らせ、次の回に新しい会議の開始を知らせる
-    assert_eq!(tracker.tick(zoom, false, 20_000), Some(MeetingEvent::Ended(MeetingApp::GoogleMeet)));
-    assert_eq!(tracker.active(), None);
-    assert_eq!(tracker.tick(zoom, false, 22_000), Some(MeetingEvent::Started(MeetingApp::Zoom)));
-    assert_eq!(tracker.active().map(|d| d.app), Some(MeetingApp::Zoom));
-    assert_eq!(tracker.tick(zoom, true, 24_000), None, "開始は 1 回だけ");
-
-    // Zoom が終われば、いつもどおり 20 秒後に終了
-    assert_eq!(tracker.tick(None, false, 30_000), None);
-    assert_eq!(tracker.tick(None, false, 50_000), Some(MeetingEvent::Ended(MeetingApp::Zoom)));
+    // 同じサービスの印がまた立てば、前の会議の続き
+    let mut run = Run::new();
+    assert_eq!(run.tick(&slack(true)), started(SLACK));
+    assert!(run.hold(&Pc::new(), 10).is_empty());
+    assert!(run.hold(&slack(true), 10).is_empty());
 }
 
-/// 別のアプリの会議が見えても、前の会議が戻ってくれば続き。別の会議が途切れたら数え直す。
-// [MTG-010]
+/// 再生の音は、音の大きさが 0.01 以上のときだけ印にする（ピーク 0.001 の音では立たない）。
+/// オーディオのセッションの一覧を読めなくても、ほかの印で判定を続ける。
+// [MTG-020]
 #[test]
-fn the_previous_meeting_continues_if_it_comes_back_before_the_switch_is_confirmed() {
-    let slack = desktop(MeetingApp::SlackHuddle);
-    let teams = desktop(MeetingApp::Teams);
-    let mut tracker = MeetingTracker::default();
-    tracker.tick(slack, false, 0);
-    assert_eq!(tracker.tick(slack, true, 4_000), Some(MeetingEvent::Started(MeetingApp::SlackHuddle)));
+fn sound_needs_a_level_above_the_floor_and_missing_sessions_do_not_stop_judging() {
+    let mut run = Run::new();
+    assert!(run.hold(&Pc::new().mic("discord.exe").sound("discord.exe", 0.001), 20).is_empty());
+    let mut run = Run::new();
+    assert_eq!(run.hold(&Pc::new().mic("discord.exe").sound("discord.exe", 0.05), 6), started(MeetingApp::Discord));
 
-    // ハドルが一瞬途切れて Teams が見えたが、2 秒後にはハドルが戻った
-    assert_eq!(tracker.tick(teams, false, 6_000), None);
-    assert_eq!(tracker.tick(slack, true, 8_000), None);
-    assert_eq!(tracker.active().map(|d| d.app), Some(MeetingApp::SlackHuddle));
-    // そのあとまた Teams が見えても、4 秒を数え直す
-    assert_eq!(tracker.tick(teams, false, 10_000), None);
-    assert_eq!(tracker.tick(teams, false, 12_000), None);
-    assert_eq!(tracker.tick(teams, false, 14_000), Some(MeetingEvent::Ended(MeetingApp::SlackHuddle)));
-    assert_eq!(tracker.tick(teams, false, 16_000), Some(MeetingEvent::Started(MeetingApp::Teams)));
-
-    // 別のアプリの会議が続かないまま 20 秒たてば、前の会議はふつうに終わる。そのあとの会議は、4 秒続いてから始まる
-    let mut tracker = MeetingTracker::default();
-    tracker.tick(slack, false, 0);
-    tracker.tick(slack, true, 4_000);
-    assert_eq!(tracker.tick(None, false, 6_000), None);
-    assert_eq!(tracker.tick(teams, false, 22_000), None);
-    assert_eq!(tracker.tick(teams, false, 24_000), Some(MeetingEvent::Ended(MeetingApp::SlackHuddle)), "見えなくなって 20 秒");
-    assert_eq!(tracker.tick(teams, false, 26_000), Some(MeetingEvent::Started(MeetingApp::Teams)));
+    let pc = Pc::new().window(window(70, "discord.exe", CHROME, "#一般 | 開発 - Discord"), vec![button("切断")]);
+    let mut facts = pc.facts();
+    facts.capture = AudioSessions { available: false, error: Some("0x88890004".into()), ..Default::default() };
+    let evaluation = evaluate(Rules::builtin(), &facts, &Browsers::builtin());
+    let mut judge = Judge::new(Rules::builtin());
+    assert_eq!(judge.tick(&evaluation, 0).iter().map(|d| d.event).collect::<Vec<_>>(), started(MeetingApp::Discord));
 }
 
-/// 同じアプリの会議がまた見えたときは、続きとして扱う（終了にしない）。
-// [MTG-008][MTG-010]
+/// Zoom の会議の窓（ZPContentViewWndClass・ConfMultiTabContentWndClass）は、見えているものだけ強い印。
+/// 見えない窓と、参加前のプレビューの窓では立たない。
+// [MTG-027]
 #[test]
-fn the_same_app_seen_again_within_the_grace_period_is_the_same_meeting() {
-    let meet = browser(MeetingApp::GoogleMeet);
-    let mut tracker = MeetingTracker::default();
-    tracker.tick(meet, false, 0);
-    tracker.tick(meet, true, 4_000);
-    assert_eq!(tracker.tick(None, false, 10_000), None);
-    for now in [20_000, 22_000, 24_000, 40_000] {
-        assert_eq!(tracker.tick(meet, false, now), None);
+fn zoom_meeting_windows_count_only_while_visible() {
+    for class in ["ZPContentViewWndClass", "ConfMultiTabContentWndClass"] {
+        let mut run = Run::new();
+        assert_eq!(run.tick(&Pc::new().window(window(80, "zoom.exe", class, "Zoom ミーティング"), vec![])), started(MeetingApp::Zoom), "{class}");
     }
-    assert_eq!(tracker.active().map(|d| d.app), Some(MeetingApp::GoogleMeet));
-    assert_eq!(tracker.tick(None, false, 59_000), None);
-    assert_eq!(tracker.tick(None, false, 60_000), Some(MeetingEvent::Ended(MeetingApp::GoogleMeet)));
+    let mut run = Run::new();
+    let not_yet = Pc::new()
+        .window(hidden(81, "zoom.exe", "ConfMultiTabContentWndClass", "Zoom ミーティング"), vec![])
+        .window(window(82, "zoom.exe", "VideoPreviewWndClass", "ビデオのプレビュー"), vec![])
+        .mic("zoom.exe");
+    assert!(run.hold(&not_yet, 30).is_empty());
+    // ボタンの列が隠れて部品が読めない間も、会議の窓で続く
+    let mut run = Run::new();
+    let meeting = Pc::new().window(window(80, "zoom.exe", "ZPContentViewWndClass", "Zoom ミーティング"), vec![button("退出")]);
+    assert_eq!(run.tick(&meeting), started(MeetingApp::Zoom));
+    assert!(run.hold(&Pc::new().window(window(80, "zoom.exe", "ZPContentViewWndClass", "Zoom ミーティング"), vec![]), 60).is_empty());
 }
 
-// [MTG-021]
-#[cfg(not(windows))]
+/// Teams（実機で測っていない）: 参加前の画面の参加ボタン（打ち消し）の間は始めず、参加して退出ボタンが出たら始める。
+// [MTG-004][MTG-007]
 #[test]
-fn nothing_is_detected_outside_windows() {
-    let seen = observe();
-    assert_eq!(seen, Observation::default());
-    assert_eq!(detect(&seen, None), None);
-    let mut tracker = MeetingTracker::default();
-    for tick in 0..20 {
-        assert_eq!(tracker.observe(&seen, None, tick * 2_000), None);
-    }
+fn teams_starts_after_the_pre_join_screen() {
+    let pre_join = Pc::new().window(window(90, "ms-teams.exe", CHROME, "会議 | Microsoft Teams"), vec![button("今すぐ参加")]).mic("ms-teams.exe");
+    let mut run = Run::new();
+    assert!(run.hold(&pre_join, 20).is_empty());
+    let joined = Pc::new().window(window(90, "ms-teams.exe", CHROME, "会議 | Microsoft Teams"), vec![button("退出")]).mic("ms-teams.exe");
+    assert_eq!(run.tick(&joined), started(MeetingApp::Teams));
 }
 
-/// Windows では、調べた結果がどうであっても失敗しない（中身は環境による）。
-#[cfg(windows)]
+/// 開始の理由には、立っていた印の名前と文脈を書く（ログと記録に残す）。
+// [MTG-025][LOG-005]
 #[test]
-fn observe_returns_on_windows() {
-    let _ = observe();
+fn decisions_tell_which_signals_started_and_ended_a_meeting() {
+    let mut judge = Judge::new(Rules::builtin());
+    let joined = meet_in_chrome(vec![button("通話から退出")]).mic("chrome.exe");
+    let decisions = judge.tick(&joined.evaluation(), 0);
+    assert_eq!(decisions[0].reason.describe(), "強い印（chrome.exe の窓）: 退出ボタン");
+    let decisions = judge.tick(&Pc::new().evaluation(), 2_000);
+    assert!(decisions.is_empty());
+    let decisions = judge.tick(&Pc::new().evaluation(), 22_000);
+    assert_eq!(decisions[0].reason.describe(), "強い印も組み合わせもない状態が 20 秒続いた");
+
+    let mut judge = Judge::new(Rules::builtin());
+    let combination = Pc::new().mic("discord.exe").sound("discord.exe", 0.3);
+    judge.tick(&combination.evaluation(), 0);
+    judge.tick(&combination.evaluation(), 2_000);
+    let decisions = judge.tick(&combination.evaluation(), 4_000);
+    assert_eq!(decisions[0].reason.describe(), "中・弱い印の組み合わせ（discord.exe（アプリ））: Discord のマイク・Discord の再生の音");
 }
