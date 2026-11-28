@@ -1,0 +1,113 @@
+{
+  "format": "kiroscribe-meeting-record/5",
+  "appVersion": "0.4.4",
+  "rulesVersion": 4,
+  "entries": [
+    {
+      "at": 1796000000000,
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "chrome.exe",
+              "window": 410,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "退出ボタン",
+                  "strength": "strong",
+                  "kind": "control"
+                },
+                {
+                  "name": "Meet のタブの題",
+                  "strength": "medium",
+                  "kind": "window"
+                },
+                {
+                  "name": "背面を含む Meet のタブ",
+                  "strength": "weak",
+                  "kind": "control",
+                  "afterStart": true
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1796000002000,
+      "gaps": [
+        2000,
+        2000,
+        2000,
+        2000,
+        2000,
+        2000,
+        2000,
+        2000,
+        2000,
+        2000,
+        2000,
+        2000,
+        2000,
+        2000,
+        2000
+      ],
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "chrome.exe",
+              "window": 410,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "Meet のタブの題",
+                  "strength": "medium",
+                  "kind": "window"
+                },
+                {
+                  "name": "背面を含む Meet のタブ",
+                  "strength": "weak",
+                  "kind": "control",
+                  "afterStart": true
+                }
+              ]
+            },
+            {
+              "app": "chrome.exe",
+              "window": 420,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "背面を含む Meet のタブ",
+                  "strength": "weak",
+                  "kind": "control",
+                  "afterStart": true
+                },
+                {
+                  "name": "ブラウザのマイク",
+                  "strength": "weak",
+                  "kind": "session"
+                },
+                {
+                  "name": "ブラウザの再生の音",
+                  "strength": "weak",
+                  "kind": "session"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "expected": [
+    "started:googleMeet",
+    "ended:googleMeet"
+  ],
+  "description": "Meet を退出し、退出後の画面のボタンを読めず、題とタブの名前だけが残る。同じブラウザの別の窓（420）に Meet に似た名前の背面のタブがあり、その窓でマイクと再生の音が続いても、会議を確かめた窓（410）でないので続けず、20 秒で終える（形式 /4 の判定では続いていた）。"
+}

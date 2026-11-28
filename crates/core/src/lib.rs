@@ -1,6 +1,7 @@
 //! Kiroscribe のコアロジック。Tauri に依存しないため単体でテストできる。
 
 pub mod audio;
+pub mod audio_sessions;
 pub mod autostart;
 pub mod chat;
 pub mod claude;
@@ -15,9 +16,12 @@ pub mod help;
 pub mod http;
 pub mod legacy;
 pub mod log_submit;
+pub mod meeting_facts;
+pub mod meeting_judge;
 pub mod meeting_record;
+pub mod meeting_record_v1;
+pub mod meeting_rules;
 pub mod meetings;
-pub mod mic_store;
 pub mod notes;
 pub mod prompts;
 pub mod recorder;

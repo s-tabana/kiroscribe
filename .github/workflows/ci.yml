@@ -98,3 +98,20 @@ jobs:
           archive: false
           if-no-files-found: error
           retention-days: 14
+
+      # 会議の検出の確認用の道具（crates/core/examples/meeting_probe）。製品と同じ判定表で、窓・窓の中の部品・
+      # オーディオのセッションから立った印と、会議の開始・終了の判定を表示する。配布の前に、実機で会議に入って確かめるために使う
+      - name: 会議の検出の確認用の道具のビルド
+        run: cargo build -p kiroscribe-core --release --example meeting_probe --locked
+
+      # 音声デバイスのないランナーでも、オーディオのセッションの一覧を読めて（読めなければ終了コード 1）、止まらずに終わることを確かめる
+      - name: 会議の検出の確認用の道具の動作確認
+        run: target/release/examples/meeting_probe.exe --once --require-sessions
+
+      - name: 会議の検出の確認用の道具を成果物として保存
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: target/release/examples/meeting_probe.exe
+          archive: false
+          if-no-files-found: error
+          retention-days: 14

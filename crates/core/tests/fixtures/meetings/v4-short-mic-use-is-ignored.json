@@ -1,0 +1,36 @@
+{
+  "format": "kiroscribe-meeting-record/4",
+  "appVersion": "0.4.3",
+  "rulesVersion": 3,
+  "entries": [
+    {
+      "at": 1795000000000,
+      "gaps": [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000],
+      "services": [
+        {
+          "app": "slackHuddle",
+          "contexts": [
+            {
+              "app": "slack.exe",
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "Slack のマイク",
+                  "strength": "weak",
+                  "kind": "session"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000030000,
+      "gaps": [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000],
+      "services": []
+    }
+  ],
+  "expected": [],
+  "description": "Slack のマイクのテスト（マイクだけ、弱い印 1 つ）では始めない。チェックボックスは退出ボタンに数えない"
+}

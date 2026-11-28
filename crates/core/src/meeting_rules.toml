@@ -1,0 +1,376 @@
+# Kiroscribe の会議の検出の判定表（製品に組み込む。利用者は変えられない）。
+# 形式と、各サービスの表の説明は docs/spec/mtg.md の「判定表」の節にある。表を変えたら、そちらも直す
+# （名前のそろい方は、crates/core/src/meeting_rules.rs のテストが確かめる）。
+
+# 判定表の版。印を足す・名前を変える・強さを変えたら上げる（会議の検出の記録 meeting-detection.json に書く）
+version = 4
+
+# 強い印も、中・弱い印の組み合わせもない状態が、これだけ続いたら会議の終了とする（秒）
+end_after_seconds = 20
+# 強い印がなく、中・弱い印の組み合わせで始めるときに、組み合わせが続いている必要がある秒数と、
+# その間に窓の中の部品を調べた回数
+combination_seconds = 4
+combination_scans = 2
+# 再生の音が「鳴っている」とみなす音の大きさ（IAudioMeterInformation のピーク。0〜1）
+audible_peak = 0.01
+
+# 名前の決まり（「@名前」で参照する）。書き方は docs/spec/mtg.md の「名前と題の比べ方」
+[words]
+# 退出・切断のボタン
+leave = ["leave", "hang up", "hangup", "disconnect", "end call", "退出", "退室", "切断", "通話を終了", "会議を終了"]
+# 参加前の待機画面のボタン（参加中には出ない）
+join = ["join now", "ask to join", "join meeting", "今すぐ参加", "参加をリクエスト", "参加リクエスト", "会議に参加"]
+# Google Meet のタブの題
+meet = ["^meet - ", "^meet: ", "^meet：", "google meet", "meet.google.com", " - meet - "]
+# Google Meet の退出後の画面のボタン（退出後の画面は、このボタンで見分ける。見出しの文字は、同じ文を書いた会議のチャットの
+# 本文と、部品の名前と種類では区別できないので使わない）
+meet_left_button = ["再参加", "rejoin", "ホーム画面に戻る", "return to home screen"]
+# Slack の、ハドルからの退出ではない部品
+slack_not_leave = ["自動的に", "automatically", "チャンネルから退出", "leave channel"]
+# ブラウザ版 Slack のハドルのタブの題
+slack_huddle = ["slack + huddle", "slack + ハドル"]
+# Discord の画面のタブの題
+discord_tab = ["^discord | ", " | discord$", " - discord$"]
+# Discord の、通話からの切断ではない部品
+discord_not_leave = ["server", "サーバー", "group", "グループ"]
+# ブラウザ版 Teams の会議のタブの題
+teams_meeting = ["microsoft teams + meeting", "microsoft teams + 会議", "microsoft teams + call", "microsoft teams + 通話"]
+# Teams のデスクトップ版の、会議の窓の題
+teams_window = ["meeting", "会議", "call", "通話"]
+# ブラウザ版 Zoom のミーティングのタブの題
+zoom_meeting = ["zoom + meeting", "zoom + ミーティング"]
+
+[[service]]
+app = "googleMeet"
+# ブラウザの窓・部品の印は、表示中のページがこのホスト（かサブドメイン）のときだけ立つ（アドレスバーから読む）
+sites = ["meet.google.com"]
+
+[[service.signal]]
+name = "退出ボタン"
+strength = "strong"
+kind = "control"
+apps = ["browser"]
+title = ["@meet"]
+names = ["@leave"]
+
+[[service.signal]]
+name = "待機画面の参加ボタン"
+strength = "veto"
+kind = "control"
+apps = ["browser"]
+title = ["@meet"]
+names = ["@join"]
+
+[[service.signal]]
+name = "退出後の画面のボタン"
+strength = "veto"
+kind = "control"
+apps = ["browser"]
+title = ["@meet"]
+names = ["@meet_left_button"]
+
+[[service.signal]]
+name = "Meet のタブの題"
+strength = "medium"
+kind = "window"
+apps = ["browser"]
+title = ["@meet"]
+
+[[service.signal]]
+name = "背面を含む Meet のタブ"
+strength = "weak"
+kind = "control"
+apps = ["browser"]
+names = ["@meet"]
+types = ["TabItem"]
+after_start = true
+
+[[service.signal]]
+name = "ブラウザのマイク"
+strength = "weak"
+kind = "session"
+apps = ["browser"]
+flow = "capture"
+
+[[service.signal]]
+name = "ブラウザの再生の音"
+strength = "weak"
+kind = "session"
+apps = ["browser"]
+flow = "render"
+audible = true
+
+[[service]]
+app = "slackHuddle"
+sites = ["slack.com"]
+
+[[service.signal]]
+name = "退出ボタン"
+strength = "strong"
+kind = "control"
+apps = ["slack.exe"]
+names = ["@leave"]
+exclude = ["@slack_not_leave"]
+
+[[service.signal]]
+name = "ハドルの窓"
+strength = "medium"
+kind = "window"
+apps = ["slack.exe"]
+title = ["huddle", "ハドル"]
+
+[[service.signal]]
+name = "Slack のマイク"
+strength = "weak"
+kind = "session"
+apps = ["slack.exe"]
+flow = "capture"
+
+[[service.signal]]
+name = "Slack の再生の音"
+strength = "weak"
+kind = "session"
+apps = ["slack.exe"]
+flow = "render"
+audible = true
+
+[[service.signal]]
+name = "ブラウザ版の退出ボタン"
+strength = "strong"
+kind = "control"
+apps = ["browser"]
+title = ["slack"]
+names = ["@leave"]
+exclude = ["@slack_not_leave"]
+
+[[service.signal]]
+name = "ブラウザ版のハドルのタブの題"
+strength = "medium"
+kind = "window"
+apps = ["browser"]
+title = ["@slack_huddle"]
+
+[[service.signal]]
+name = "背面を含む Slack のタブ"
+strength = "weak"
+kind = "control"
+apps = ["browser"]
+names = ["slack"]
+types = ["TabItem"]
+after_start = true
+
+[[service.signal]]
+name = "ブラウザのマイク"
+strength = "weak"
+kind = "session"
+apps = ["browser"]
+flow = "capture"
+
+[[service.signal]]
+name = "ブラウザの再生の音"
+strength = "weak"
+kind = "session"
+apps = ["browser"]
+flow = "render"
+audible = true
+
+[[service]]
+app = "discord"
+sites = ["discord.com"]
+
+[[service.signal]]
+name = "切断ボタン"
+strength = "strong"
+kind = "control"
+apps = ["discord.exe", "discordptb.exe", "discordcanary.exe", "discorddevelopment.exe"]
+names = ["@leave"]
+exclude = ["@discord_not_leave"]
+# メッセージ（一覧の項目）の中のボタンでは立たない（アプリがメッセージに置くボタンは、名前を自由に決められる）
+skip_list_items = true
+
+[[service.signal]]
+name = "Discord のマイク"
+strength = "weak"
+kind = "session"
+apps = ["discord.exe", "discordptb.exe", "discordcanary.exe", "discorddevelopment.exe"]
+flow = "capture"
+
+[[service.signal]]
+name = "Discord の再生の音"
+strength = "weak"
+kind = "session"
+apps = ["discord.exe", "discordptb.exe", "discordcanary.exe", "discorddevelopment.exe"]
+flow = "render"
+audible = true
+
+[[service.signal]]
+name = "ブラウザ版の切断ボタン"
+strength = "strong"
+kind = "control"
+apps = ["browser"]
+title = ["@discord_tab"]
+names = ["@leave"]
+exclude = ["@discord_not_leave"]
+# メッセージ（一覧の項目）の中のボタンでは立たない（アプリがメッセージに置くボタンは、名前を自由に決められる）
+skip_list_items = true
+
+# ブラウザ版は、切断ボタンだけで始め、続ける。タブの題はチャンネルの名前で、切断したあとも同じまま残る。ブラウザのマイクと
+# 再生の音は、実行ファイルの単位でしか分からず、別のタブのものでも立つ。どちらも、その通話に参加中であることを示さない
+[[service]]
+app = "teams"
+sites = ["teams.microsoft.com", "teams.live.com", "teams.cloud.microsoft"]
+
+[[service.signal]]
+name = "退出ボタン"
+strength = "strong"
+kind = "control"
+apps = ["ms-teams.exe", "teams.exe"]
+names = ["@leave"]
+
+[[service.signal]]
+name = "参加前の画面の参加ボタン"
+strength = "veto"
+kind = "control"
+apps = ["ms-teams.exe", "teams.exe"]
+names = ["@join"]
+
+[[service.signal]]
+name = "会議の窓の題"
+strength = "medium"
+kind = "window"
+apps = ["ms-teams.exe", "teams.exe"]
+title = ["@teams_window"]
+
+[[service.signal]]
+name = "Teams のマイク"
+strength = "weak"
+kind = "session"
+apps = ["ms-teams.exe", "ms-teams_modulehost.exe", "teams.exe"]
+flow = "capture"
+
+[[service.signal]]
+name = "Teams の再生の音"
+strength = "weak"
+kind = "session"
+apps = ["ms-teams.exe", "ms-teams_modulehost.exe", "teams.exe"]
+flow = "render"
+audible = true
+
+[[service.signal]]
+name = "ブラウザ版の退出ボタン"
+strength = "strong"
+kind = "control"
+apps = ["browser"]
+title = ["microsoft teams"]
+names = ["@leave"]
+
+[[service.signal]]
+name = "ブラウザ版の参加ボタン"
+strength = "veto"
+kind = "control"
+apps = ["browser"]
+title = ["microsoft teams"]
+names = ["@join"]
+
+[[service.signal]]
+name = "ブラウザ版の会議のタブの題"
+strength = "medium"
+kind = "window"
+apps = ["browser"]
+title = ["@teams_meeting"]
+
+[[service.signal]]
+name = "背面を含む Teams のタブ"
+strength = "weak"
+kind = "control"
+apps = ["browser"]
+names = ["microsoft teams"]
+types = ["TabItem"]
+after_start = true
+
+[[service.signal]]
+name = "ブラウザのマイク"
+strength = "weak"
+kind = "session"
+apps = ["browser"]
+flow = "capture"
+
+[[service.signal]]
+name = "ブラウザの再生の音"
+strength = "weak"
+kind = "session"
+apps = ["browser"]
+flow = "render"
+audible = true
+
+[[service]]
+app = "zoom"
+sites = ["zoom.us", "zoom.com"]
+
+[[service.signal]]
+name = "ミーティングの窓"
+strength = "strong"
+kind = "window"
+apps = ["zoom.exe"]
+class = ["ZPContentViewWndClass", "ConfMultiTabContentWndClass"]
+
+[[service.signal]]
+name = "退出ボタン"
+strength = "strong"
+kind = "control"
+apps = ["zoom.exe"]
+names = ["@leave"]
+
+[[service.signal]]
+name = "Zoom のマイク"
+strength = "weak"
+kind = "session"
+apps = ["zoom.exe", "cpthost.exe"]
+flow = "capture"
+
+[[service.signal]]
+name = "Zoom の再生の音"
+strength = "weak"
+kind = "session"
+apps = ["zoom.exe", "cpthost.exe"]
+flow = "render"
+audible = true
+
+[[service.signal]]
+name = "ブラウザ版の退出ボタン"
+strength = "strong"
+kind = "control"
+apps = ["browser"]
+title = ["zoom"]
+names = ["@leave"]
+
+[[service.signal]]
+name = "ブラウザ版のミーティングのタブの題"
+strength = "medium"
+kind = "window"
+apps = ["browser"]
+title = ["@zoom_meeting"]
+
+[[service.signal]]
+name = "背面を含む Zoom のタブ"
+strength = "weak"
+kind = "control"
+apps = ["browser"]
+names = ["@zoom_meeting"]
+types = ["TabItem"]
+after_start = true
+
+[[service.signal]]
+name = "ブラウザのマイク"
+strength = "weak"
+kind = "session"
+apps = ["browser"]
+flow = "capture"
+
+[[service.signal]]
+name = "ブラウザの再生の音"
+strength = "weak"
+kind = "session"
+apps = ["browser"]
+flow = "render"
+audible = true

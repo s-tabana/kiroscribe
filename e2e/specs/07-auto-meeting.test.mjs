@@ -306,13 +306,16 @@ test(
 
     // 会議の検出の記録は、回帰テストの材料と同じ形で入る
     const record = JSON.parse(files.get("meeting-detection.json").toString("utf8"));
-    assert.equal(record.format, "kiroscribe-meeting-record/1");
+    assert.equal(record.format, "kiroscribe-meeting-record/5");
     assert.ok(record.entries.length >= 1, JSON.stringify(record));
-    assert.match(record.ownExe, /^kiroscribe(\.exe)?$/);
-    // フルパス（利用者の名前を含む）は残さない
+    assert.equal(typeof record.rulesVersion, "number");
+    // フルパス（利用者の名前を含む）は残さない。詳しい記録がオフなので、窓の題も残さない
     for (const entry of record.entries) {
-      for (const user of entry.observation.micUsers) {
-        assert.ok(!/[\\/]/.test(user.app), `アプリのフルパスが記録に入っている: ${user.app}`);
+      assert.equal(entry.titles, undefined, JSON.stringify(entry));
+      for (const service of entry.services) {
+        for (const context of service.contexts) {
+          assert.ok(!/[\\/]/.test(context.app), `アプリのフルパスが記録に入っている: ${context.app}`);
+        }
       }
     }
 

@@ -6,7 +6,8 @@
 //! - `README.txt` … 中身の説明
 //! - `environment.json` … アプリと OS のバージョン、秘密でない設定（[`Environment`]）
 //! - `meeting-detection.json` … 会議の検出の記録（[`crate::meeting_record::MeetingRecord`]）
-//! - `logs/kiroscribe-<年月日>.log` … デバッグ用のログ（[`crate::debug_log`]）
+//! - `logs/kiroscribe-<年月日>.log` … デバッグ用のログ（[`crate::debug_log`]）。前の版が書いた行も、いまの伏せ方で伏せ直して入れる
+//!   （[`masked_log`]）
 
 use std::io::{Cursor, Write};
 use std::path::Path;
@@ -97,7 +98,7 @@ fn readme(environment: &Environment) -> String {
          不具合の原因を調べるための記録です。中身は次のとおりです。\n\
          \n\
          - {ENVIRONMENT}: アプリと OS のバージョン、設定（API キーは設定済みかどうかだけ）\n\
-         - {MEETING_RECORD}: 会議の検出の記録（マイクを使ったアプリの名前と、マイクを使っているブラウザのタブの名前）\n\
+         - {MEETING_RECORD}: 会議の検出の記録（判定に使ったアプリの名前と印の名前。「詳しい記録」がオンのときは、印の立っている窓やタブの名前も）\n\
          - {LOG_DIR}/: アプリの動き（起動と終了、更新の確認、会議の検出の判断、録音、文字起こしと AI の処理の成否と時間、エラー）\n\
          \n\
          API キー、録音した音声、文字起こし・メモ・議事録・AI チャットの本文は入っていません。\n\
@@ -131,10 +132,51 @@ pub fn build_bundle(input: &BundleInput<'_>) -> std::io::Result<(Vec<u8>, Vec<St
         let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
-        add(&mut zip, format!("{LOG_DIR}/{name}"), &bytes)?;
+        add(&mut zip, format!("{LOG_DIR}/{name}"), masked_log(&bytes).as_bytes())?;
     }
     let cursor = zip.finish().map_err(std::io::Error::other)?;
     Ok((cursor.into_inner(), names))
+}
+
+/// ログのファイルの中身を、いまの伏せ方（[`crate::debug_log::mask_text`]）で伏せ直す。前の版が書いた行には、いまなら伏せる
+/// 値（括弧のあるパスの後ろの URL のクエリなど）が残りうる。JSON として読める行は、文字列の値と名前を伏せて書き直し、
+/// 読めない行（書いている途中の行など）は、行全体を伏せる。伏せるもののない行は、書いたときのまま入れる。
+pub fn masked_log(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let (body, end) = match line.strip_suffix('\n') {
+            Some(body) => (body.strip_suffix('\r').unwrap_or(body), "\n"),
+            None => (line, ""),
+        };
+        match serde_json::from_str::<serde_json::Value>(body) {
+            Ok(value) => {
+                // 伏せるものがない行は、書いたときのまま入れる
+                let masked = mask_value(value.clone());
+                if masked == value {
+                    out.push_str(body);
+                } else {
+                    out.push_str(&serde_json::to_string(&masked).unwrap_or_default());
+                }
+            }
+            Err(_) => out.push_str(&crate::debug_log::mask_text(body)),
+        }
+        out.push_str(end);
+    }
+    out
+}
+
+/// 値の中の文字列（名前を含む）をすべて伏せる。
+fn mask_value(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(text) => Value::String(crate::debug_log::mask_text(&text)),
+        Value::Array(items) => Value::Array(items.into_iter().map(mask_value).collect()),
+        Value::Object(map) => {
+            Value::Object(map.into_iter().map(|(key, value)| (crate::debug_log::mask_text(&key), mask_value(value))).collect())
+        }
+        other => other,
+    }
 }
 
 /// zip を `out` に保存する。zip に入れた名前の一覧を返す。
@@ -230,8 +272,10 @@ mod tests {
         assert_eq!(build_number("", 0), None);
         assert_eq!(build_number("  ", 5), None);
     }
+    use crate::meeting_facts::{Facts, WindowFact};
     use crate::meeting_record::MeetingRecorder;
-    use crate::meetings::{MicUser, Observation, WindowInfo};
+    use crate::meeting_rules::{Context, Evaluation, Held, Kind, ServiceEvaluation, Strength};
+    use crate::meetings::MeetingApp;
 
     fn settings() -> Settings {
         Settings {
@@ -266,15 +310,31 @@ mod tests {
             settings: Some(SafeSettings::new(&settings(), Some(&keys))),
         };
         let mut recorder = MeetingRecorder::default();
-        let meeting = Observation {
-            mic_users: vec![MicUser { id: "chrome.exe".into(), in_use: true }],
-            windows: vec![WindowInfo {
+        let facts = Facts {
+            windows: vec![WindowFact {
+                hwnd: 7,
                 exe: "chrome.exe".into(),
-                title: "https://meet.google.com/abc-defg-hij?authuser=SECRETQUERY - Google Chrome".into(),
+                class: "Chrome_WidgetWin_1".into(),
+                title: "https://meet.google.com/a(1)/abc-defg-hij?authuser=SECRETQUERY - Google Chrome".into(),
+                visible: true,
+                site: Some("meet.google.com".into()),
+            }],
+            ..Default::default()
+        };
+        let meeting = Evaluation {
+            services: vec![ServiceEvaluation {
+                app: MeetingApp::GoogleMeet,
+                contexts: vec![Context {
+                    app: "chrome.exe".into(),
+                    window: Some(7),
+                    scanned: true,
+                    signals: vec![Held { name: "Meet のタブの題".into(), strength: Strength::Medium, kind: Kind::Window, after_start: false }],
+                }],
             }],
         };
-        recorder.record(0, &meeting, None);
-        let record = recorder.export("0.4.1", None);
+        // 詳しい記録のときの記録（窓の題が入る）
+        recorder.record(0, &meeting, &facts, &[], true);
+        let record = recorder.export("0.4.1");
         let out = dir.path().join("debug.zip");
         let names = write_bundle(
             &out,
@@ -312,12 +372,30 @@ mod tests {
         assert!(!env_text.contains("山田") && !env_text.contains("Realtek"), "{env_text}");
         let record: MeetingRecord = serde_json::from_str(&read(MEETING_RECORD)).unwrap();
         assert_eq!(record.format, crate::meeting_record::FORMAT, "回帰テストの材料と同じ形");
-        // ウィンドウのタイトルは伏せて入れる（判定に使う部分は残す）
-        let title = &record.entries[0].observation.windows[0].title;
-        assert_eq!(title, "https://meet.google.com/abc-defg-hij?<query> - Google Chrome");
+        // 窓の題は伏せて入れる
+        let title = &record.entries[0].titles[0].title;
+        // パスに `(`・`)` のある URL も、その後ろのクエリを伏せる
+        assert_eq!(title, "https://meet.google.com/a(1)/abc-defg-hij?<query> - Google Chrome");
         assert_eq!(read("logs/kiroscribe-20261127.log"), "{\"event\":\"app.exit\"}\n");
         let readme = read(README);
         assert!(readme.contains("API キー") && readme.contains("確かめてください"), "{readme}");
+    }
+
+    /// 前の版が書いたログの行に、いまなら伏せる値（括弧のあるパスの後ろの URL のクエリ）が残っていても、zip に入れるときに
+    /// 伏せ直す。JSON として読めない行も伏せる。伏せるもののない行は、書いたときのまま入れる。
+    // [LOG-009][LOG-011]
+    #[test]
+    fn old_log_lines_are_masked_again() {
+        let old = concat!(
+            "{\"at\":\"2026-11-27T10:00:00+09:00\",\"event\":\"update.check\",\"fields\":{\"url\":\"https://example.com/a(1)/b?token=OLDSECRET\"}}\r\n",
+            "{\"event\":\"app.exit\",\"at\":\"x\"}\n",
+            "書きかけの行 https://example.com/a'b?sig=HALFSECRET",
+        );
+        let masked = masked_log(old.as_bytes());
+        assert!(!masked.contains("OLDSECRET") && !masked.contains("HALFSECRET"), "{masked}");
+        assert!(masked.contains("https://example.com/a(1)/b?<query>"), "{masked}");
+        assert!(masked.contains("{\"event\":\"app.exit\",\"at\":\"x\"}\n"), "伏せるもののない行はそのまま: {masked}");
+        assert_eq!(masked.lines().count(), 3);
     }
 
     #[test]

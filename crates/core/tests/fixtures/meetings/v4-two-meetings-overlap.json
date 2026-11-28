@@ -1,0 +1,115 @@
+{
+  "format": "kiroscribe-meeting-record/4",
+  "appVersion": "0.4.3",
+  "rulesVersion": 3,
+  "entries": [
+    {
+      "at": 1795000000000,
+      "gaps": [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000],
+      "services": [
+        {
+          "app": "slackHuddle",
+          "contexts": [
+            {
+              "app": "slack.exe",
+              "window": 200,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "退出ボタン",
+                  "strength": "strong",
+                  "kind": "control"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000020000,
+      "gaps": [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000],
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "chrome.exe",
+              "window": 300,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "退出ボタン",
+                  "strength": "strong",
+                  "kind": "control"
+                },
+                {
+                  "name": "Meet のタブの題",
+                  "strength": "medium",
+                  "kind": "window"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "app": "slackHuddle",
+          "contexts": [
+            {
+              "app": "slack.exe",
+              "window": 200,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "退出ボタン",
+                  "strength": "strong",
+                  "kind": "control"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000060000,
+      "gaps": [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000],
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "chrome.exe",
+              "window": 300,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "退出ボタン",
+                  "strength": "strong",
+                  "kind": "control"
+                },
+                {
+                  "name": "Meet のタブの題",
+                  "strength": "medium",
+                  "kind": "window"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000120000,
+      "gaps": [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000],
+      "services": []
+    }
+  ],
+  "expected": [
+    "started:slackHuddle",
+    "ended:slackHuddle",
+    "started:googleMeet",
+    "ended:googleMeet"
+  ],
+  "description": "Slack ハドルの最中に Google Meet にも入る。Meet の開始は知らせず、ハドルを抜けたら Meet に切り替える"
+}

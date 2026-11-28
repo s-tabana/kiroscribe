@@ -1,0 +1,75 @@
+{
+  "format": "kiroscribe-meeting-record/4",
+  "appVersion": "0.4.3",
+  "rulesVersion": 3,
+  "entries": [
+    {
+      "at": 1795000000000,
+      "gaps": [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000],
+      "services": [
+        {
+          "app": "zoom",
+          "contexts": [
+            {
+              "app": "zoom.exe",
+              "window": 400,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "ミーティングの窓",
+                  "strength": "strong",
+                  "kind": "window"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000060000,
+      "gaps": [2000, 2000],
+      "services": []
+    },
+    {
+      "at": 1795000066000,
+      "gaps": [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000],
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "chrome.exe",
+              "window": 300,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "退出ボタン",
+                  "strength": "strong",
+                  "kind": "control"
+                },
+                {
+                  "name": "Meet のタブの題",
+                  "strength": "medium",
+                  "kind": "window"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000130000,
+      "gaps": [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000],
+      "services": []
+    }
+  ],
+  "expected": [
+    "started:zoom",
+    "ended:zoom",
+    "started:googleMeet",
+    "ended:googleMeet"
+  ],
+  "description": "Zoom のミーティングの窓を閉じて、20 秒たたないうちに Google Meet に入る。Zoom を終えて、Meet の会議を始める"
+}

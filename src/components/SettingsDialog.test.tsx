@@ -48,6 +48,14 @@ describe("SettingsDialog", () => {
     expect(await within(field).findByText("未設定")).toBeInTheDocument();
   });
 
+  it("[MTG-032] 自動検出の説明に、ブラウザ版の Discord を記録する範囲と、続けて記録する方法を書く", async () => {
+    setup();
+    const auto = await screen.findByLabelText(/会議を検出したら自動で録音/);
+    const label = auto.closest("label") as HTMLElement;
+    expect(label).toHaveTextContent(/ブラウザ版の Discord は、通話のタブを表示している間だけ記録します/);
+    expect(label).toHaveTextContent(/通話のタブを表示したままにするか、手動で録音してください/);
+  });
+
   it("[SET-002][SET-012] 設定を変更して保存できる", async () => {
     const user = userEvent.setup();
     const { saveSettings, backend } = setup();
@@ -376,7 +384,7 @@ describe("SettingsDialog: デバッグ用のログ", () => {
     expect(saveBundle).toHaveBeenCalledWith(expect.stringMatching(/^kiroscribe-debug-\d{8}-\d{4}\.zip$/));
     expect(await screen.findByText("デバッグ用のログを保存しました: C:\\Users\\me\\debug.zip")).toBeInTheDocument();
     // 何が入るか（会議の検出の記録を含む）と、何が入らないかを、押す前に読める
-    expect(screen.getByText(/会議の検出の記録（マイクを使ったアプリの名前と、マイクを使っているブラウザのタブの名前）/)).toBeInTheDocument();
+    expect(screen.getByText(/会議の検出の記録（判定に使ったアプリの名前と印の名前。「詳しい記録」がオンのときは、印の立っている窓やタブの名前も）/)).toBeInTheDocument();
     expect(screen.getByText(/録音・ノート・文字起こし・議事録・AI チャットの内容と API キーは入りません。/)).toBeInTheDocument();
     // タブの名前に、会議でないページやメールの件名が入りうることと、人に渡す前に確かめることを添える
     expect(

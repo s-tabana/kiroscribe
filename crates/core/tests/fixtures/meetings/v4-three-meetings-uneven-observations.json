@@ -1,0 +1,202 @@
+{
+  "format": "kiroscribe-meeting-record/4",
+  "appVersion": "0.4.3",
+  "rulesVersion": 3,
+  "entries": [
+    {
+      "at": 1795000000000,
+      "services": [
+        {
+          "app": "zoom",
+          "contexts": [
+            {
+              "app": "zoom.exe",
+              "window": 400,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "ミーティングの窓",
+                  "strength": "strong",
+                  "kind": "window"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000002000,
+      "services": [
+        {
+          "app": "slackHuddle",
+          "contexts": [
+            {
+              "app": "slack.exe",
+              "window": 200,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "ハドルの窓",
+                  "strength": "medium",
+                  "kind": "window"
+                },
+                {
+                  "name": "Slack のマイク",
+                  "strength": "weak",
+                  "kind": "session"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "app": "zoom",
+          "contexts": [
+            {
+              "app": "zoom.exe",
+              "window": 400,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "ミーティングの窓",
+                  "strength": "strong",
+                  "kind": "window"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000004000,
+      "gaps": [5000, 2000, 2000],
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "chrome.exe",
+              "window": 300,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "Meet のタブの題",
+                  "strength": "medium",
+                  "kind": "window"
+                },
+                {
+                  "name": "ブラウザのマイク",
+                  "strength": "weak",
+                  "kind": "session"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "app": "slackHuddle",
+          "contexts": [
+            {
+              "app": "slack.exe",
+              "window": 200,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "ハドルの窓",
+                  "strength": "medium",
+                  "kind": "window"
+                },
+                {
+                  "name": "Slack のマイク",
+                  "strength": "weak",
+                  "kind": "session"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "app": "zoom",
+          "contexts": [
+            {
+              "app": "zoom.exe",
+              "window": 400,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "ミーティングの窓",
+                  "strength": "strong",
+                  "kind": "window"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000015000,
+      "gaps": [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000],
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "chrome.exe",
+              "window": 300,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "Meet のタブの題",
+                  "strength": "medium",
+                  "kind": "window"
+                },
+                {
+                  "name": "ブラウザのマイク",
+                  "strength": "weak",
+                  "kind": "session"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "app": "slackHuddle",
+          "contexts": [
+            {
+              "app": "slack.exe",
+              "window": 200,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "ハドルの窓",
+                  "strength": "medium",
+                  "kind": "window"
+                },
+                {
+                  "name": "Slack のマイク",
+                  "strength": "weak",
+                  "kind": "session"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000047000,
+      "gaps": [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000],
+      "services": []
+    }
+  ],
+  "expected": [
+    "started:zoom",
+    "ended:zoom",
+    "started:googleMeet",
+    "ended:googleMeet"
+  ],
+  "description": "Zoom の会議中に Slack ハドルと Google Meet の組み合わせがそろい、調べる間隔が揃わない（4 秒のあと 5 秒あいた）。実際に調べた時刻では両方とも同じ回に参加中になり、Zoom の窓を閉じると、判定表の順で先の Meet に切り替える。最後に両方を抜けると、猶予のあとで Meet を終える"
+}

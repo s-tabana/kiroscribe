@@ -1,11 +1,13 @@
-// 会議の自動検出を、製品と同じ仕組み（Windows が記録するマイクの使用状況と、ウィンドウのタイトル）で確かめる
+// 会議の自動検出を、製品と同じ仕組み（Windows のオーディオのセッションと、ウィンドウのタイトル）で確かめる
 // （Windows だけ。CI では仮想のオーディオケーブルを使う。e2e/lib/audio-device.mjs）。
 //
 // ほかのテストは meeting.txt で会議中かどうかを決めるが、ここでは検出を模擬せず（config の realMeetingDetection）、
 // - デスクトップの会議アプリ: マイクを開いたまま待つだけのプログラム（crates/core/examples/hold_mic.rs）を
 //   「Zoom.exe」「Discord.exe」の名前で動かす
-// - ブラウザの会議: Edge で「Meet - …」の題のページを開き、そのページがマイクを使う
-// ことで、実際に Windows に記録させ、アプリがそれを読んで録音を始め・止めることを確かめる。
+// - ブラウザの会議: Edge の通常の窓で「Meet - …」の題のページを手元のサーバーから開き、そのページがマイクを使う。
+//   製品はアドレスバーが示すサイトが会議のサービスのときだけ数えるので、このテストのビルドでは、
+//   手元のサーバー（127.0.0.1）を Google Meet のサイトとして足す（config の meetingSites。E2E テスト用のビルドだけ）
+// ことで、実際に Windows のオーディオのセッションを作り、アプリがそれを読んで録音を始め・止めることを確かめる。
 // 実際のサービス（Zoom などそのもの）がいつマイクを使うかは、ここでは確かめない（リリース前のチェックリスト）。
 // 環境変数 KIROSCRIBE_E2E_REAL_AUDIO=1 のときだけ走る。
 
@@ -20,6 +22,7 @@ import { noteTitles, sel } from "../lib/ui.mjs";
 const REAL_AUDIO = process.platform === "win32" && process.env.KIROSCRIBE_E2E_REAL_AUDIO === "1";
 const skip = !REAL_AUDIO && "仮想のオーディオケーブルを入れた Windows でだけ走る（KIROSCRIBE_E2E_REAL_AUDIO=1）";
 const HOLD_MIC = path.join(ROOT, "target", "debug", "examples", "hold_mic.exe");
+const MEETING_PROBE = path.join(ROOT, "target", "debug", "examples", "meeting_probe.exe");
 const EDGE = [
   path.join(process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)", "Microsoft", "Edge", "Application", "msedge.exe"),
   path.join(process.env.ProgramFiles ?? "C:\\Program Files", "Microsoft", "Edge", "Application", "msedge.exe"),
@@ -29,7 +32,12 @@ const GRACE_MS = 3_000;
 const options = {
   skip,
   timeout: 240_000,
-  config: { audio: { mic: null, system: null }, realMeetingDetection: true, timing: { meetingEndGraceMs: GRACE_MS } },
+  config: {
+    audio: { mic: null, system: null },
+    realMeetingDetection: true,
+    meetingSites: { googleMeet: ["127.0.0.1"] },
+    timing: { meetingEndGraceMs: GRACE_MS },
+  },
 };
 
 /** 子プロセスを、その子孫ごと止める（終わるまで待つ） */
@@ -42,38 +50,34 @@ function killTree(child) {
   });
 }
 
-/** マイクを使うだけのプログラムを、会議アプリの実行ファイルの名前で動かす */
-function startFakeApp(ctx, exeName) {
+/** マイクを使い、会議の窓を出すだけのプログラムを、会議アプリの実行ファイルの名前で動かす */
+function startFakeApp(ctx, exeName, windowArgs) {
   assert.ok(fs.existsSync(HOLD_MIC), `${HOLD_MIC} がありません（cargo build -p kiroscribe-core --example hold_mic）`);
   const dir = path.join(ctx.work.dir, "apps", path.parse(exeName).name);
   fs.mkdirSync(dir, { recursive: true });
   const exe = path.join(dir, exeName);
   fs.copyFileSync(HOLD_MIC, exe);
   const log = fs.openSync(ctx.work.file(`${exeName}.log`), "a");
-  const child = spawn(exe, ["120"], { stdio: ["ignore", log, log], windowsHide: true });
+  const child = spawn(exe, ["120", ...windowArgs], { stdio: ["ignore", log, log], windowsHide: true });
   fs.closeSync(log);
   return child;
 }
 
-/** 調べるための材料: Windows が記録しているマイクの使用状況（ConsentStore）と、マイクを使うプログラムの出力 */
+/** 検出に失敗した時点の判定・窓・部品・セッション（確認用の道具の表示）と、テスト用プロセスの出力。 */
 function detectionDiagnostics(ctx) {
-  const key = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone";
-  const registry = spawnSync("reg", ["query", key, "/s"], { encoding: "utf8", windowsHide: true }).stdout ?? "";
+  const probe = spawnSync(MEETING_PROBE, ["--once", "--titles", "--site", "meet=127.0.0.1"], { encoding: "utf8", windowsHide: true, timeout: 20_000 });
+  const probeLog = [probe.stdout, probe.stderr, probe.error?.message].filter(Boolean).join("\n");
+  fs.writeFileSync(ctx.work.file("meeting-probe.log"), probeLog);
   const logs = fs
     .readdirSync(ctx.work.dir)
     .filter((name) => name.endsWith(".exe.log"))
     .map((name) => `--- ${name} ---\n${fs.readFileSync(ctx.work.file(name), "utf8")}`);
-  return `--- マイクの使用状況（${key}） ---\n${registry.split("\n").slice(-60).join("\n")}\n${logs.join("\n")}`;
+  return `--- meeting_probe ---\n${probeLog}\n${logs.join("\n")}`;
 }
 
 /** 会議が始まって、ポップアップとノートができ、録音が始まるまで待つ。できたノートのタイトルを返す */
 async function waitForMeetingStart(ctx, session, label) {
-  try {
-    await ctx.app.popup({ timeout: 60_000 });
-  } catch (error) {
-    error.message += `\n${detectionDiagnostics(ctx)}`;
-    throw error;
-  }
+  await ctx.app.popup({ timeout: 60_000 });
   const started = await session.waitForText(sel.popup, "自動で録音・文字起こしを始めました");
   assert.ok(started.includes(label), started);
   await ctx.app.main();
@@ -86,28 +90,36 @@ async function waitForMeetingStart(ctx, session, label) {
 
 /** 会議が終わって、自動で始めた録音が止まるまで待つ */
 async function waitForMeetingEnd(ctx, session) {
-  await ctx.app.popup({ timeout: 60_000 });
-  await session.waitForText(sel.popup, "録音を停止しました", { timeout: 60_000 });
-  await ctx.app.main();
-  await session.waitUntil(async () => !(await session.exists(`${sel.noteItems} [aria-label="録音中"]`)), {
-    message: "録音中の印が消える",
-  });
+  try {
+    await ctx.app.popup({ timeout: 60_000 });
+    await session.waitForText(sel.popup, "録音を停止しました", { timeout: 60_000 });
+    await ctx.app.main();
+    await session.waitUntil(async () => !(await session.exists(`${sel.noteItems} [aria-label="録音中"]`)), {
+      message: "録音中の印が消える",
+    });
+  } catch (error) {
+    error.message += `\n${detectionDiagnostics(ctx)}`;
+    throw error;
+  }
 }
 
-for (const [exeName, label] of [
-  ["Zoom.exe", "Zoom"],
-  ["Discord.exe", "Discord"],
+for (const [exeName, label, windowArgs] of [
+  ["Zoom.exe", "Zoom", ["--window", "ZPContentViewWndClass"]],
+  ["Discord.exe", "Discord", ["--window", "HoldMicDiscordWindow", "--button", "Disconnect"]],
 ]) {
-  test(`[MTG-001][MTG-020][MTG-024] デスクトップの会議アプリ（${exeName}）がマイクを使い始めると録音を始め、使い終わると止める`, options, async (ctx) => {
+  test(`[MTG-001][MTG-020][MTG-024] デスクトップの会議アプリ（${exeName}）が会議の窓を出すと録音を始め、閉じると止める`, options, async (ctx) => {
     const session = await ctx.launch();
     // メインウィンドウを閉じて（トレイに残して）おく
     ctx.work.closeWindow("main");
     await session.waitUntil(async () => !(await ctx.app.isMainVisible()), { message: "メインウィンドウが隠れる" });
 
-    const app = startFakeApp(ctx, exeName);
+    const app = startFakeApp(ctx, exeName, windowArgs);
     try {
       await waitForMeetingStart(ctx, session, label);
       // 自分自身（録音中の Kiroscribe）がマイクを使っていても、会議の判定には入れない（会議アプリが止まれば終わる）
+    } catch (error) {
+      error.message += `\n${detectionDiagnostics(ctx)}`;
+      throw error;
     } finally {
       await killTree(app);
     }
@@ -115,10 +127,11 @@ for (const [exeName, label] of [
   });
 }
 
-test("[MTG-002][MTG-020][MTG-024] ブラウザ（Edge）で「Meet - …」のページがマイクを使うと録音を始め、閉じると止める", { ...options, skip: options.skip || (!EDGE && "Edge がない") }, async (ctx) => {
-  // マイクを使うページ（localhost は安全な場所として扱われ、マイクを使える）
+test("[MTG-002][MTG-020][MTG-024][MTG-031] ブラウザ（Edge）で「Meet - …」の会議のページを開くと録音を始め、閉じると止める", { ...options, skip: options.skip || (!EDGE && "Edge がない") }, async (ctx) => {
+  // 退出ボタンがあり、マイクを使うページ（localhost は安全な場所として扱われ、マイクを使える）
   const page = `<!doctype html><meta charset="utf-8"><title>Meet - abc-defg-hij</title>
 <p id="state">マイクを準備しています</p>
+<button type="button">Leave call</button>
 <script>
 navigator.mediaDevices.getUserMedia({ audio: true })
   .then((stream) => { window.stream = stream; document.getElementById("state").textContent = "マイクを使っています"; })
@@ -135,7 +148,8 @@ navigator.mediaDevices.getUserMedia({ audio: true })
   ctx.work.closeWindow("main");
   await session.waitUntil(async () => !(await ctx.app.isMainVisible()), { message: "メインウィンドウが隠れる" });
 
-  // 使い捨てのプロファイルで、マイクの許可を自動で与えて開く（本物のマイク＝仮想のケーブルを使う）
+  // 使い捨てのプロファイルで、マイクの許可を自動で与えて開く（本物のマイク＝仮想のケーブルを使う）。
+  // アプリの窓（--app）にはアドレスバーがないので、通常の窓で開く
   const profile = path.join(ctx.work.dir, "edge-profile");
   const edge = spawn(
     EDGE,
@@ -145,12 +159,16 @@ navigator.mediaDevices.getUserMedia({ audio: true })
       "--no-default-browser-check",
       "--disable-features=msEdgeWelcomePage",
       "--use-fake-ui-for-media-stream",
-      `--app=${url}`,
+      "--new-window",
+      url,
     ],
     { stdio: "ignore" },
   );
   try {
     await waitForMeetingStart(ctx, session, "Google Meet");
+  } catch (error) {
+    error.message += `\n${detectionDiagnostics(ctx)}`;
+    throw error;
   } finally {
     await killTree(edge);
     server.close();

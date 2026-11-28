@@ -1,0 +1,85 @@
+{
+  "format": "kiroscribe-meeting-record/4",
+  "appVersion": "0.4.3",
+  "rulesVersion": 3,
+  "entries": [
+    {
+      "at": 1795000000000,
+      "gaps": [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000],
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "msedge.exe",
+              "window": 310,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "退出ボタン",
+                  "strength": "strong",
+                  "kind": "control"
+                },
+                {
+                  "name": "Meet のタブの題",
+                  "strength": "medium",
+                  "kind": "window"
+                },
+                {
+                  "name": "背面を含む Meet のタブ",
+                  "strength": "weak",
+                  "kind": "control",
+                  "afterStart": true
+                },
+                {
+                  "name": "ブラウザのマイク",
+                  "strength": "weak",
+                  "kind": "session"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000020000,
+      "gaps": [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000],
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "msedge.exe",
+              "window": 310,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "背面を含む Meet のタブ",
+                  "strength": "weak",
+                  "kind": "control",
+                  "afterStart": true
+                },
+                {
+                  "name": "ブラウザのマイク",
+                  "strength": "weak",
+                  "kind": "session"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000200000,
+      "gaps": [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000],
+      "services": []
+    }
+  ],
+  "expected": [
+    "started:googleMeet",
+    "ended:googleMeet"
+  ],
+  "description": "Google Meet の会議中に、同じ窓で別のタブに切り替える。背面の Meet のタブとマイクで続き、タブを閉じたら猶予のあとで終わる"
+}

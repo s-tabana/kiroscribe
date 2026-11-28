@@ -351,6 +351,7 @@ pub(super) fn fixture() -> &'static Fixture {
             register_autostart: false,
             native_startup_dialog: false,
             real_meeting_detection: false,
+            meeting_sites: Default::default(),
             audio: core::AudioConfig {
                 mic: Some("speech".into()),
                 system: Some("speech".into()),

@@ -12,7 +12,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use kiroscribe_core::e2e as core;
-use kiroscribe_core::meetings::{Detection, MeetingTracker};
+use kiroscribe_core::meetings::{Judge, MeetingApp};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
@@ -552,28 +552,22 @@ pub fn meeting_poll_interval() -> Option<Duration> {
     core::config().timing.meeting_poll_ms.map(Duration::from_millis)
 }
 
-/// 会議の開始・終了を確定するまでの時間を、指定があれば縮める。
-pub fn tune_tracker(tracker: &mut MeetingTracker) {
+/// 会議の開始・終了を確定するまでの時間を、指定があれば縮める（開始の確定は、組み合わせで始めるときの時間）。
+pub fn tune_judge(judge: &mut Judge) {
     let timing = &core::config().timing;
     if let Some(ms) = timing.meeting_start_confirm_ms {
-        tracker.start_confirm_ms = ms;
+        judge.config.combination_ms = ms;
     }
     if let Some(ms) = timing.meeting_end_grace_ms {
-        tracker.end_grace_ms = ms;
+        judge.config.end_after_ms = ms;
     }
 }
 
-/// 会議の検出の差し替え。実際の検出（マイクの使用状況）の代わりに、`meeting.txt` の内容を「いまの状態」とする。
-/// `active` は、進行中の会議。戻り値は `MeetingTracker::tick` に渡す（始まりそうな会議, 進行中の会議が続いているか）。
-/// `meeting.txt` の会議アプリが別のものに変わったら、進行中の会議は終わって、別の会議が始まったものとして扱う。
-pub fn simulated_detection(active: Option<Detection>) -> Option<(Option<Detection>, bool)> {
-    let meeting = core::simulated_meeting()?;
-    Some(simulated_tick(meeting, active))
-}
-
-fn simulated_tick(meeting: Option<kiroscribe_core::meetings::MeetingApp>, active: Option<Detection>) -> (Option<Detection>, bool) {
-    let continuing = active.is_some_and(|active| Some(active.app) == meeting);
-    (meeting.map(Detection::desktop), continuing)
+/// 会議の検出の差し替え。実際の検出の代わりに、`meeting.txt` に書いた会議アプリの強い印だけが立っているものとする。
+/// 差し替えないとき（実際の検出を使う設定のとき）は `None`。`meeting.txt` の会議アプリが別のものに変わったら、
+/// 進行中の会議は終了の猶予に入り、別の会議に切り替わる。
+pub fn simulated_meeting() -> Option<Option<MeetingApp>> {
+    core::simulated_meeting()
 }
 
 /// タスクトレイのアイコンを作れなかったことにするか。
@@ -730,15 +724,21 @@ mod tests {
 
     #[test]
     fn the_simulated_meeting_continues_only_while_the_same_app_is_written() {
-        use kiroscribe_core::meetings::MeetingApp;
-        let meet = Detection::desktop(MeetingApp::GoogleMeet);
-        let zoom = Detection::desktop(MeetingApp::Zoom);
-        assert_eq!(simulated_tick(None, None), (None, false));
-        assert_eq!(simulated_tick(Some(MeetingApp::GoogleMeet), None), (Some(meet), false), "まだ始まっていない");
-        assert_eq!(simulated_tick(Some(MeetingApp::GoogleMeet), Some(meet)), (Some(meet), true));
-        assert_eq!(simulated_tick(None, Some(meet)), (None, false), "会議が終わった");
-        // 別の会議アプリに書き換えたら、前の会議は続いていない（別の会議が始まろうとしている）
-        assert_eq!(simulated_tick(Some(MeetingApp::Zoom), Some(meet)), (Some(zoom), false));
+        use kiroscribe_core::meeting_rules::Rules;
+        use kiroscribe_core::meetings::{simulated_evaluation, MeetingEvent};
+        let mut judge = Judge::new(Rules::builtin());
+        judge.config.end_after_ms = 400;
+        let mut tick = |meeting, now| judge.tick(&simulated_evaluation(meeting), now).into_iter().map(|d| d.event).collect::<Vec<_>>();
+        assert!(tick(None, 0).is_empty());
+        assert_eq!(tick(Some(MeetingApp::GoogleMeet), 50), vec![MeetingEvent::Started(MeetingApp::GoogleMeet)]);
+        assert!(tick(Some(MeetingApp::GoogleMeet), 100).is_empty(), "続いている");
+        // 別の会議アプリに書き換えたら、前の会議を終えて、別の会議を始める
+        assert_eq!(
+            tick(Some(MeetingApp::Zoom), 150),
+            vec![MeetingEvent::Ended(MeetingApp::GoogleMeet), MeetingEvent::Started(MeetingApp::Zoom)]
+        );
+        assert!(tick(None, 200).is_empty(), "猶予の間");
+        assert_eq!(tick(None, 600), vec![MeetingEvent::Ended(MeetingApp::Zoom)]);
     }
 
     #[test]
