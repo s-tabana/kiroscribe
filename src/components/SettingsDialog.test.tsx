@@ -157,6 +157,87 @@ describe("SettingsDialog", () => {
     expect(field).toHaveValue("a.exe, b.exe");
   });
 
+  /** 保存は送った時点で済ませ、応答だけを release() まで遅らせる（応答を待つ間に、トレイで切り替える場合を作る） */
+  function setupDelayedSave(settings: Partial<Settings> = {}) {
+    const backend = createMemoryBackend({ settings });
+    const store = backend.saveSettings.bind(backend);
+    let release!: () => void;
+    vi.spyOn(backend, "saveSettings").mockImplementationOnce(async (next) => {
+      const stored = await store(next);
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return stored;
+    });
+    render(
+      <BackendContext.Provider value={backend}>
+        <SettingsDialog onClose={vi.fn()} />
+      </BackendContext.Provider>,
+    );
+    return { backend, release: () => release() };
+  }
+
+  it("[TRY-004][SET-002] 保存の応答を待つ間にトレイで切り替えたら、遅れて返る応答の古い値で表示を戻さず、次の保存でも切り替えを残す", async () => {
+    const user = userEvent.setup();
+    const { backend, release } = setupDelayedSave({ autoRecordMeetings: true });
+
+    const auto = await screen.findByRole("checkbox", { name: /会議を検出したら自動で録音/ });
+    const name = screen.getByLabelText("議事録での自分の呼び名");
+    await user.type(name, "田花");
+    await user.click(screen.getByRole("button", { name: "設定を保存" }));
+    expect(await screen.findByRole("button", { name: "保存中…" })).toBeInTheDocument();
+    await act(() => backend.toggleAutoRecordFromTray());
+    expect(auto).not.toBeChecked();
+
+    // 応答は、トレイで切り替える前に保存したオンのまま返る
+    await act(async () => release());
+    expect(await screen.findByText("設定を保存しました")).toBeInTheDocument();
+    expect(auto).not.toBeChecked();
+    expect(name).toHaveValue("田花");
+
+    // 次の保存でも、トレイで切り替えたオフのまま保存する
+    await user.click(screen.getByRole("button", { name: "設定を保存" }));
+    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledTimes(2));
+    await waitFor(async () => expect(screen.getByRole("button", { name: "設定を保存" })).toBeEnabled());
+    const stored = await backend.getSettings();
+    expect(stored.autoRecordMeetings).toBe(false);
+    expect(stored.myName).toBe("田花");
+  });
+
+  it.each([
+    ["通知が先に届く", true],
+    ["保存の応答が先に返る", false],
+  ])(
+    "[SET-021][TRY-004] 保存の応答を待つ間に、送る前の値に戻した書きかけは、トレイの切り替えで消さない（%s）",
+    async (_label, notifyFirst) => {
+      const user = userEvent.setup();
+      const { backend, release } = setupDelayedSave();
+
+      const field = await screen.findByLabelText(/判定に足すブラウザ/);
+      const auto = screen.getByRole("checkbox", { name: /会議を検出したら自動で録音/ });
+      await user.type(field, "br");
+      await user.click(screen.getByRole("button", { name: "設定を保存" }));
+      expect(await screen.findByRole("button", { name: "保存中…" })).toBeInTheDocument();
+      // 応答を待つ間に、送る前の空欄に戻す
+      await user.clear(field);
+      if (notifyFirst) {
+        await act(() => backend.toggleAutoRecordFromTray());
+        await act(async () => release());
+      } else {
+        await act(async () => release());
+        expect(await screen.findByText("設定を保存しました")).toBeInTheDocument();
+        await act(() => backend.toggleAutoRecordFromTray());
+      }
+      expect(await screen.findByText("設定を保存しました")).toBeInTheDocument();
+      expect(field).toHaveValue("");
+      expect(auto).not.toBeChecked();
+
+      await user.click(screen.getByRole("button", { name: "設定を保存" }));
+      await waitFor(async () => expect((await backend.getSettings()).extraBrowsers).toEqual([]));
+      expect((await backend.getSettings()).autoRecordMeetings).toBe(false);
+    },
+  );
+
   it("[TRY-004] 画面で切り替えて元に戻した項目は、トレイでの切り替えを反映し、ほかの書きかけは残す", async () => {
     const user = userEvent.setup();
     const backend = createMemoryBackend({ settings: { autoRecordMeetings: true } });

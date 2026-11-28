@@ -13,7 +13,7 @@ use kiroscribe_core::meetings::{
 };
 use kiroscribe_core::notes::{Note, NotePatch};
 use kiroscribe_core::secrets::{require_api_key, Provider};
-use kiroscribe_core::settings::Settings;
+use kiroscribe_core::settings::{normalize_browsers, Settings};
 use kiroscribe_core::time::now_ms;
 use serde_json::{json, Value};
 use tauri::{Emitter, Manager};
@@ -38,6 +38,8 @@ pub struct MeetingState {
     record: Mutex<MeetingRecorder>,
     /// 判定の対象のブラウザ（設定で足したものを含む）。設定を保存したら替え、検出のスレッドが次の回から使う
     browsers: Mutex<Browsers>,
+    /// 保存してある判定に足すブラウザ（整えた一覧。会議アプリなど、検出の対象から外す名前も含む）。変わったかを比べ、ログに書くために使う
+    saved_browsers: Mutex<Vec<String>>,
 }
 
 impl MeetingState {
@@ -51,13 +53,17 @@ impl MeetingState {
         self.browsers.lock().unwrap().clone()
     }
 
-    /// 判定の対象のブラウザを、設定に合わせる。変わったら true。
-    fn set_browsers(&self, settings: &Settings) -> bool {
-        let next = Browsers::with_extra(&settings.extra_browsers);
-        let mut browsers = self.browsers.lock().unwrap();
-        let changed = *browsers != next;
-        *browsers = next;
-        changed
+    /// 判定の対象のブラウザを、設定に合わせる。保存してある一覧が変わったら、変わったあとの一覧を返す。
+    /// 検出の対象から外す名前（会議アプリなど）だけが変わったときも、保存した一覧の変更として返す。
+    fn set_browsers(&self, settings: &Settings) -> Option<Vec<String>> {
+        let saved = normalize_browsers(&settings.extra_browsers);
+        *self.browsers.lock().unwrap() = Browsers::with_extra(&saved);
+        let mut current = self.saved_browsers.lock().unwrap();
+        if *current == saved {
+            return None;
+        }
+        *current = saved.clone();
+        Some(saved)
     }
 }
 
@@ -109,8 +115,8 @@ fn submit_decision(app: &AppHandle, decision: Decision) {
 /// 判定に足すブラウザ（SET-021）が変わったら、次の回から使い、ログに書く。
 pub fn settings_changed(app: &AppHandle, was_enabled: bool, settings: &Settings) {
     let state = app.state::<MeetingState>();
-    if state.set_browsers(settings) {
-        crate::debug::info(app, "meeting.browsers_changed", json!({ "extraBrowsers": state.browsers().extra() }));
+    if let Some(saved) = state.set_browsers(settings) {
+        crate::debug::info(app, "meeting.browsers_changed", json!({ "extraBrowsers": saved }));
     }
     if !was_enabled && settings.auto_record_meetings {
         enqueue(app, Job::AutoRecordEnabled);

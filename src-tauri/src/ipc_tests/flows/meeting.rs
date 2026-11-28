@@ -333,4 +333,24 @@ fn browsers_added_in_settings_are_used_by_the_detection_right_away() {
     h.save_settings(|settings| settings.extra_browsers.clear());
     assert!(!state().contains("newbrowser.exe"));
     assert_eq!(h.debug_log_events("meeting.browsers_changed").len(), 2);
+
+    // 会議アプリの名前だけを足したときも、保存した一覧の変更として書く（判定では会議アプリのまま扱う）
+    h.save_settings(|settings| settings.extra_browsers = vec!["Slack".into()]);
+    assert!(state().extra().is_empty() && !state().contains("slack.exe"));
+    let logged = h.debug_log_events("meeting.browsers_changed");
+    assert_eq!(logged.len(), 3);
+    assert_eq!(logged[2]["fields"]["extraBrowsers"], json!(["slack.exe"]));
+
+    // 会議アプリとブラウザが混ざっていても、外す名前を含めて、保存した一覧のとおりに書く
+    h.save_settings(|settings| settings.extra_browsers = vec!["slack.exe".into(), "newbrowser".into()]);
+    assert!(state().contains("newbrowser.exe") && !state().contains("slack.exe"));
+    let logged = h.debug_log_events("meeting.browsers_changed");
+    assert_eq!(logged.len(), 4);
+    assert_eq!(logged[3]["fields"]["extraBrowsers"], json!(["slack.exe", "newbrowser.exe"]));
+
+    // 会議アプリの名前だけを消したときも、書く
+    h.save_settings(|settings| settings.extra_browsers = vec!["newbrowser.exe".into()]);
+    let logged = h.debug_log_events("meeting.browsers_changed");
+    assert_eq!(logged.len(), 5);
+    assert_eq!(logged[4]["fields"]["extraBrowsers"], json!(["newbrowser.exe"]));
 }

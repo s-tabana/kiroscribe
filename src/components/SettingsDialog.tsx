@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { errorMessage, useBackend, type Backend } from "../lib/backend";
 import { useUpdater } from "../hooks/useUpdater";
-import { formatBrowsers, parseBrowsers } from "../lib/browsers";
+import { formatBrowsers, normalizeBrowsers, parseBrowsers } from "../lib/browsers";
 import { shortDateTimeLabel } from "../lib/dates";
 import type { ApiKeyStatus, AudioDevice, HelpTab, Provider, Settings } from "../lib/types";
 import { HelpDialog } from "./HelpDialog";
@@ -67,6 +67,9 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
   const shown = useRef<Settings | null>(null);
   /** 読み込みか保存の後に、この画面で書き換えた項目。画面の外の変更と保存の応答では、これらの項目を上書きしない */
   const edited = useRef(new Set<keyof Settings>());
+  /** 保存の応答を待っている間に、画面の外の変更で変わった項目（null は保存の応答を待っていないとき）。
+   * これらの項目は、通知のほうが保存より後の値なので、遅れて返る保存の応答で上書きしない */
+  const notifiedWhileSaving = useRef<Set<keyof Settings> | null>(null);
 
   const show = (next: Settings) => {
     shown.current = next;
@@ -106,7 +109,9 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
         const merged = { ...current };
         for (const key of Object.keys(next) as (keyof Settings)[]) {
           if (same(before[key], next[key])) continue;
+          notifiedWhileSaving.current?.add(key);
           // 書き換えた項目でも、表示が保存済みの値に戻っているなら書きかけではないので、画面の外の変更を反映する
+          // （保存の応答を待っている間の保存済みの値は、送った値。送った後に書き換えた値を、送る前の値との一致で捨てない）
           if (edited.current.has(key) && !same(current[key], before[key])) continue;
           edited.current.delete(key);
           Object.assign(merged, { [key]: next[key] });
@@ -141,17 +146,34 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
     // 送った後に書き換えた項目だけを、保存の応答で上書きしないために残す
     const sent = new Set(edited.current);
     edited.current.clear();
+    const previous = saved.current;
+    // 応答を待つ間に届く通知は、送った設定と比べる（送った設定が保存される見込みの値）
+    saved.current = { ...settings, extraBrowsers: normalizeBrowsers(settings.extraBrowsers) };
+    const notified = new Set<keyof Settings>();
+    notifiedWhileSaving.current = notified;
     try {
       const stored = await backend.saveSettings(settings);
-      saved.current = stored;
+      notifiedWhileSaving.current = null;
+      // 応答を待つ間に通知で変わった項目は、通知の値のほうが新しいので、それを保存済みの値とする
+      const latest = saved.current;
+      const merged = { ...stored };
+      for (const key of notified) Object.assign(merged, { [key]: latest[key] });
+      saved.current = { ...merged };
       const keep = new Set(edited.current);
       const current = shown.current;
-      const merged = { ...stored };
       if (current) for (const key of keep) Object.assign(merged, { [key]: current[key] });
       show(merged);
-      if (!keep.has("extraBrowsers")) setBrowsersText(formatBrowsers(stored.extraBrowsers));
+      if (!keep.has("extraBrowsers")) setBrowsersText(formatBrowsers(merged.extraBrowsers));
       setMessage({ kind: "ok", text: "設定を保存しました" });
     } catch (err) {
+      notifiedWhileSaving.current = null;
+      // 保存できなかったので、保存済みの値は送る前の値に戻す（応答を待つ間に通知で変わった項目は、通知の値にする）
+      const latest = saved.current;
+      if (previous) {
+        const restored = { ...previous };
+        for (const key of notified) Object.assign(restored, { [key]: latest[key] });
+        saved.current = restored;
+      }
       // 保存できなかった項目は、書きかけのままとして扱う
       for (const key of sent) edited.current.add(key);
       setMessage({ kind: "error", text: errorMessage(err) });
