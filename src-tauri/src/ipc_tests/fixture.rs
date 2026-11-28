@@ -69,6 +69,9 @@ pub(super) struct Api {
     /// 文字起こし API が応答するまでの時間
     pub transcription_delay: Mutex<Duration>,
     pub claude: Mutex<ClaudeReply>,
+    /// ログの回収の入口が返す HTTP の状態（`None` なら受け付ける）
+    pub log_intake_status: Mutex<Option<u16>>,
+    pub log_intake_delay: Mutex<Duration>,
 }
 
 impl Api {
@@ -77,6 +80,8 @@ impl Api {
             transcription_status: Mutex::new(None),
             transcription_delay: Mutex::new(Duration::ZERO),
             claude: Mutex::new(Self::default_claude()),
+            log_intake_status: Mutex::new(None),
+            log_intake_delay: Mutex::new(Duration::ZERO),
         }
     }
 
@@ -88,6 +93,8 @@ impl Api {
         *self.transcription_status.lock().unwrap() = None;
         *self.transcription_delay.lock().unwrap() = Duration::ZERO;
         *self.claude.lock().unwrap() = Self::default_claude();
+        *self.log_intake_status.lock().unwrap() = None;
+        *self.log_intake_delay.lock().unwrap() = Duration::ZERO;
     }
 }
 
@@ -150,6 +157,24 @@ impl Respond for Claude {
     }
 }
 
+/// デバッグ用のログの回収の入口（共通の入口の契約どおりに振る舞う偽物）
+struct LogIntake(Arc<Api>);
+
+impl Respond for LogIntake {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let response = match *self.0.log_intake_status.lock().unwrap() {
+            None => ResponseTemplate::new(201)
+                .set_body_json(json!({ "id": LOG_SUBMISSION_ID, "receivedAt": "2026-11-27T12:50:30.217Z" })),
+            Some(429) => ResponseTemplate::new(429).set_body_json(
+                json!({ "error": "rate_limited", "message": "提出が多すぎます。1 時間ほど待ってから送ってください" }),
+            ),
+            Some(status @ 300..=399) => ResponseTemplate::new(status).insert_header("location", "/redirected/v1/logs/kiroscribe"),
+            Some(status) => ResponseTemplate::new(status),
+        };
+        response.set_delay(*self.0.log_intake_delay.lock().unwrap())
+    }
+}
+
 /// 模擬の配布元が配る更新のファイル。
 fn update_package() -> Vec<u8> {
     vec![7u8; 4096]
@@ -186,7 +211,7 @@ async fn start_server(api: Arc<Api>) -> MockServer {
         .await;
     Mock::given(method("POST"))
         .and(path("/anthropic/v1/messages"))
-        .respond_with(Claude(api))
+        .respond_with(Claude(api.clone()))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
@@ -205,6 +230,16 @@ async fn start_server(api: Arc<Api>) -> MockServer {
             "draft": false,
             "prerelease": false
         }])))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/logs/v1/logs/kiroscribe"))
+        .respond_with(LogIntake(api.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/redirected/v1/logs/kiroscribe"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": "KS-REDIRECTED", "receivedAt": "" })))
         .mount(&server)
         .await;
     // 更新の配布元。配るファイルは、インストーラではないただのバイト列（署名が正しくても、インストールの段階で止まる）
@@ -253,6 +288,9 @@ fn work_dir() -> PathBuf {
 }
 
 /// このテストのプロセス全体で 1 つだけ用意するもの（差し替えの設定はプロセスに 1 つしか持てないため）。
+/// 偽の入口が返す提出の番号
+pub(super) const LOG_SUBMISSION_ID: &str = "KS-20261127-TEST";
+
 pub(super) struct Fixture {
     pub dir: PathBuf,
     pub server_uri: String,
@@ -306,6 +344,7 @@ pub(super) fn fixture() -> &'static Fixture {
             github_raw_base_url: Some(format!("{server_uri}/raw")),
             github_api_base_url: Some(format!("{server_uri}/api")),
             update_endpoint: Some(format!("{server_uri}/update/latest.json")),
+            log_intake_url: Some(format!("{server_uri}/logs")),
             update_pubkey: None,
             main_visible_at_start: false,
             tray_unavailable: false,
@@ -554,6 +593,29 @@ impl Harness {
 }
 
 impl Harness {
+    /// settings テーブルの、設定以外の値。
+    pub fn settings_value(&self, key: &str) -> Option<String> {
+        self.state().db().get_value(key).unwrap()
+    }
+
+    /// これまでに書いたデバッグ用のログ（すべてのファイルをつなげたもの）。
+    pub fn debug_log_text(&self) -> String {
+        let log = self.app.state::<kiroscribe_core::debug_log::DebugLog>();
+        log.files()
+            .iter()
+            .map(|path| std::fs::read_to_string(path).unwrap())
+            .collect()
+    }
+
+    /// これまでに書いたデバッグ用のログの行のうち、出来事の名前が `event` のもの。
+    pub fn debug_log_events(&self, event: &str) -> Vec<Value> {
+        self.debug_log_text()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("ログの行が JSON ではありません"))
+            .filter(|line| line["event"] == event)
+            .collect()
+    }
+
     /// 会議の検出の結果を、検出のスレッドと同じように、順番待ちの列へ入れる（処理が終わるのは待たない）。
     pub fn submit_meeting(&self, event: MeetingEvent) {
         crate::meeting_watch::submit(self.app.handle(), event);

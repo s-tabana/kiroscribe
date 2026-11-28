@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
-import { errorMessage, useBackend } from "../lib/backend";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { errorMessage, useBackend, type Backend } from "../lib/backend";
 import { useUpdater } from "../hooks/useUpdater";
+import { shortDateTimeLabel } from "../lib/dates";
 import type { ApiKeyStatus, AudioDevice, HelpTab, Provider, Settings } from "../lib/types";
 import { HelpDialog } from "./HelpDialog";
 import { Markdown } from "./Markdown";
@@ -426,30 +427,57 @@ function AboutSection({ autoUpdate, onAutoUpdateChange, onOpenHelp }: AboutSecti
         </button>
       </p>
 
-      <MeetingRecordSave />
+      <DebugLogSave />
+      <DebugLogSubmit />
     </section>
   );
 }
 
-/** 会議の検出の記録のファイル名（例: kiroscribe-meeting-record-20261123-1904.json） */
-export function meetingRecordFileName(now: Date): string {
+/** デバッグ用のログのファイル名（例: kiroscribe-debug-20261127-1904.zip） */
+export function debugBundleFileName(now: Date): string {
   const two = (n: number) => String(n).padStart(2, "0");
   const date = `${now.getFullYear()}${two(now.getMonth() + 1)}${two(now.getDate())}`;
-  return `kiroscribe-meeting-record-${date}-${two(now.getHours())}${two(now.getMinutes())}.json`;
+  return `kiroscribe-debug-${date}-${two(now.getHours())}${two(now.getMinutes())}.zip`;
 }
 
-/** 会議の検出の記録を保存する（会議を自動で検出できなかったときに、原因を調べるため） */
-function MeetingRecordSave() {
+/**
+ * デバッグ用のログ: 「詳しい記録」の切り替えと、ログをまとめた zip の保存
+ * （会議を自動で検出できなかった・録音が止まった などのときに、原因を調べるため）
+ */
+function DebugLogSave() {
   const backend = useBackend();
   const [busy, setBusy] = useState(false);
+  const [verboseUntil, setVerboseUntil] = useState<number | null | undefined>(undefined);
+  // 切り替えの途中は、次の切り替えを受け付けない（続けて押すと、答えの順番が入れ替わり、表示と本体が食い違うため）
+  const [switching, setSwitching] = useState(false);
   const [message, setMessage] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+
+  useEffect(() => {
+    backend
+      .getDebugLogStatus()
+      .then((status) => setVerboseUntil(status.verboseUntil))
+      .catch(() => setVerboseUntil(null));
+  }, [backend]);
+
+  const toggleVerbose = async (enabled: boolean) => {
+    setMessage(null);
+    setSwitching(true);
+    try {
+      const status = await backend.setDebugVerbose(enabled);
+      setVerboseUntil(status.verboseUntil);
+    } catch (err) {
+      setMessage({ kind: "error", text: errorMessage(err) });
+    } finally {
+      setSwitching(false);
+    }
+  };
 
   const save = async () => {
     setBusy(true);
     setMessage(null);
     try {
-      const saved = await backend.saveMeetingRecord(meetingRecordFileName(new Date()));
-      if (saved) setMessage({ kind: "ok", text: `会議の検出の記録を保存しました（${saved.entries} 件）: ${saved.path}` });
+      const path = await backend.saveDebugBundle(debugBundleFileName(new Date()));
+      if (path) setMessage({ kind: "ok", text: `デバッグ用のログを保存しました: ${path}` });
     } catch (err) {
       setMessage({ kind: "error", text: errorMessage(err) });
     } finally {
@@ -459,19 +487,179 @@ function MeetingRecordSave() {
 
   return (
     <div className="about-record">
+      {verboseUntil !== undefined && (
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={verboseUntil !== null}
+            disabled={switching}
+            onChange={(e) => void toggleVerbose(e.target.checked)}
+          />
+          <span>
+            詳しい記録を残す（24 時間）
+            <small>
+              {verboseUntil !== null
+                ? `${shortDateTimeLabel(verboseUntil)} まで、細かい出来事も記録します。時間が過ぎると、自動でオフに戻ります。`
+                : "オンにすると、24 時間だけ、細かい出来事（会議の検出で見たブラウザのタブの名前、文字起こしの 1 回ごとの結果など）も記録します。"}
+            </small>
+          </span>
+        </label>
+      )}
       <button type="button" className="link-button" onClick={() => void save()} disabled={busy}>
-        会議の検出の記録を保存…
+        デバッグ用のログを保存…
       </button>
       <small className="hint">
-        {"会議を自動で検出できなかったときに、原因を調べるための記録です。" +
-          "マイクを使ったアプリの名前と、マイクを使っているブラウザのタブの名前だけが入ります（録音やノートの内容は入りません）。" +
-          "タブの名前には、会議でないページやメールの件名も入ることがあります。人に送る前に、見せたくない内容がないか確かめてください。"}
+        {"不具合の原因を調べるための記録を、1 つの zip にまとめて保存します。" +
+          "入るのは、アプリの動きの記録（起動と終了、更新の確認、会議の検出の判断、録音、文字起こしと AI の処理の成否と時間、エラー）、" +
+          "会議の検出の記録（マイクを使ったアプリの名前と、マイクを使っているブラウザのタブの名前）、" +
+          "アプリと OS のバージョン、設定（API キーは設定済みかどうかだけ）です。" +
+          "録音・ノート・文字起こし・議事録・AI チャットの内容と API キーは入りません。" +
+          "タブの名前には、会議でないページやメールの件名も入ることがあります。人に渡す前に、zip を開いて、見せたくない内容がないか確かめてください。"}
       </small>
       {message && (
         <p className={message.kind === "ok" ? "ok-text" : "error-text"} role="status">
           {message.text}
         </p>
       )}
+    </div>
+  );
+}
+
+/** 提出の前に出す確認の文 */
+export const DEBUG_LOG_SUBMIT_CONFIRM =
+  "デバッグ用のログを開発者に送ります。\n\n" +
+  "送るもの: アプリの動きの記録、会議の検出の記録（マイクを使ったアプリの名前と、マイクを使っているブラウザのタブの名前）、" +
+  "アプリと OS のバージョン、設定（API キーは設定済みかどうかだけ）\n" +
+  "送らないもの: 録音・ノート・文字起こし・議事録・AI チャットの内容と API キー\n\n" +
+  "提出には、このアプリの導入ごとに作る乱数の ID を添えます。利用者名や端末名は ID に含めません。\n\n" +
+  "タブの名前には、会議でないページやメールの件名も入ることがあります。" +
+  "送る前に中身を確かめたいときは、取り消して「デバッグ用のログを保存…」で保存し、zip を開いてください。\n\n" +
+  "送ったログは開発者だけが見られる場所に置き、30 日で消します。送りますか？";
+
+/** オフラインのときの文 */
+export const DEBUG_LOG_SUBMIT_OFFLINE =
+  "インターネットにつながっていないため、ログを送れません。接続してから、もう一度お試しください";
+
+type SubmitState =
+  | { phase: "idle" }
+  | { phase: "confirming" }
+  | { phase: "packing" }
+  | { phase: "sending"; percent: number }
+  | { phase: "done"; id: string }
+  | { phase: "error"; message: string };
+
+function submissionBusy(state: SubmitState): boolean {
+  return state.phase === "confirming" || state.phase === "packing" || state.phase === "sending";
+}
+
+function isOffline(): boolean {
+  return typeof navigator !== "undefined" && navigator.onLine === false;
+}
+
+/** 設定画面を閉じても、確認から提出の完了まで同じ状態を使う。 */
+function createLogSubmission(backend: Backend) {
+  const listeners = new Set<() => void>();
+  let state: SubmitState = { phase: "idle" };
+  const setState = (next: SubmitState) => {
+    state = next;
+    listeners.forEach((listener) => listener());
+  };
+
+  const submit = async () => {
+    if (submissionBusy(state)) return;
+    if (isOffline()) {
+      setState({ phase: "error", message: DEBUG_LOG_SUBMIT_OFFLINE });
+      return;
+    }
+    const previous = state;
+    setState({ phase: "confirming" });
+    try {
+      if (!(await backend.confirm(DEBUG_LOG_SUBMIT_CONFIRM, "デバッグ用のログを提出", "info"))) {
+        setState(previous);
+        return;
+      }
+      if (isOffline()) {
+        setState({ phase: "error", message: DEBUG_LOG_SUBMIT_OFFLINE });
+        return;
+      }
+      setState({ phase: "packing" });
+      const requestId = crypto.getRandomValues(new Uint32Array(4)).join("-");
+      let listening = true;
+      const unsubscribe = await backend.onLogSubmitProgress((progress) => {
+        if (!listening || progress.requestId !== requestId) return;
+        const { sent, total } = progress;
+        const percent = total > 0 ? Math.min(100, Math.floor((sent / total) * 100)) : 0;
+        setState({ phase: "sending", percent });
+      });
+      let result;
+      try {
+        result = await backend.submitDebugLogs(requestId);
+      } finally {
+        listening = false;
+        await Promise.resolve(unsubscribe()).catch(() => undefined);
+      }
+      setState({ phase: "done", id: result.id });
+    } catch (err) {
+      setState({ phase: "error", message: errorMessage(err) });
+    }
+  };
+
+  return {
+    submit,
+    getState: () => state,
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+}
+
+const logSubmissions = new WeakMap<Backend, ReturnType<typeof createLogSubmission>>();
+
+function DebugLogSubmit() {
+  const backend = useBackend();
+  let submission = logSubmissions.get(backend);
+  if (!submission) {
+    submission = createLogSubmission(backend);
+    logSubmissions.set(backend, submission);
+  }
+  const state = useSyncExternalStore(submission.subscribe, submission.getState);
+
+  return (
+    <div className="about-record">
+      <button type="button" className="link-button" onClick={submission.submit} disabled={submissionBusy(state)}>
+        デバッグ用のログを提出…
+      </button>
+      <small className="hint">
+        {"「デバッグ用のログを保存…」と同じ zip を、開発者に直接送ります。" +
+          "保存したファイルを渡す手間がかかりません。送る前に、送るものを確かめる画面が出ます。"}
+      </small>
+      <div aria-live="polite">
+        {state.phase === "packing" && <p role="status">ログをまとめています…</p>}
+        {state.phase === "sending" && (
+          <p role="status">
+            ログを送っています… {state.percent}%
+            <progress max={100} value={state.percent} aria-label="ログの送信" />
+          </p>
+        )}
+        {state.phase === "done" && (
+          <p className="ok-text" role="status">
+            ログを提出しました。提出の番号: <strong>{state.id}</strong>（問い合わせるときに伝えてください）
+            <button
+              type="button"
+              className="link-button"
+              onClick={() => void backend.copyText(state.id).catch(() => undefined)}
+            >
+              番号をコピー
+            </button>
+          </p>
+        )}
+        {state.phase === "error" && (
+          <p className="error-text" role="status">
+            {state.message}
+          </p>
+        )}
+      </div>
     </div>
   );
 }

@@ -56,6 +56,9 @@ export const called = {
   getAppVersion: [
     [],
   ] satisfies Called<"getAppVersion">[],
+  getDebugLogStatus: [
+    [],
+  ] satisfies Called<"getDebugLogStatus">[],
   getGuide: [
     [],
   ] satisfies Called<"getGuide">[],
@@ -123,18 +126,28 @@ export const called = {
     ["openai","…"],
     ["anthropic","…"],
   ] satisfies Called<"setApiKey">[],
+  setDebugVerbose: [
+    [true],
+    [false],
+  ] satisfies Called<"setDebugVerbose">[],
   startRecording: [
     ["…"],
   ] satisfies Called<"startRecording">[],
   stopRecording: [
     [],
   ] satisfies Called<"stopRecording">[],
+  submitDebugLogs: [
+    ["contract"],
+  ] satisfies Called<"submitDebugLogs">[],
   takeUpdateNotice: [
     [],
   ] satisfies Called<"takeUpdateNotice">[],
   updateNote: [
     ["…",{"title":"…","userNotes":"…"}],
   ] satisfies Called<"updateNote">[],
+  writeDebugLog: [
+    ["error","…",{"command":"x","message":"y"}],
+  ] satisfies Called<"writeDebugLog">[],
 };
 
 export const returned = {
@@ -171,6 +184,9 @@ export const returned = {
   getAppVersion: [
     "…",
   ] satisfies Returned<"getAppVersion">[],
+  getDebugLogStatus: [
+    {"verboseUntil":null},
+  ] satisfies Returned<"getDebugLogStatus">[],
   getGuide: [
     {"fetchedAt":0,"markdown":"…","source":"network"},
   ] satisfies Returned<"getGuide">[],
@@ -243,18 +259,28 @@ export const returned = {
     {"anthropic":false,"openai":true,"storage":"…"},
     {"anthropic":true,"openai":true,"storage":"…"},
   ] satisfies Returned<"setApiKey">[],
+  setDebugVerbose: [
+    {"verboseUntil":0},
+    {"verboseUntil":null},
+  ] satisfies Returned<"setDebugVerbose">[],
   startRecording: [
     {"elapsedMs":0,"noteId":"…","runningSince":0,"sources":["me","them"],"state":"recording"},
   ] satisfies Returned<"startRecording">[],
   stopRecording: [
     {"elapsedMs":0,"noteId":null,"runningSince":null,"sources":[],"state":"idle"},
   ] satisfies Returned<"stopRecording">[],
+  submitDebugLogs: [
+    {"id":"…","receivedAt":"…"},
+  ] satisfies Returned<"submitDebugLogs">[],
   takeUpdateNotice: [
     null,
   ] satisfies Returned<"takeUpdateNotice">[],
   updateNote: [
     {"createdAt":0,"enhancedAt":null,"enhancedNotes":null,"id":"…","title":"…","updatedAt":0,"userNotes":"…"},
   ] satisfies Returned<"updateNote">[],
+  writeDebugLog: [
+    null,
+  ] satisfies Returned<"writeDebugLog">[],
 };
 
 export const emitted = {
@@ -268,6 +294,9 @@ export const emitted = {
     {"level":0,"speaker":"me"},
     {"level":0,"speaker":"them"},
   ] satisfies Emitted<"onLevel">[],
+  onLogSubmitProgress: [
+    {"requestId":"contract","sent":0,"total":0},
+  ] satisfies Emitted<"onLogSubmitProgress">[],
   onNoteCreated: [
     {"createdAt":0,"enhancedAt":null,"enhancedNotes":null,"id":"…","title":"…","updatedAt":0,"userNotes":"…"},
   ] satisfies Emitted<"onNoteCreated">[],
