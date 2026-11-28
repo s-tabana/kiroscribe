@@ -332,7 +332,7 @@ fn a_combination_does_not_start_when_the_windows_cannot_be_read() {
     assert_eq!(run.hold(&teams(), 6), started(MeetingApp::Teams));
 }
 
-/// 強い印も組み合わせもない状態が 20 秒続いたら終了。戻れば続き。Meet の退出後の画面（打ち消し）が出たら、すぐ終了。
+/// 強い印も組み合わせもない状態が 20 秒続いたら終了。戻れば続き。Meet の退出後の画面のボタン（打ち消し）が出たら、すぐ終了。
 /// 退出したあともタブの題が残るだけでは、続いているとみなさない。
 // [MTG-008]
 #[test]
@@ -358,7 +358,7 @@ fn a_meeting_ends_after_the_grace_period_or_at_once_on_the_left_screen() {
         let left = meet_in_chrome(screen).mic("chrome.exe");
         let decisions = run.judge.tick(&left.evaluation(), run.now);
         assert_eq!(decisions.iter().map(|d| d.event).collect::<Vec<_>>(), ended(MEET));
-        assert!(matches!(&decisions[0].reason, Reason::Veto { signal, .. } if signal == "退出後の画面"), "{:?}", decisions[0].reason);
+        assert!(matches!(&decisions[0].reason, Reason::Veto { signal, .. } if signal == "退出後の画面のボタン"), "{:?}", decisions[0].reason);
         run.now += POLL_MS;
         assert!(run.hold(&left, 10).is_empty());
         assert_eq!(run.tick(&joined), started(MEET), "再参加");
@@ -524,8 +524,9 @@ fn discord_web(site: &str, controls: Vec<ControlFact>) -> Pc {
     Pc::new().window(window(30, "chrome.exe", CHROME, "#general | Acme - Discord - Google Chrome").at_site(site), controls)
 }
 
-/// ブラウザ版 Discord のタブの題はチャンネルの名前なので、題とマイクだけでは始めない（切断ボタンで始める）。
-/// 切断したあと、別のタブで音楽が流れていても（ブラウザの再生の音）、20 秒で終える。
+/// ブラウザ版 Discord は、切断ボタンで始め、切断ボタンで続ける。タブの題（チャンネルの名前）・ブラウザのマイク・再生の音は、
+/// その通話のものか分からないので数えない。切断ボタンが読めない回が少しあっても、終了の猶予の間に戻れば続く。
+/// 切断したあと、チャンネルの画面のまま、同じブラウザの別のタブがマイクを使い続けても（別の会議・音声入力）、20 秒で終える。
 // [MTG-008][MTG-032]
 #[test]
 fn discord_in_a_browser_needs_the_call_itself() {
@@ -533,11 +534,14 @@ fn discord_in_a_browser_needs_the_call_itself() {
     assert!(run.hold(&discord_web("discord.com", vec![]).mic("chrome.exe").sound("chrome.exe", 0.3), 30).is_empty(), "題とマイクと再生の音");
 
     let mut run = Run::new();
-    assert_eq!(run.tick(&discord_web("discord.com", vec![button("Disconnect")]).mic("chrome.exe")), started(MeetingApp::Discord));
-    // 通話中は、切断ボタンが読めない回があっても、題とマイクで続く
-    assert!(run.hold(&discord_web("discord.com", vec![]).mic("chrome.exe"), 30).is_empty());
-    // 切断した: チャンネルの画面のまま、別のタブで音楽が流れている
-    let left = discord_web("discord.com", vec![]).sound("chrome.exe", 0.4);
+    let call = discord_web("discord.com", vec![button("Disconnect")]).mic("chrome.exe");
+    assert_eq!(run.tick(&call), started(MeetingApp::Discord));
+    // 切断ボタンが読めない回が続いても、20 秒以内に戻れば続く
+    assert!(run.hold(&discord_web("discord.com", vec![]).mic("chrome.exe"), 10).is_empty());
+    assert!(run.hold(&call, 10).is_empty());
+    assert_eq!(run.judge.phase(), Phase::Active(MeetingApp::Discord));
+    // 切断した: チャンネルの画面のまま、別のタブがマイクを使い、音楽が流れている
+    let left = discord_web("discord.com", vec![]).mic("chrome.exe").sound("chrome.exe", 0.4);
     assert!(run.hold(&left, 20).is_empty());
     assert_eq!(run.tick(&left), ended(MeetingApp::Discord), "切断から 20 秒");
     assert!(run.hold(&left, 30).is_empty());
@@ -564,8 +568,8 @@ fn a_partly_read_window_does_not_count_as_a_scan() {
     assert_eq!(judge.tick(&evaluation, 0).iter().map(|d| d.event).collect::<Vec<_>>(), started(MEET));
 }
 
-/// Meet の会議中に、チャットの本文（文字の部品）に「再参加」や退出後の画面の見出しを含む文が見えても、退出ボタンがあれば続く。
-/// 退出後の画面は、見出しの文字の部品そのものか、退出後の画面のボタンで見分ける。
+/// Meet の会議中に、チャットの本文（文字の部品）に「再参加」や、退出後の画面の見出しと同じ文が見えても、退出ボタンがあれば続く。
+/// 退出後の画面は、退出後の画面のボタンで見分け、すぐに終える。ボタンを読めず見出しの文字だけが見えるときは、20 秒の猶予のあとで終える。
 // [MTG-008]
 #[test]
 fn meeting_chat_text_does_not_end_a_meet_call() {
@@ -575,13 +579,53 @@ fn meeting_chat_text_does_not_end_a_meet_call() {
         button("通話から退出"),
         control(ControlType::Text, "後で再参加します"),
         control(ControlType::Text, "山田さんはミーティングから退出しました"),
-        control(ControlType::Text, "you left the meeting early?"),
+        control(ControlType::Text, "ミーティングから退出しました"),
+        control(ControlType::Text, "You left the meeting"),
     ])
     .mic("chrome.exe");
-    assert!(run.hold(&chatting, 60).is_empty());
+    assert!(run.hold(&chatting, 60).is_empty(), "見出しと同じ文のチャット");
     assert_eq!(run.judge.phase(), Phase::Active(MEET));
-    let left = meet_in_chrome(vec![control(ControlType::Text, "ミーティングから退出しました")]);
+    let heading_only = meet_in_chrome(vec![control(ControlType::Text, "ミーティングから退出しました")]);
+    assert!(run.hold(&heading_only, 20).is_empty(), "見出しの文字だけでは、すぐには終えない");
+    assert_eq!(run.tick(&heading_only), ended(MEET));
+    let mut run = Run::new();
+    assert_eq!(run.tick(&chatting), started(MEET));
+    let left = meet_in_chrome(vec![control(ControlType::Text, "ミーティングから退出しました"), button("再参加")]);
     assert_eq!(run.tick(&left), ended(MEET));
+}
+
+/// デスクトップの会議アプリの文脈（マイクと再生の音）は、そのアプリの見えている題のある窓のすべての中を調べ切れた回だけを、
+/// 組み合わせの開始に要る調べた回に数える。参加前の画面の窓を読めず、別の窓だけを読めた回では始めない。
+// [MTG-007]
+#[test]
+fn a_desktop_app_counts_a_scan_only_when_all_its_windows_were_read() {
+    let teams = || {
+        Pc::new()
+            .window(window(90, "ms-teams.exe", CHROME, "会議の準備 | Microsoft Teams"), vec![])
+            .window(window(91, "ms-teams.exe", CHROME, "チャット | Microsoft Teams"), vec![])
+            .window(window(92, "ms-teams.exe", CHROME, ""), vec![])
+            .mic("ms-teams.exe")
+            .sound("ms-teams.exe", 0.3)
+    };
+    let mut facts = teams().facts();
+    for scanned in facts.scan.as_mut().unwrap().windows.iter_mut() {
+        match scanned.hwnd {
+            90 => scanned.incomplete = Some("本文を読めない".into()),
+            92 => scanned.error = Some("0x80004005".into()),
+            _ => {}
+        }
+    }
+    let evaluation = evaluate(Rules::builtin(), &facts, &Browsers::builtin());
+    let mut judge = Judge::new(Rules::builtin());
+    let events: Vec<MeetingEvent> = (0..15).flat_map(|i| judge.tick(&evaluation, i * POLL_MS)).map(|d| d.event).collect();
+    assert!(events.is_empty(), "{events:?}");
+    // 題のない窓（ツールチップなど）を読めなくても、題のある窓をすべて読めれば数える
+    let mut facts = teams().facts();
+    facts.scan.as_mut().unwrap().windows.iter_mut().filter(|scanned| scanned.hwnd == 92).for_each(|scanned| scanned.error = Some("0x80004005".into()));
+    let evaluation = evaluate(Rules::builtin(), &facts, &Browsers::builtin());
+    let mut judge = Judge::new(Rules::builtin());
+    let events: Vec<MeetingEvent> = (0..3).flat_map(|i| judge.tick(&evaluation, i * POLL_MS)).map(|d| d.event).collect();
+    assert_eq!(events, started(MeetingApp::Teams));
 }
 
 /// 会議アプリの窓をすべてトレイに隠したとき（窓が見えない）: 最初から隠していれば、マイクと再生の音がそろっても始めない

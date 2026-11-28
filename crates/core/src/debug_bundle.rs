@@ -273,7 +273,7 @@ mod tests {
                 hwnd: 7,
                 exe: "chrome.exe".into(),
                 class: "Chrome_WidgetWin_1".into(),
-                title: "https://meet.google.com/abc-defg-hij?authuser=SECRETQUERY - Google Chrome".into(),
+                title: "https://meet.google.com/a(1)/abc-defg-hij?authuser=SECRETQUERY - Google Chrome".into(),
                 visible: true,
                 site: Some("meet.google.com".into()),
             }],
@@ -332,7 +332,8 @@ mod tests {
         assert_eq!(record.format, crate::meeting_record::FORMAT, "回帰テストの材料と同じ形");
         // 窓の題は伏せて入れる
         let title = &record.entries[0].titles[0].title;
-        assert_eq!(title, "https://meet.google.com/abc-defg-hij?<query> - Google Chrome");
+        // パスに `(`・`)` のある URL も、その後ろのクエリを伏せる
+        assert_eq!(title, "https://meet.google.com/a(1)/abc-defg-hij?<query> - Google Chrome");
         assert_eq!(read("logs/kiroscribe-20261127.log"), "{\"event\":\"app.exit\"}\n");
         let readme = read(README);
         assert!(readme.contains("API キー") && readme.contains("確かめてください"), "{readme}");

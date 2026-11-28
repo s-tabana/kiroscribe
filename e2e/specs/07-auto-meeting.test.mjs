@@ -306,7 +306,7 @@ test(
 
     // 会議の検出の記録は、回帰テストの材料と同じ形で入る
     const record = JSON.parse(files.get("meeting-detection.json").toString("utf8"));
-    assert.equal(record.format, "kiroscribe-meeting-record/3");
+    assert.equal(record.format, "kiroscribe-meeting-record/4");
     assert.ok(record.entries.length >= 1, JSON.stringify(record));
     assert.equal(typeof record.rulesVersion, "number");
     // フルパス（利用者の名前を含む）は残さない。詳しい記録がオフなので、窓の題も残さない

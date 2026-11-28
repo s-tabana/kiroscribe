@@ -489,7 +489,7 @@ pub struct Context {
     /// 窓の文脈なら、その窓の識別子（HWND の値）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<u64>,
-    /// この回に、この文脈の窓の中の部品を調べたか（デスクトップの会議アプリの文脈では、どれかの窓を調べたか）
+    /// この回に、この文脈の窓の中の部品を調べ切れたか（デスクトップの会議アプリの文脈では、そのアプリの見えている題のある窓のすべて）
     #[serde(default)]
     pub scanned: bool,
     pub signals: Vec<Held>,
@@ -661,11 +661,14 @@ pub fn evaluate(rules: &Rules, facts: &Facts, browsers: &Browsers) -> Evaluation
         if !held_app.is_empty() {
             apps.sort_unstable();
             held_app.extend(desktop_vetoes);
-            // そのアプリの窓のどれかの中を、この回に調べられたときだけ、調べた回に数える
-            let scanned = facts
+            // そのアプリの見えている題のある窓（題のないツールチップなどは除く）のすべての中を、この回に調べ切れたときだけ、
+            // 調べた回に数える（参加前の画面の窓を読めず、別の窓だけを読めた回を数えない）
+            let mut shown = facts
                 .windows
                 .iter()
-                .any(|window| apps.contains(&window.exe.as_str()) && facts.scan_covers(window.hwnd));
+                .filter(|window| window.visible && !window.title.is_empty() && apps.contains(&window.exe.as_str()))
+                .peekable();
+            let scanned = shown.peek().is_some() && shown.all(|window| facts.scan_covers(window.hwnd));
             contexts.push(Context { app: apps.join("・"), window: None, scanned, signals: held_app });
         }
         if !contexts.is_empty() {

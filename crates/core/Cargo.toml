@@ -26,6 +26,8 @@ keyring-core = "1"
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # 会議の検出の判定表（meeting_rules.toml）を読む
 toml = "1"
+# 会議の検出で、アドレスバーとページの URL からホスト名を取り出す（meeting_facts.rs）。reqwest と同じ版を使う
+url = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-native-keyring-store = "1"

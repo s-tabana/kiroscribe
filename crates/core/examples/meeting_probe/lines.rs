@@ -1,6 +1,7 @@
 //! 確認用の道具の表示（OS によらない部分）: 判定の様子と、読んだ PC の様子を行にし、前回から変わった行だけを出す。
 //!
 //! 窓の題・部品の名前・ページのサイトは、`--titles` のときだけ出す（会議の名前・参加者の名前・メールの件名が含まれうるため）。
+//! ページのサイトは、判定表のサービスのサイトのときだけホスト名とサービスを出し、ほかのサイトはホスト名を出さない。
 //! 部品の名前は、立っている印に実際に当たった部品だけを出し、文字（Text）の部品は本文ではなく当たった判定表の語を出す（製品のログと同じ）。
 
 use std::collections::HashMap;
@@ -136,7 +137,7 @@ pub fn window_lines(rules: &Rules, facts: &Facts, evaluation: &Evaluation, title
         let signals = if signals.is_empty() { "なし".to_string() } else { signals.join("・") };
         let title = if titles { format!(" 題「{}」", mask_text(&window.title)) } else { String::new() };
         let site = match (&window.site, titles) {
-            (Some(site), true) => format!(" サイト={site}"),
+            (Some(site), true) => site_text(rules, site),
             _ => String::new(),
         };
         let label = format!("窓 {} 0x{:x}", window.exe, window.hwnd);
@@ -168,6 +169,14 @@ pub fn window_lines(rules: &Rules, facts: &Facts, evaluation: &Evaluation, title
         }
     }
     lines
+}
+
+/// ページのサイトの表示。判定表のサービスのサイト（とそのサブドメイン）のときだけホスト名を出す。
+fn site_text(rules: &Rules, site: &str) -> String {
+    match rules.services.iter().find(|service| service.is_site(site)) {
+        Some(service) => format!(" サイト={site}（{}）", service.app.label()),
+        None => " サイト=会議のサービスのサイトではない".to_string(),
+    }
 }
 
 /// 窓の中を調べた様子の行。
@@ -249,7 +258,7 @@ mod tests {
         assert!(joined.contains("印: Google Meet の退出ボタン（強）"), "{joined}");
         let shown = window_lines(rules, &facts, &evaluation, true).into_iter().map(|line| line.text).collect::<Vec<_>>().join("\n");
         assert!(shown.contains("題「Meet - abc-defg-hij - 山田 - Google Chrome」") && shown.contains("通話から退出（Button）"), "{shown}");
-        assert!(shown.contains("サイト=meet.google.com"), "{shown}");
+        assert!(shown.contains("サイト=meet.google.com（Google Meet）"), "{shown}");
         assert!(!hidden.join("\n").contains("meet.google.com"), "サイトも --titles のときだけ");
         let capture = session_lines(Flow::Capture, &facts.capture, rules, &browsers);
         assert_eq!(capture[1].text, "  録音 active chrome.exe");
@@ -286,6 +295,20 @@ mod tests {
         let shown = &lines.iter().find(|line| line.key.starts_with("部品/")).unwrap().text;
         assert!(shown.contains("通話から退出（Button）"), "{shown}");
         assert!(!shown.contains("山田") && !shown.contains("再参加") && !shown.contains("Acme"), "{shown}");
+    }
+
+    /// --titles でも、会議のサービスのサイトでないページ（会議中に切り替えた別のタブ・会議に似た題の社内のサイト）の
+    /// ホスト名は出さない。
+    #[test]
+    fn titles_show_only_the_hosts_of_the_services() {
+        let mut facts = facts();
+        facts.windows[0].site = Some("wiki.intra.example.co.jp".into());
+        let evaluation = evaluate(Rules::builtin(), &facts, &Browsers::builtin());
+        let shown = window_lines(Rules::builtin(), &facts, &evaluation, true).into_iter().map(|line| line.text).collect::<Vec<_>>().join("\n");
+        assert!(!shown.contains("intra") && shown.contains("サイト=会議のサービスのサイトではない"), "{shown}");
+        facts.windows[0].site = Some("acme.slack.com".into());
+        let shown = window_lines(Rules::builtin(), &facts, &evaluation, true).into_iter().map(|line| line.text).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains("サイト=acme.slack.com（Slack ハドル）"), "{shown}");
     }
 
     /// 前回から変わった行と、消えた行だけを出す。

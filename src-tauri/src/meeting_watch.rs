@@ -224,9 +224,18 @@ pub(crate) fn check_fields(check: &Check<'_>, now: Option<i64>) -> Value {
             fields["confirmingMs"] = json!(now - since);
         }
         if let Some(scan) = &facts.scan {
+            // 調べ切れなかった窓の数と理由（部品の数とエラーコードなど。部品の名前や本文は含まない）
+            let mut incomplete: Vec<&str> = Vec::new();
+            for reason in scan.windows.iter().filter_map(|window| window.incomplete.as_deref()) {
+                if !incomplete.contains(&reason) {
+                    incomplete.push(reason);
+                }
+            }
             fields["controls"] = json!({
                 "windows": scan.windows.len(),
                 "failedWindows": scan.windows.iter().filter(|window| window.error.is_some()).count(),
+                "incompleteWindows": scan.windows.iter().filter(|window| window.error.is_none() && window.incomplete.is_some()).count(),
+                "incompleteReasons": incomplete,
                 "elapsedMs": scan.elapsed_ms,
                 "error": scan.error,
             });
@@ -592,7 +601,10 @@ mod tests {
         assert_eq!(normal["capture"]["total"], 2);
         assert_eq!(normal["capture"]["sessions"], json!([{ "exe": "chrome.exe", "state": "active" }]), "対象のアプリのセッションだけ");
         assert_eq!(normal["render"]["sessions"], json!([{ "exe": "chrome.exe", "state": "active", "audible": true }]));
-        assert_eq!(normal["controls"], json!({ "windows": 1, "failedWindows": 0, "elapsedMs": 85, "error": null }));
+        assert_eq!(
+            normal["controls"],
+            json!({ "windows": 1, "failedWindows": 0, "incompleteWindows": 0, "incompleteReasons": [], "elapsedMs": 85, "error": null })
+        );
         let text = normal.to_string();
         assert!(!text.contains("山田") && !text.contains("example.com") && !text.contains("通話から退出"), "{text}");
 
@@ -639,14 +651,32 @@ mod tests {
 
         let mut left = meeting_facts(0.2);
         left.scan.as_mut().unwrap().windows[0].controls = vec![
+            ControlFact { kind: ControlType::Button, name: "再参加".into() },
+            // 会議のチャットの本文は、退出後の画面の見出しと同じ文でも書かない
             ControlFact { kind: ControlType::Text, name: "ミーティングから退出しました".into() },
-            // 会議のチャットの本文は、退出後の画面の見出しと同じ語を含んでも当たらない
-            ControlFact { kind: ControlType::Text, name: "山田さん、ミーティングから退出しました".into() },
         ];
         let mut judge = Judge::new(Rules::builtin());
         let left_step = step(left, &mut judge, 0);
         let fields = check_fields(&check_of(&left_step, &judge, &browsers, true), Some(1_000));
-        assert_eq!(fields["controlNames"], json!(["chrome.exe: ミーティングから退出しました（Text）"]));
+        assert_eq!(fields["controlNames"], json!(["chrome.exe: 再参加（Button）"]));
+    }
+
+    /// 窓の中の部品の一部を読めなかった窓（本文を読めない・部品の取得の失敗）の数と理由を書く。理由には、部品の名前や本文は入らない。
+    // [LOG-005]
+    #[test]
+    fn partly_read_windows_are_logged() {
+        let mut facts = meeting_facts(0.2);
+        let scan = facts.scan.as_mut().unwrap();
+        scan.windows[0].incomplete = Some("本文を読めない・3 個の部品を読めない（0x80040201）".into());
+        scan.windows.push(ScannedWindow { hwnd: 78, error: Some("応答のない窓".into()), ..Default::default() });
+        let mut judge = Judge::new(Rules::builtin());
+        let step = step(facts, &mut judge, 0);
+        let browsers = Browsers::builtin();
+        let fields = check_fields(&check_of(&step, &judge, &browsers, false), Some(1_000));
+        assert_eq!(
+            (&fields["controls"]["failedWindows"], &fields["controls"]["incompleteWindows"], &fields["controls"]["incompleteReasons"]),
+            (&json!(1), &json!(1), &json!(["本文を読めない・3 個の部品を読めない（0x80040201）"]))
+        );
     }
 
     /// 組み合わせで開始の確定を待っている間は、待ち始めてからのミリ秒を書く。

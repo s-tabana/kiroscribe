@@ -159,7 +159,7 @@ jobs:
               '録音のセッション'                 = '(?m)^\s*録音 active slack\.exe'
               '再生のセッション（音あり）'       = '(?m)^\s*再生 active slack\.exe 音あり（ピーク \d\.\d{3}）'
               'ブラウザの録音のセッション'       = '(?m)^\s*録音 active msedge\.exe'
-              '会議のページの窓と印'             = '(?m)^\s*窓 msedge\.exe 0x[0-9a-f]+ クラス=Chrome_WidgetWin_1 表示 題「Meet - abc-defg-hij.*サイト=127\.0\.0\.1 印: .*Google Meet の退出ボタン（強）'
+              '会議のページの窓と印'             = '(?m)^\s*窓 msedge\.exe 0x[0-9a-f]+ クラス=Chrome_WidgetWin_1 表示 題「Meet - abc-defg-hij.*サイト=127\.0\.0\.1（Google Meet） 印: .*Google Meet の退出ボタン（強）'
               '退出のボタン'                     = '(?m)^\s*窓 msedge\.exe 0x[0-9a-f]+ の部品: \d+ 個を調べた。.*Leave call（Button）'
               # 先に Slack ハドルが会議中になると、Meet は「ほかの会議」になり、開始は知らせない（MTG-010）
               'Meet の参加中の判定'             = '(?m)^\s*Google Meet: 参加中（msedge\.exe の窓） 退出ボタン（強）'
@@ -186,7 +186,7 @@ jobs:
             Start-Sleep -Seconds 2
             Start-Edge 'meet.html' 'localhost'
             $output = Invoke-Probe '会議のサイトでないページ' 20
-            $ok = ($output -match '(?m)^\s*窓 msedge\.exe 0x[0-9a-f]+ .*題「Meet - abc-defg-hij.*サイト=localhost 印: なし') -and ($output -notmatch 'Google Meet: ') -and ($output -notmatch '会議の開始を確定: Google Meet')
+            $ok = ($output -match '(?m)^\s*窓 msedge\.exe 0x[0-9a-f]+ .*題「Meet - abc-defg-hij.*サイト=会議のサービスのサイトではない 印: なし') -and ($output -notmatch 'Google Meet: ') -and ($output -notmatch '会議の開始を確定: Google Meet')
             "確認: 会議のサイトでないページは Meet にしない → $ok"
             if (-not $ok) { $failures += '会議のサイトでないページ' }
           } finally {

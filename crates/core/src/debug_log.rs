@@ -163,6 +163,8 @@ fn mask_user_folders(text: &str) -> String {
 }
 
 /// URL のクエリ（`?` から後ろ。署名つきのダウンロードの URL などに、使い捨ての鍵が入る）を `?<query>` に置き換える。
+/// URL は、空白か、URL に使えない文字（`"`・`<`・`>`・`` ` ``）までとする。パスやクエリに使える `'`・`(`・`)`
+/// （RFC 3986 の sub-delims）では打ち切らず、その後ろのクエリも伏せる（[`url_end`]）。
 fn mask_url_queries(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -172,9 +174,8 @@ fn mask_url_queries(text: &str) -> String {
             out.push_str(rest);
             return out;
         };
-        let url_end = rest[scheme..]
-            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '>' | '<'))
-            .map_or(rest.len(), |at| scheme + at);
+        let opener = rest[..scheme].chars().next_back();
+        let url_end = scheme + url_end(&rest[scheme..], opener);
         let url = &rest[scheme..url_end];
         out.push_str(&rest[..scheme]);
         match url.find('?') {
@@ -185,6 +186,29 @@ fn mask_url_queries(text: &str) -> String {
             None => out.push_str(url),
         }
         rest = &rest[url_end..];
+    }
+}
+
+/// URL の終わりの位置。空白か、URL に使えない文字までを URL とし、末尾の句読点と、URL の前の括弧・引用符（`opener`）と
+/// 対になる閉じ括弧・引用符だけを URL から外す（`(https://a/b?x=1)` の `)` など）。URL の中の対になった括弧は外さない。
+fn url_end(text: &str, opener: Option<char>) -> usize {
+    let mut end = text
+        .find(|c: char| c.is_whitespace() || matches!(c, '"' | '<' | '>' | '`'))
+        .unwrap_or(text.len());
+    loop {
+        let url = &text[..end];
+        let Some(last) = url.chars().next_back() else { return end };
+        let trailing = match last {
+            '.' | ',' | ':' | ';' | '!' => true,
+            ')' => opener == Some('(') && url.matches(')').count() > url.matches('(').count(),
+            ']' => opener == Some('[') && url.matches(']').count() > url.matches('[').count(),
+            '\'' => opener == Some('\''),
+            _ => false,
+        };
+        if !trailing {
+            return end;
+        }
+        end -= last.len_utf8();
     }
 }
 
@@ -786,6 +810,18 @@ mod tests {
             sanitize_text("error sending request for url (https://example.com/a.zip?X-Amz-Signature=abc&x=1): timeout"),
             "error sending request for url (https://example.com/a.zip?<query>): timeout"
         );
+        // パスに使える `'`・`(`・`)` で URL を打ち切らず、その後ろのクエリも伏せる（RFC 3986 の sub-delims）
+        for url in [
+            "https://example.com/a(1)/b?token=SECRETQUERY",
+            "https://example.com/it's/x?token=SECRETQUERY",
+            "see https://example.com/a)?token=SECRETQUERY now",
+            "(https://example.com/a?token=SECRET)QUERY)",
+        ] {
+            let masked = sanitize_text(url);
+            assert!(!masked.contains("SECRET") && !masked.contains("QUERY"), "{masked}");
+        }
+        assert_eq!(sanitize_text("(https://example.com/a(1)?t=SECRET)."), "(https://example.com/a(1)?<query>).");
+        assert_eq!(sanitize_text("'https://example.com/a?t=SECRET' と"), "'https://example.com/a?<query>' と");
         // 利用者のフォルダのパスの後ろに URL が続いても、URL のクエリを伏せる
         let path_then_url = sanitize_text(r"save C:\Users\taro failed https://example.com/a.zip?X-Amz-Signature=abc");
         assert!(!path_then_url.contains("X-Amz-Signature") && !path_then_url.contains("taro"), "{path_then_url}");

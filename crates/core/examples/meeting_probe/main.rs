@@ -370,7 +370,7 @@ mod tests {
         assert!(options(["--site", "meet"].map(String::from)).is_err());
     }
 
-    /// 目印も、ファイルに書く前に、URL のクエリ・API キーの形の文字列を伏せる。
+    /// 目印も、ファイルに書く前に、URL のクエリ（パスに `(`・`'` のある URL も）・API キーの形の文字列を伏せる。
     #[test]
     fn markers_are_masked_in_the_file() {
         let dir = std::env::temp_dir().join(format!("meeting-probe-test-{}", std::process::id()));
@@ -379,15 +379,17 @@ mod tests {
         let mut out = Out { file: Some(std::fs::File::create(&path).unwrap()) };
         let (sender, receiver) = mpsc::channel();
         sender.send("https://meet.google.com/abc?authuser=SECRETQUERY sk-proj-SECRETKEY123 入った".to_string()).unwrap();
+        // パスに使える `(`・`)`・`'` の後ろのクエリも伏せる
+        sender.send("(https://meet.google.com/a(1)/it's?authuser=SECRETPATH) 2 回目".to_string()).unwrap();
         drop(sender);
         let mut count = 0;
         wait(Duration::from_millis(10), &receiver, &mut count, &mut out);
         drop(out);
         let written = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(count, 1);
-        assert!(written.contains("目印 1") && written.contains("入った"), "{written}");
-        assert!(!written.contains("SECRETQUERY") && !written.contains("SECRETKEY"), "{written}");
+        assert_eq!(count, 2);
+        assert!(written.contains("目印 1") && written.contains("入った") && written.contains("2 回目"), "{written}");
+        assert!(!written.contains("SECRETQUERY") && !written.contains("SECRETKEY") && !written.contains("SECRETPATH"), "{written}");
     }
 
     #[test]

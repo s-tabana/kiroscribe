@@ -1,0 +1,119 @@
+{
+  "format": "kiroscribe-meeting-record/3",
+  "appVersion": "0.4.3",
+  "rulesVersion": 2,
+  "entries": [
+    {
+      "at": 1795000000000,
+      "until": 1795000018000,
+      "count": 10,
+      "services": [
+        {
+          "app": "slackHuddle",
+          "contexts": [
+            {
+              "app": "slack.exe",
+              "window": 200,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "退出ボタン",
+                  "strength": "strong",
+                  "kind": "control"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000020000,
+      "until": 1795000058000,
+      "count": 20,
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "chrome.exe",
+              "window": 300,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "退出ボタン",
+                  "strength": "strong",
+                  "kind": "control"
+                },
+                {
+                  "name": "Meet のタブの題",
+                  "strength": "medium",
+                  "kind": "window"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "app": "slackHuddle",
+          "contexts": [
+            {
+              "app": "slack.exe",
+              "window": 200,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "退出ボタン",
+                  "strength": "strong",
+                  "kind": "control"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000060000,
+      "until": 1795000118000,
+      "count": 30,
+      "services": [
+        {
+          "app": "googleMeet",
+          "contexts": [
+            {
+              "app": "chrome.exe",
+              "window": 300,
+              "scanned": true,
+              "signals": [
+                {
+                  "name": "退出ボタン",
+                  "strength": "strong",
+                  "kind": "control"
+                },
+                {
+                  "name": "Meet のタブの題",
+                  "strength": "medium",
+                  "kind": "window"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "at": 1795000120000,
+      "until": 1795000140000,
+      "count": 11,
+      "services": []
+    }
+  ],
+  "expected": [
+    "started:slackHuddle",
+    "ended:slackHuddle",
+    "started:googleMeet",
+    "ended:googleMeet"
+  ],
+  "description": "形式 /3（判定表の版 2）の記録は、記録 1 件の at から until までの count 回を等しい間隔で並べて再生する。Slack ハドルの最中に Google Meet にも入る。Meet の開始は知らせず、ハドルを抜けたら Meet に切り替える"
+}
