@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { errorMessage, useBackend, type Backend } from "../lib/backend";
 import { useUpdater } from "../hooks/useUpdater";
+import { formatBrowsers, parseBrowsers } from "../lib/browsers";
 import { shortDateTimeLabel } from "../lib/dates";
 import type { ApiKeyStatus, AudioDevice, HelpTab, Provider, Settings } from "../lib/types";
 import { HelpDialog } from "./HelpDialog";
@@ -49,6 +50,8 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [deviceError, setDeviceError] = useState<string | null>(null);
   const [helpTab, setHelpTab] = useState<HelpTab | null>(null);
+  /** 判定に足すブラウザの欄の文字（打っている途中の区切りを消さないよう、設定とは別に持つ） */
+  const [browsersText, setBrowsersText] = useState("");
   const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -60,33 +63,56 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
 
   /** 保存されている設定（画面の外で変わったときに、どの項目が変わったかを知るため） */
   const saved = useRef<Settings | null>(null);
+  /** 画面に出している設定（state と同じ値。通知と保存の応答で、今の表示と比べるため） */
+  const shown = useRef<Settings | null>(null);
+  /** 読み込みか保存の後に、この画面で書き換えた項目。画面の外の変更と保存の応答では、これらの項目を上書きしない */
+  const edited = useRef(new Set<keyof Settings>());
+
+  const show = (next: Settings) => {
+    shown.current = next;
+    setSettings(next);
+  };
 
   useEffect(() => {
     Promise.all([backend.getSettings(), backend.getApiKeyStatus()])
       .then(([s, k]) => {
-        saved.current = s;
-        setSettings(s);
         setKeys(k);
+        // 読み込みの応答より先に設定の通知が届いていたら、通知のほうが新しいので、応答の設定は使わない
+        // （使うと、通知の後にこの画面で書き換えた項目と、通知で反映した項目が消える）
+        if (saved.current) return;
+        saved.current = s;
+        show(s);
+        setBrowsersText(formatBrowsers(s.extraBrowsers));
       })
       .catch((err) => setMessage({ kind: "error", text: errorMessage(err) }));
   }, [backend]);
 
   // 設定画面を開いている間に、タスクトレイのメニューで設定が変わったら、変わった項目だけを表示に反映する
   // （反映しないと、古い表示のまま「設定を保存」を押したときに、トレイでの切り替えが元に戻ってしまう）。
-  // この画面で書きかけている、ほかの項目は変えない
+  // この画面で書きかけている項目は変えない
   useEffect(
     () =>
       backend.onSettingsChanged((next) => {
         const before = saved.current;
+        const current = shown.current;
         saved.current = next;
-        setSettings((shown) => {
-          if (!shown || !before) return next;
-          const merged = { ...shown };
-          for (const key of Object.keys(next) as (keyof Settings)[]) {
-            if (before[key] !== next[key]) Object.assign(merged, { [key]: next[key] });
-          }
-          return merged;
-        });
+        if (!before || !current) {
+          edited.current.clear();
+          show(next);
+          setBrowsersText(formatBrowsers(next.extraBrowsers));
+          return;
+        }
+        const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+        const merged = { ...current };
+        for (const key of Object.keys(next) as (keyof Settings)[]) {
+          if (same(before[key], next[key])) continue;
+          // 書き換えた項目でも、表示が保存済みの値に戻っているなら書きかけではないので、画面の外の変更を反映する
+          if (edited.current.has(key) && !same(current[key], before[key])) continue;
+          edited.current.delete(key);
+          Object.assign(merged, { [key]: next[key] });
+          if (key === "extraBrowsers") setBrowsersText(formatBrowsers(next.extraBrowsers));
+        }
+        show(merged);
       }),
     [backend],
   );
@@ -103,18 +129,31 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, helpTab]);
 
-  const update = <K extends keyof Settings>(key: K, value: Settings[K]) =>
-    setSettings((prev) => (prev ? { ...prev, [key]: value } : prev));
+  const update = <K extends keyof Settings>(key: K, value: Settings[K]) => {
+    if (!shown.current) return;
+    edited.current.add(key);
+    show({ ...shown.current, [key]: value });
+  };
 
   const save = async () => {
     if (!settings) return;
     setSaving(true);
+    // 送った後に書き換えた項目だけを、保存の応答で上書きしないために残す
+    const sent = new Set(edited.current);
+    edited.current.clear();
     try {
       const stored = await backend.saveSettings(settings);
       saved.current = stored;
-      setSettings(stored);
+      const keep = new Set(edited.current);
+      const current = shown.current;
+      const merged = { ...stored };
+      if (current) for (const key of keep) Object.assign(merged, { [key]: current[key] });
+      show(merged);
+      if (!keep.has("extraBrowsers")) setBrowsersText(formatBrowsers(stored.extraBrowsers));
       setMessage({ kind: "ok", text: "設定を保存しました" });
     } catch (err) {
+      // 保存できなかった項目は、書きかけのままとして扱う
+      for (const key of sent) edited.current.add(key);
       setMessage({ kind: "error", text: errorMessage(err) });
     } finally {
       setSaving(false);
@@ -252,6 +291,22 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
                           "会議から抜けたら停止します（抜けたことが画面から分からないときは、20 秒たってから停止します）。"}
                       </small>
                     </span>
+                  </label>
+                  <label className="field field-after-check">
+                    <span>判定に足すブラウザ</span>
+                    <textarea
+                      rows={2}
+                      value={browsersText}
+                      placeholder="例: mybrowser.exe"
+                      onChange={(e) => {
+                        setBrowsersText(e.target.value);
+                        update("extraBrowsers", parseBrowsers(e.target.value));
+                      }}
+                    />
+                    <small className="field-hint">
+                      {"ブラウザの会議（Google Meet など）は、Chrome・Edge・Firefox・Zen・Brave などで検出します。" +
+                        "一覧にないブラウザを使うときは、その実行ファイルの名前を「,」か改行で区切って入力します。"}
+                    </small>
                   </label>
                   <label className="check">
                     <input

@@ -30,6 +30,8 @@ pub struct Settings {
     pub my_name: String,
     /// 会議（Google Meet・Slack ハドルなど）を検出したら自動で録音する。
     pub auto_record_meetings: bool,
+    /// 会議の検出の対象に足すブラウザ（実行ファイルの名前、小文字）。組み込みの一覧（MTG-002）と同じに扱う。
+    pub extra_browsers: Vec<String>,
     /// Windows の起動時に起動し、タスクトレイに常駐する。
     pub launch_at_login: bool,
     /// 見つけた新しいバージョンを自動でインストールする（既定はオフで、知らせるだけ）。
@@ -46,6 +48,7 @@ impl Default for Settings {
             capture_system_audio: true,
             my_name: String::new(),
             auto_record_meetings: true,
+            extra_browsers: Vec::new(),
             launch_at_login: true,
             auto_update: false,
         }
@@ -68,8 +71,36 @@ impl Settings {
             .input_device_id
             .map(|id| id.trim().to_string())
             .filter(|id| !id.is_empty());
+        self.extra_browsers = normalize_browsers(&self.extra_browsers);
         self
     }
+}
+
+/// 判定に足すブラウザの数と、名前の長さの上限。
+pub const MAX_EXTRA_BROWSERS: usize = 20;
+pub const MAX_BROWSER_NAME_CHARS: usize = 64;
+
+/// 判定に足すブラウザの名前を整える（SET-021）: 前後の空白とフォルダの部分を除き、小文字にし、
+/// 末尾が .exe でなければ .exe を付ける。空の名前・長すぎる名前・ブラウザとして扱わないプロセス
+/// （Kiroscribe 自身と MTG-003 で対象にしないもの。[`crate::meetings::NOT_BROWSERS`]）・重複は除き、20 個までにする。
+pub fn normalize_browsers(names: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in names {
+        let name = name.trim().trim_matches('"');
+        let name = name.rsplit(['\\', '/']).next().unwrap_or(name).trim().to_lowercase();
+        if name.is_empty() || name == ".exe" {
+            continue;
+        }
+        let name = if name.ends_with(".exe") { name } else { format!("{name}.exe") };
+        if name.chars().count() > MAX_BROWSER_NAME_CHARS || crate::meetings::NOT_BROWSERS.contains(&name.as_str()) || out.contains(&name) {
+            continue;
+        }
+        out.push(name);
+        if out.len() == MAX_EXTRA_BROWSERS {
+            break;
+        }
+    }
+    out
 }
 
 impl Database {
@@ -208,6 +239,37 @@ mod tests {
         assert!(loaded.auto_record_meetings);
         assert!(loaded.launch_at_login);
         assert!(!loaded.auto_update);
+        assert!(loaded.extra_browsers.is_empty(), "判定に足すブラウザはなし");
+    }
+
+    /// 判定に足すブラウザは、実行ファイルの名前（小文字、.exe 付き）にそろえて保存する。
+    // [SET-021]
+    #[test]
+    fn extra_browsers_are_saved_as_exe_names() {
+        let db = Database::open_in_memory().unwrap();
+        let names = [
+            " MyBrowser.EXE ",
+            r#""C:\Program Files\Sample\sample.exe""#,
+            "other",
+            "mybrowser.exe",
+            "",
+            "Kiroscribe.exe",
+            "D:/Tools/third.exe",
+            r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\msedgewebview2.exe",
+            "Update.exe",
+            "ms-teamsupdate",
+            "msteams_autostarter.exe",
+            "ZCSCPTHOST.EXE",
+        ];
+        let saved = db
+            .save_settings(Settings { extra_browsers: names.iter().map(|n| n.to_string()).collect(), ..Default::default() })
+            .unwrap();
+        assert_eq!(saved.extra_browsers, ["mybrowser.exe", "sample.exe", "other.exe", "third.exe"]);
+        assert_eq!(db.load_settings().unwrap().extra_browsers, saved.extra_browsers);
+
+        let many: Vec<String> = (0..30).map(|i| format!("b{i}.exe")).collect();
+        assert_eq!(normalize_browsers(&many).len(), MAX_EXTRA_BROWSERS);
+        assert!(normalize_browsers(&["a".repeat(80)]).is_empty(), "長すぎる名前は除く");
     }
 
     /// 送り先は設定に持たない。設定に送り先を書いても使わず、ほかの値はそのまま読める

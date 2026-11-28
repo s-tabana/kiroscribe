@@ -2,7 +2,7 @@
 //! 開始・継続・終了が仕様どおりになることを確かめる。実機で判定が外れた場面は、ここで回帰のテストにする。
 
 use kiroscribe_core::audio_sessions::{AudioSession, AudioSessions, SessionState};
-use kiroscribe_core::meeting_facts::{ControlFact, ControlScan, ControlType, Facts, ScannedWindow, WindowFact};
+use kiroscribe_core::meeting_facts::{scan_targets, ControlFact, ControlScan, ControlType, Facts, ScannedWindow, WindowFact};
 use kiroscribe_core::meeting_rules::{evaluate, Evaluation, Rules};
 use kiroscribe_core::meetings::{Browsers, Judge, MeetingApp, MeetingEvent, Phase, Reason, ServiceState, POLL_MS};
 
@@ -90,17 +90,19 @@ impl Pc {
 /// 判定を、製品と同じ 2 秒ごとに進める。
 struct Run {
     judge: Judge,
+    browsers: Browsers,
     now: i64,
 }
 
 impl Run {
     fn new() -> Self {
-        Run { judge: Judge::new(Rules::builtin()), now: 0 }
+        Run { judge: Judge::new(Rules::builtin()), browsers: Browsers::builtin(), now: 0 }
     }
 
     /// 1 回進め、知らせる出来事を返す。
     fn tick(&mut self, pc: &Pc) -> Vec<MeetingEvent> {
-        let events = self.judge.tick(&pc.evaluation(), self.now).into_iter().map(|d| d.event).collect();
+        let evaluation = evaluate(Rules::builtin(), &pc.facts(), &self.browsers);
+        let events = self.judge.tick(&evaluation, self.now).into_iter().map(|d| d.event).collect();
         self.now += POLL_MS;
         events
     }
@@ -173,6 +175,49 @@ fn meet_is_detected_in_every_listed_browser() {
     let mut run = Run::new();
     let unknown = Pc::new().window(window(5, "newbrowser.exe", CHROME, "Meet - abc-defg-hij - New Browser"), vec![button("通話から退出")]).mic("newbrowser.exe");
     assert!(run.hold(&unknown, 10).is_empty());
+}
+
+/// 設定で足したブラウザ（SET-021）は、組み込みの一覧のブラウザと同じく判定する。
+// [MTG-002][SET-021]
+#[test]
+fn meet_is_detected_in_a_browser_added_in_settings() {
+    let pc = Pc::new().window(window(5, "newbrowser.exe", CHROME, "Meet - abc-defg-hij - New Browser"), vec![button("通話から退出")]);
+    let mut run = Run::new();
+    run.browsers = Browsers::with_extra(&["NewBrowser".into()]);
+    assert_eq!(run.tick(&pc), started(MEET));
+    assert_eq!(
+        scan_targets(Rules::builtin(), &run.browsers, &pc.facts().windows, &[]),
+        vec![5],
+        "足したブラウザの、題が Meet の窓の中を調べる"
+    );
+}
+
+/// slack.exe・zoom.exe を設定でブラウザとして足しても、デスクトップの会議アプリとして判定する。
+/// 題によらず窓の中を調べて退出ボタンで始め、ブラウザ版の印は立てない。
+// [MTG-002][MTG-029][SET-021]
+#[test]
+fn desktop_meeting_apps_added_as_browsers_keep_their_own_judgement() {
+    let browsers = Browsers::with_extra(&["slack.exe".into(), "zoom.exe".into()]);
+    for (exe, app, title) in [
+        ("slack.exe", SLACK, "Huddle: 山田 - Acme - Slack"),
+        ("zoom.exe", MeetingApp::Zoom, "Zoom Workplace"),
+    ] {
+        let pc = Pc::new().window(window(7, exe, CHROME, title), vec![button("退出")]);
+        assert_eq!(scan_targets(Rules::builtin(), &browsers, &pc.facts().windows, &[]), vec![7], "{exe} の窓の中を調べる");
+        let evaluation = evaluate(Rules::builtin(), &pc.facts(), &browsers);
+        let held: Vec<&str> = evaluation
+            .services
+            .iter()
+            .flat_map(|service| service.contexts.iter().flat_map(|context| context.signals.iter()))
+            .map(|held| held.name.as_str())
+            .collect();
+        assert!(held.contains(&"退出ボタン"), "{exe}: {held:?}");
+        assert!(!held.iter().any(|name| name.starts_with("ブラウザ版")), "{exe} はブラウザ版の印と二重に立たない: {held:?}");
+        assert_eq!(evaluation.services.iter().map(|service| service.app).collect::<Vec<_>>(), [app], "{exe}");
+        let mut run = Run::new();
+        run.browsers = browsers.clone();
+        assert_eq!(run.tick(&pc), started(app), "{exe}");
+    }
 }
 
 /// 一覧にないアプリ（Aqua Voice・Thunderbird）のマイクと再生の音は数えない。退出したあとの Meet のタブの題が残っていても、

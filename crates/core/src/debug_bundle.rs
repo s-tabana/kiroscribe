@@ -39,6 +39,8 @@ pub struct SafeSettings {
     /// 議事録での自分の呼び名を決めてあるか
     pub my_name_set: bool,
     pub auto_record_meetings: bool,
+    /// 会議の検出の対象に足したブラウザ（実行ファイルの名前）
+    pub extra_browsers: Vec<String>,
     pub launch_at_login: bool,
     pub auto_update: bool,
     pub openai_key_configured: bool,
@@ -55,6 +57,7 @@ impl SafeSettings {
             capture_system_audio: settings.capture_system_audio,
             my_name_set: !settings.my_name.is_empty(),
             auto_record_meetings: settings.auto_record_meetings,
+            extra_browsers: settings.extra_browsers.clone(),
             launch_at_login: settings.launch_at_login,
             auto_update: settings.auto_update,
             openai_key_configured: keys.is_some_and(|k| k.openai),
@@ -239,6 +242,7 @@ mod tests {
         Settings {
             my_name: "山田".into(),
             input_device_id: Some("{0.0.1.00000000}.{マイク (Realtek)}".into()),
+            extra_browsers: vec!["sample.exe".into()],
             ..Settings::default()
         }
     }
@@ -325,6 +329,7 @@ mod tests {
         assert_eq!(env["settings"]["anthropicKeyConfigured"], false);
         assert_eq!(env["settings"]["myNameSet"], true);
         assert_eq!(env["settings"]["inputDeviceSelected"], true);
+        assert_eq!(env["settings"]["extraBrowsers"], serde_json::json!(["sample.exe"]));
         let env_text = env.to_string();
         assert!(!env_text.contains("山田") && !env_text.contains("Realtek"), "{env_text}");
         let record: MeetingRecord = serde_json::from_str(&read(MEETING_RECORD)).unwrap();

@@ -90,22 +90,49 @@ pub const BROWSERS: &[&str] = &[
     "mullvadbrowser.exe",
 ];
 
-/// 判定の対象のブラウザ。
+/// ブラウザとして扱わないプロセス（実行ファイルの名前、小文字）。設定で足しても対象にしない（SET-021）。
+/// Kiroscribe 自身と、MTG-003 で対象にしない、会議アプリと一緒に入る更新・起動のためのプロセスと、ほかのアプリも使う部品。
+pub const NOT_BROWSERS: &[&str] = &[
+    "kiroscribe.exe",
+    "update.exe",
+    "ms-teamsupdate.exe",
+    "msteams_autostarter.exe",
+    "msedgewebview2.exe",
+    "zcscpthost.exe",
+];
+
+/// 判定の対象のブラウザ: 組み込みの一覧（[`BROWSERS`]）と、設定で足したもの（SET-021）。[`NOT_BROWSERS`] と、
+/// 判定表の `apps` に実行ファイルの名前を書いたデスクトップの会議アプリ（slack.exe・zoom.exe など）は含めない。
+/// 会議アプリは設定で足しても、その実行ファイルの名前の印で判定する（MTG-002）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Browsers {
-    _private: (),
+    extra: Vec<String>,
 }
 
 impl Browsers {
-    /// 組み込みの一覧（[`BROWSERS`]）。
+    /// 組み込みの一覧だけ。
     pub fn builtin() -> Self {
-        Browsers { _private: () }
+        Browsers { extra: Vec::new() }
+    }
+
+    /// 組み込みの一覧に、設定で足したブラウザ（実行ファイルの名前）を加える。名前は設定と同じ形に整え、
+    /// デスクトップの会議アプリは除く。
+    pub fn with_extra(names: &[String]) -> Self {
+        let mut extra = crate::settings::normalize_browsers(names);
+        extra.retain(|exe| !Rules::builtin().is_desktop_app(exe));
+        Browsers { extra }
+    }
+
+    /// 設定で足したブラウザ（整えた実行ファイルの名前）。
+    pub fn extra(&self) -> &[String] {
+        &self.extra
     }
 
     /// 対象のブラウザか（実行ファイルの名前。大文字小文字は区別しない）。
     pub fn contains(&self, exe: &str) -> bool {
         let exe = exe.to_lowercase();
-        BROWSERS.contains(&exe.as_str())
+        !NOT_BROWSERS.contains(&exe.as_str())
+            && (BROWSERS.contains(&exe.as_str()) || (self.extra.contains(&exe) && !Rules::builtin().is_desktop_app(&exe)))
     }
 }
 
@@ -143,6 +170,11 @@ impl MeetingDetector {
 
     pub fn browsers(&self) -> &Browsers {
         &self.browsers
+    }
+
+    /// 判定の対象のブラウザを替える（設定を保存したとき。次の回から使う）。
+    pub fn set_browsers(&mut self, browsers: Browsers) {
+        self.browsers = browsers;
     }
 
     /// 1 回分を進める。窓の中の部品は、印が立っているときと会議中は毎回、それ以外は [`IDLE_SCAN_EVERY`] 回に 1 回調べる。
@@ -202,6 +234,47 @@ mod tests {
         }
         assert_eq!(BROWSERS.len(), 24);
         for exe in ["thunderbird.exe", "aquawindowsbridge.exe", "msedgewebview2.exe", "slack.exe", "kiroscribe.exe"] {
+            assert!(!browsers.contains(exe), "{exe}");
+        }
+    }
+
+    /// 設定で足したブラウザも、組み込みの一覧と同じく対象にする。名前は実行ファイルの名前にそろえる。
+    // [MTG-002][SET-021]
+    #[test]
+    fn browsers_added_in_settings_are_also_targets() {
+        let browsers = Browsers::with_extra(&[" MyBrowser ".into(), r"C:\Tools\Other.EXE".into(), "kiroscribe.exe".into()]);
+        assert_eq!(browsers.extra(), ["mybrowser.exe", "other.exe"]);
+        for exe in ["mybrowser.exe", "MyBrowser.exe", "other.exe", "chrome.exe"] {
+            assert!(browsers.contains(exe), "{exe}");
+        }
+        assert!(!browsers.contains("kiroscribe.exe") && !browsers.contains("thunderbird.exe"));
+        assert!(Browsers::with_extra(&[]).extra().is_empty());
+    }
+
+    /// MTG-003 で対象にしないプロセスは、設定で足してもブラウザとして扱わない。
+    // [MTG-003][SET-021]
+    #[test]
+    fn processes_excluded_by_mtg_003_cannot_be_added_as_browsers() {
+        let names: Vec<String> = NOT_BROWSERS.iter().map(|exe| exe.to_uppercase()).chain(["MSEdgeWebView2".into(), "update".into()]).collect();
+        let browsers = Browsers::with_extra(&names);
+        assert!(browsers.extra().is_empty(), "{:?}", browsers.extra());
+        // 整える前の名前が混ざっても（保存の経路を通らない場合）、判定では対象にしない
+        let browsers = Browsers { extra: NOT_BROWSERS.iter().map(|exe| exe.to_string()).collect() };
+        for exe in NOT_BROWSERS {
+            assert!(!browsers.contains(exe), "{exe}");
+            assert!(!browsers.contains(&exe.to_uppercase()), "{exe}");
+        }
+    }
+
+    /// 判定表のデスクトップの会議アプリは、設定で足してもブラウザとして扱わない。
+    // [MTG-002][SET-021]
+    #[test]
+    fn desktop_meeting_apps_added_in_settings_are_not_browsers() {
+        let browsers = Browsers::with_extra(&["Slack.exe".into(), "zoom".into(), "cpthost.exe".into(), "mybrowser".into()]);
+        assert_eq!(browsers.extra(), ["mybrowser.exe"]);
+        // 整える前の名前が混ざっても（保存の経路を通らない場合）、判定では対象にしない
+        let browsers = Browsers { extra: vec!["slack.exe".into(), "zoom.exe".into()] };
+        for exe in ["slack.exe", "SLACK.EXE", "zoom.exe"] {
             assert!(!browsers.contains(exe), "{exe}");
         }
     }

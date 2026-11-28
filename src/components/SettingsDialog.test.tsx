@@ -64,6 +64,169 @@ describe("SettingsDialog", () => {
     expect(await screen.findByText("設定を保存しました")).toBeInTheDocument();
   });
 
+  it("[SET-021] 判定に足すブラウザを、実行ファイルの名前で入力して保存できる", async () => {
+    const user = userEvent.setup();
+    const { backend } = setup({ extraBrowsers: ["first.exe"] });
+
+    const field = await screen.findByLabelText(/判定に足すブラウザ/);
+    expect(field).toHaveValue("first.exe");
+    await user.clear(field);
+    await user.type(field, "MyBrowser, C:\\Tools\\Other.EXE、");
+    // 打っている途中の区切りは消さない
+    expect(field).toHaveValue("MyBrowser, C:\\Tools\\Other.EXE、");
+    await user.click(screen.getByRole("button", { name: "設定を保存" }));
+
+    await waitFor(async () => expect((await backend.getSettings()).extraBrowsers).toEqual(["mybrowser.exe", "other.exe"]));
+    // 保存したら、そろえた名前を表示する
+    expect(field).toHaveValue("mybrowser.exe, other.exe");
+
+    // 書きかけのまま、トレイで自動検出を切り替えても、欄の文字は消えない
+    await user.type(field, ", third");
+    await act(async () => {
+      await backend.toggleAutoRecordFromTray();
+    });
+    expect(field).toHaveValue("mybrowser.exe, other.exe, third");
+  });
+
+  it("[SET-021] 判定に足すブラウザは、改行で区切って貼り付けても名前ごとに分けて保存する", async () => {
+    const user = userEvent.setup();
+    const { backend } = setup();
+
+    const field = await screen.findByLabelText(/判定に足すブラウザ/);
+    expect(field.tagName).toBe("TEXTAREA");
+    await user.click(field);
+    await user.paste("First\r\nC:\\Tools\\second.exe\nthird");
+    // 改行は消さず、名前をつなげない
+    expect(field).toHaveValue("First\r\nC:\\Tools\\second.exe\nthird".replace(/\r\n/g, "\n"));
+    await user.click(screen.getByRole("button", { name: "設定を保存" }));
+
+    await waitFor(async () =>
+      expect((await backend.getSettings()).extraBrowsers).toEqual(["first.exe", "second.exe", "third.exe"]),
+    );
+    expect(field).toHaveValue("first.exe, second.exe, third.exe");
+  });
+
+  it("[SET-021][SET-002] 保存の応答を待つ間の書き足しと、画面の外の変更で、書きかけの内容を上書きしない", async () => {
+    const user = userEvent.setup();
+    const backend = createMemoryBackend();
+    const store = backend.saveSettings.bind(backend);
+    let release!: () => void;
+    vi.spyOn(backend, "saveSettings").mockImplementationOnce(async (next) => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return store(next);
+    });
+    const subscribe = backend.onSettingsChanged.bind(backend);
+    let notify!: (next: Settings) => void;
+    vi.spyOn(backend, "onSettingsChanged").mockImplementation((cb) => {
+      notify = cb;
+      return subscribe(cb);
+    });
+    render(
+      <BackendContext.Provider value={backend}>
+        <SettingsDialog onClose={vi.fn()} />
+      </BackendContext.Provider>,
+    );
+
+    const field = await screen.findByLabelText(/判定に足すブラウザ/);
+    const name = screen.getByLabelText("議事録での自分の呼び名");
+    await user.type(field, "a");
+    await user.click(screen.getByRole("button", { name: "設定を保存" }));
+    expect(await screen.findByRole("button", { name: "保存中…" })).toBeInTheDocument();
+    // 応答を待つ間に書き足す
+    await user.type(field, ", b");
+    await user.type(name, "田花");
+    await act(async () => release());
+    expect(await screen.findByText("設定を保存しました")).toBeInTheDocument();
+    expect((await backend.getSettings()).extraBrowsers).toEqual(["a.exe"]);
+    expect(field).toHaveValue("a, b");
+    expect(name).toHaveValue("田花");
+
+    // 書きかけの間に画面の外で変わっても、書きかけの項目は変えず、ほかの項目だけを反映する
+    act(() => notify({ ...DEFAULT_SETTINGS, extraBrowsers: ["outside.exe"], myName: "外", language: "en" }));
+    expect(field).toHaveValue("a, b");
+    expect(name).toHaveValue("田花");
+    expect(screen.getByLabelText("言語")).toHaveValue("en");
+
+    await user.click(screen.getByRole("button", { name: "設定を保存" }));
+    await waitFor(async () => expect((await backend.getSettings()).extraBrowsers).toEqual(["a.exe", "b.exe"]));
+    const stored = await backend.getSettings();
+    expect(stored.myName).toBe("田花");
+    expect(stored.language).toBe("en");
+    expect(field).toHaveValue("a.exe, b.exe");
+  });
+
+  it("[TRY-004] 画面で切り替えて元に戻した項目は、トレイでの切り替えを反映し、ほかの書きかけは残す", async () => {
+    const user = userEvent.setup();
+    const backend = createMemoryBackend({ settings: { autoRecordMeetings: true } });
+    const subscribe = backend.onSettingsChanged.bind(backend);
+    let notify!: (next: Settings) => void;
+    vi.spyOn(backend, "onSettingsChanged").mockImplementation((cb) => {
+      notify = cb;
+      return subscribe(cb);
+    });
+    render(
+      <BackendContext.Provider value={backend}>
+        <SettingsDialog onClose={vi.fn()} />
+      </BackendContext.Provider>,
+    );
+
+    const auto = await screen.findByRole("checkbox", { name: /会議を検出したら自動で録音/ });
+    const name = screen.getByLabelText("議事録での自分の呼び名");
+    await user.click(auto);
+    await user.click(auto);
+    expect(auto).toBeChecked();
+    await user.type(name, "田花");
+
+    const current = await backend.getSettings();
+    act(() => notify({ ...current, autoRecordMeetings: false }));
+    expect(auto).not.toBeChecked();
+    expect(name).toHaveValue("田花");
+
+    await user.click(screen.getByRole("button", { name: "設定を保存" }));
+    expect(await screen.findByText("設定を保存しました")).toBeInTheDocument();
+    const stored = await backend.getSettings();
+    expect(stored.autoRecordMeetings).toBe(false);
+    expect(stored.myName).toBe("田花");
+  });
+
+  it("[TRY-004][SET-002] 読み込みの応答より先に通知が届いたら、遅れて返る応答で通知の内容と書きかけを消さない", async () => {
+    const user = userEvent.setup();
+    const backend = createMemoryBackend();
+    let respond!: (s: Settings) => void;
+    vi.spyOn(backend, "getSettings").mockImplementationOnce(
+      () =>
+        new Promise<Settings>((resolve) => {
+          respond = resolve;
+        }),
+    );
+    const subscribe = backend.onSettingsChanged.bind(backend);
+    let notify!: (next: Settings) => void;
+    vi.spyOn(backend, "onSettingsChanged").mockImplementation((cb) => {
+      notify = cb;
+      return subscribe(cb);
+    });
+    render(
+      <BackendContext.Provider value={backend}>
+        <SettingsDialog onClose={vi.fn()} />
+      </BackendContext.Provider>,
+    );
+
+    act(() => notify({ ...DEFAULT_SETTINGS, autoRecordMeetings: true }));
+    const name = await screen.findByLabelText("議事録での自分の呼び名");
+    await user.type(name, "田花");
+    // 古い内容の応答が遅れて返る
+    await act(async () => respond({ ...DEFAULT_SETTINGS, autoRecordMeetings: false }));
+    expect(name).toHaveValue("田花");
+    expect(screen.getByRole("checkbox", { name: /会議を検出したら自動で録音/ })).toBeChecked();
+
+    // 応答の後に届いた通知も反映する
+    act(() => notify({ ...DEFAULT_SETTINGS, autoRecordMeetings: true, language: "en" }));
+    expect(screen.getByLabelText("言語")).toHaveValue("en");
+    expect(name).toHaveValue("田花");
+  });
+
   it("[SET-009] AI のモデルを 4 つの中から選んで保存できる", async () => {
     const user = userEvent.setup();
     const { backend } = setup();

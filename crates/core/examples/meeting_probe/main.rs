@@ -39,6 +39,7 @@ Enter で区切った 1 行（例: discord 入った）は、時刻つきの目�
   --titles              窓の題と部品の名前も出す（チャンネル名・参加者名が含まれうるので、人に渡す前に確かめる）
   --output <ファイル>   書き出す先（既定は exe と同じフォルダの probe-output.txt。追記する）
   --interval <秒>       調べる間隔（既定は 2 秒。製品と同じ）
+  --browser <名前>      判定の対象に足すブラウザの実行ファイルの名前（製品の設定の「判定に足すブラウザ」と同じ。何度でも指定できる）
   --once                1 回だけ調べて終わる
   --require-sessions    --once で、録音のセッションの一覧を取れなければ終了コード 1
   --expect <アプリ>     --once で、その会議の開始を確定しなければ終了コード 1（zoom・slack・teams・discord・meet）
@@ -54,6 +55,7 @@ struct Options {
     require_sessions: bool,
     expect: Option<MeetingApp>,
     output: Option<PathBuf>,
+    browsers: Vec<String>,
     help: bool,
 }
 
@@ -68,6 +70,17 @@ fn expected_app(name: &str) -> Option<MeetingApp> {
     }
 }
 
+/// 短い形の引数（`-` 1 つで始まるもの）。
+const SHORT_OPTIONS: &[&str] = &["-h"];
+
+/// 引数の値を取る。値がないときと、次の引数（`--` で始まるものと、[`SHORT_OPTIONS`]）しかないときは、`missing` を返す
+/// （`--browser --once` の `--once` や、`--browser -h` の `-h` を名前として取らない）。
+fn value(args: &mut impl Iterator<Item = String>, missing: &str) -> Result<String, String> {
+    args.next()
+        .filter(|value| !value.starts_with("--") && !SHORT_OPTIONS.contains(&value.as_str()))
+        .ok_or_else(|| missing.to_string())
+}
+
 fn options(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
     let mut options = Options {
         once: false,
@@ -76,6 +89,7 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
         require_sessions: false,
         expect: None,
         output: None,
+        browsers: Vec::new(),
         help: false,
     };
     let mut args = args.into_iter();
@@ -85,7 +99,8 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
             "--titles" => options.titles = true,
             "--require-sessions" => options.require_sessions = true,
             "--help" | "-h" => options.help = true,
-            "--output" => options.output = Some(args.next().ok_or("--output には書き出す先を指定してください")?.into()),
+            "--output" => options.output = Some(value(&mut args, "--output には書き出す先を指定してください")?.into()),
+            "--browser" => options.browsers.push(value(&mut args, "--browser にはブラウザの実行ファイルの名前を指定してください")?),
             "--expect" => {
                 let app = args
                     .next()
@@ -249,8 +264,11 @@ fn main() {
         Some(path) => println!("  書き出す先: {}", path.display()),
         None => println!("  書き出す先: なし（画面だけ）"),
     }
-    let mut detector = MeetingDetector::new(Browsers::builtin());
+    let mut detector = MeetingDetector::new(Browsers::with_extra(&options.browsers));
     out.line(&format!("  判定表の版: {}", detector.rules().version));
+    if !detector.browsers().extra().is_empty() {
+        out.line(&format!("  判定に足すブラウザ: {}", detector.browsers().extra().join("・")));
+    }
     let markers = (!options.once).then(markers);
     let mut marker_count = 0;
     let mut differ = lines::Differ::default();
@@ -330,6 +348,19 @@ mod tests {
         assert!(options(["--output"].map(String::from)).is_err());
         assert!(options(["--expect", "zoom"].map(String::from)).is_err(), "--expect は --once と組み合わせる");
         assert!(options(["--rules", "x.toml"].map(String::from)).is_err(), "判定表は製品に組み込み");
+        let parsed = options(["--browser", "MyBrowser", "--browser", "other.exe"].map(String::from)).unwrap();
+        assert_eq!(Browsers::with_extra(&parsed.browsers).extra(), ["mybrowser.exe", "other.exe"]);
+        assert!(options(["--browser"].map(String::from)).is_err());
+        // 次の引数を名前として取らない
+        let error = options(["--browser", "--once"].map(String::from)).err().unwrap();
+        assert!(error.contains("--browser には"), "{error}");
+        assert!(options(["--once", "--browser", "--require-sessions"].map(String::from)).is_err());
+        assert!(options(["--output", "--once"].map(String::from)).is_err());
+        // 短い形の引数も名前として取らず、続けて調べ始めない
+        let error = options(["--browser", "-h"].map(String::from)).err().unwrap();
+        assert!(error.contains("--browser には"), "{error}");
+        assert!(options(["--output", "-h"].map(String::from)).is_err());
+        assert!(options(["-h"].map(String::from)).unwrap().help);
     }
 
     #[test]

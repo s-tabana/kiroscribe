@@ -36,6 +36,8 @@ export interface Settings {
   myName: string;
   /** 会議を検出したら自動で録音する */
   autoRecordMeetings: boolean;
+  /** 会議の検出の対象に足すブラウザ（実行ファイルの名前。保存のときに小文字・.exe 付きにそろえる） */
+  extraBrowsers: string[];
   /** Windows の起動時に起動してタスクトレイに常駐する */
   launchAtLogin: boolean;
   /** 見つけた新しいバージョンを自動でインストールする（既定はオフで、知らせるだけ） */
@@ -59,6 +61,7 @@ export const DEFAULT_SETTINGS: Settings = {
   captureSystemAudio: true,
   myName: "",
   autoRecordMeetings: true,
+  extraBrowsers: [],
   launchAtLogin: true,
   autoUpdate: false,
 };
