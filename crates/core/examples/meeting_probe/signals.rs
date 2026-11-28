@@ -14,7 +14,9 @@ use kiroscribe_core::mic_sessions::SessionState;
 use kiroscribe_core::mic_store::MicStore;
 
 /// 窓と部品を調べる対象のブラウザ（実行ファイル名、小文字）。製品の一覧（`meetings::BROWSERS`）より広く、
-/// マイクを使っているかによらず窓を出す。
+/// マイクを使っているかによらず窓を出す。同じ実行ファイルの名前を使う版（Chrome の Beta・Dev・Canary、
+/// Edge の Beta・Dev・Canary、Firefox の Developer Edition・Nightly、Tor Browser の firefox.exe、Opera GX の opera.exe）も含む。
+/// 一覧にないブラウザは、版情報と子プロセスの起動の引数から推定する（[`browser_by_version`]・[`browser_by_child`]）。
 pub const BROWSERS: &[&str] = &[
     // Chromium 系
     "chrome.exe",
@@ -22,16 +24,51 @@ pub const BROWSERS: &[&str] = &[
     "brave.exe",
     "vivaldi.exe",
     "opera.exe",
+    "opera_gx.exe",
     "arc.exe",
-    "chromium.exe",
     "thorium.exe",
+    "chromium.exe",
+    "supermium.exe",
+    // Yandex Browser の実行ファイルは browser.exe
+    "browser.exe",
+    "whale.exe",
+    "comet.exe",
+    "dia.exe",
+    "atlas.exe",
+    "sidekick.exe",
+    "island.exe",
+    "duckduckgo.exe",
     // Firefox 系
     "firefox.exe",
     "zen.exe",
     "floorp.exe",
     "librewolf.exe",
     "waterfox.exe",
+    "mullvadbrowser.exe",
 ];
+
+/// 版情報（製品名・会社名）に含まれていれば、ブラウザと推定する語（語ごとに比べる）。
+const BROWSER_WORDS: &[&str] = &[
+    "browser", "chrome", "chromium", "firefox", "mozilla", "edge", "opera", "vivaldi", "brave", "yandex", "whale",
+    "floorp", "librewolf", "waterfox", "thorium", "supermium",
+];
+
+/// 版情報の製品名か会社名から、ブラウザと推定できるか。
+pub fn browser_by_version(product: &str, company: &str) -> bool {
+    let text = format!("{product} {company}").to_lowercase();
+    text.split(|c: char| !c.is_alphanumeric()).any(|word| BROWSER_WORDS.contains(&word))
+}
+
+/// 子プロセスの種類（[`child_kind`]）から、ブラウザ（Chromium 系・Firefox 系）と推定できるか。
+/// Chromium の部品を使うデスクトップアプリ（Electron）も当たるので、会議アプリは呼ぶ側で除く。
+pub fn browser_by_child(kind: &str) -> bool {
+    ["renderer", "utility", "gpu-process", "contentproc"].iter().any(|prefix| kind.starts_with(prefix))
+}
+
+/// 一覧にないのにブラウザと推定したときの、目立つ印。
+pub fn guessed_mark(reason: &str) -> String {
+    format!(" ★一覧にないブラウザと推定（根拠: {reason}）")
+}
 
 /// 窓と部品を調べる対象か: デスクトップの会議アプリ（Slack・Teams・Zoom・Discord。製品と同じ判定）かブラウザ。
 pub fn is_target_exe(exe: &str) -> bool {
@@ -96,6 +133,8 @@ pub struct AudioSession {
     pub session_id: Option<String>,
     /// ブラウザの子プロセスなら、その種類と親
     pub child: Option<ChildProcess>,
+    /// 一覧にないのにブラウザと推定したなら、その根拠
+    pub guessed_browser: Option<String>,
 }
 
 /// ブラウザの子プロセス（Chromium の `--type=utility` の音声サービスなど）。
@@ -147,6 +186,8 @@ pub struct WindowSnapshot {
     pub maximized: bool,
     pub width: i32,
     pub height: i32,
+    /// 一覧にないのにブラウザと推定したなら、その根拠
+    pub guessed_browser: Option<String>,
 }
 
 /// UI Automation で見つけた部品 1 つ。
@@ -391,6 +432,9 @@ pub fn audio_lines(snapshot: &AudioSnapshot) -> Vec<Line> {
         };
         let browser = if BROWSERS.contains(&session.exe.as_str()) { "（ブラウザ）" } else { "" };
         let mut extra = String::new();
+        if let Some(reason) = &session.guessed_browser {
+            extra.push_str(&guessed_mark(reason));
+        }
         if session.exe_from_list {
             extra.push_str(" 名前はプロセスの一覧から");
         }
@@ -456,8 +500,9 @@ pub fn window_lines(windows: &[WindowSnapshot], titles: bool) -> Vec<Line> {
         } else {
             title_kind(&window.title)
         };
+        let guessed = window.guessed_browser.as_deref().map(guessed_mark).unwrap_or_default();
         let text = format!(
-            "  {label} クラス={} {shown} {}x{} 名前: {name}",
+            "  {label}{guessed} クラス={} {shown} {}x{} 名前: {name}",
             window.class, window.width, window.height
         );
         lines.push(Line::new(format!("窓/{:x}", window.hwnd), label, text));
@@ -569,6 +614,7 @@ mod tests {
             exe_from_list: false,
             session_id: None,
             child: None,
+            guessed_browser: None,
         }
     }
 
@@ -648,6 +694,26 @@ mod tests {
     }
 
     #[test]
+    fn browsers_missing_from_the_list_are_guessed_and_marked() {
+        assert!(browser_by_version("Zen", "Mozilla"));
+        assert!(browser_by_version("Naver Whale", "NAVER Corp."));
+        assert!(browser_by_version("Google Chrome", "Google LLC"));
+        assert!(browser_by_version("Chromium", "The Chromium Authors"));
+        assert!(!browser_by_version("Slack", "Slack Technologies, LLC"));
+        assert!(!browser_by_version("Knowledge Base", "Contoso"), "語の一部（knowledge の edge）は当てない");
+        assert!(browser_by_child("renderer") && browser_by_child("utility（audio.mojom.AudioService）") && browser_by_child("contentproc（tab）"));
+        assert!(!browser_by_child("crashpad-handler"));
+
+        let mut guessed = session(1, 80, "newbrowser.exe", SessionState::Active, Some(0.0));
+        guessed.guessed_browser = Some("版情報: 製品名「New Browser」・会社名「Contoso」".into());
+        let all: Vec<String> = audio_lines(&capture(vec![guessed])).into_iter().map(|l| l.text).collect();
+        assert!(all.iter().any(|t| t.contains("newbrowser.exe pid=80 ★一覧にないブラウザと推定（根拠: 版情報: 製品名「New Browser」")), "{all:?}");
+        for exe in ["chrome.exe", "msedge.exe", "opera_gx.exe", "supermium.exe", "browser.exe", "whale.exe", "comet.exe", "dia.exe", "atlas.exe", "sidekick.exe", "island.exe", "duckduckgo.exe", "mullvadbrowser.exe"] {
+            assert!(is_target_exe(exe), "{exe}");
+        }
+    }
+
+    #[test]
     fn only_the_kind_of_a_child_process_is_read_from_its_command_line() {
         let chrome = r#""C:\Users\山田\AppData\Local\Google\Chrome\Application\chrome.exe" --type=utility --utility-sub-type=audio.mojom.AudioService --lang=ja --service-sandbox-type=audio --user-data-dir="C:\Users\山田\AppData""#;
         assert_eq!(child_kind(chrome).as_deref(), Some("utility（audio.mojom.AudioService）"));
@@ -670,6 +736,7 @@ mod tests {
             maximized: false,
             width: 1200,
             height: 800,
+            guessed_browser: None,
         };
         let hidden = window_lines(std::slice::from_ref(&window), false);
         assert!(hidden[1].text.contains("会議らしい名前（製品の判定では Google Meet）"), "{}", hidden[1].text);

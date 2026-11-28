@@ -34,7 +34,7 @@ use windows::Win32::UI::Accessibility::{
 };
 
 use crate::signals::{
-    child_kind, control_category, is_listed_window, is_target_exe, sanitize_session_id, AudioSession, AudioSnapshot,
+    browser_by_child, browser_by_version, child_kind, control_category, is_listed_window, is_target_exe, sanitize_session_id, AudioSession, AudioSnapshot,
     ChildProcess, Control, Endpoint, Flow, SessionProblem, UiaScan, UiaWindow, WindowSnapshot, BROWSERS,
 };
 
@@ -253,6 +253,7 @@ unsafe fn session(
             exe_from_list: identity.from_list,
             session_id,
             child: identity.child,
+            guessed_browser: identity.guessed_browser,
         },
         meter,
     )))
@@ -266,6 +267,7 @@ struct Identity {
     error: Option<String>,
     from_list: bool,
     child: Option<ChildProcess>,
+    guessed_browser: Option<String>,
 }
 
 /// その時点のプロセスの一覧（実行ファイルの名前と親のプロセス ID）と、読んだプロセスの情報。
@@ -311,18 +313,114 @@ impl Processes {
                 from_list = true;
             }
         }
-        // ブラウザの子プロセスなら、親と種類を結び付ける（種類はコマンドラインの --type などだけを読む）
+        let listed_browser = BROWSERS.contains(&exe.as_str());
+        let meeting_app = kiroscribe_core::meetings::desktop_app(&exe).is_some();
+        // 子プロセスなら、親と種類を結び付ける（親が一覧のブラウザか、同じ実行ファイル。種類はコマンドラインの --type などだけを読む）
         let child = listed.and_then(|(_, parent)| {
             let (parent_exe, _) = self.table.get(&parent)?;
-            (BROWSERS.contains(&parent_exe.as_str()) && BROWSERS.contains(&exe.as_str())).then(|| ChildProcess {
+            (*parent_exe == exe || BROWSERS.contains(&parent_exe.as_str())).then(|| ChildProcess {
                 kind: command_line(pid).and_then(|line| child_kind(&line)),
                 parent_pid: parent,
                 parent_exe: parent_exe.clone(),
             })
         });
-        let identity = Identity { exe, package, error, from_list, child };
+        // 一覧にないブラウザの推定: 版情報、自分か子プロセスの起動の引数（会議アプリは Electron なので除く）
+        let guessed_browser = if listed_browser || meeting_app || exe == kiroscribe_core::mic_sessions::UNKNOWN {
+            None
+        } else {
+            version_guess(pid, &exe)
+                .or_else(|| {
+                    let own = child.as_ref().and_then(|c| c.kind.clone()).filter(|kind| browser_by_child(kind));
+                    own.map(|kind| format!("自分の起動の引数（{kind}）"))
+                })
+                .or_else(|| self.children_guess(pid, &exe))
+        };
+        let identity = Identity { exe, package, error, from_list, child, guessed_browser };
         self.identities.insert(pid, identity.clone());
         identity
+    }
+
+    /// 同じ実行ファイルの子プロセス（3 つまで）の起動の引数から、ブラウザと推定できるなら、その根拠。
+    fn children_guess(&self, pid: u32, exe: &str) -> Option<String> {
+        self.table
+            .iter()
+            .filter(|(_, (child_exe, parent))| *parent == pid && child_exe == exe)
+            .take(3)
+            .find_map(|(child, _)| command_line(*child).and_then(|line| child_kind(&line)).filter(|kind| browser_by_child(kind)))
+            .map(|kind| format!("子プロセスの起動の引数（{kind}）"))
+    }
+}
+
+/// 実行ファイルごとの版情報（製品名・会社名）。同じ名前の実行ファイルは何度も読まない。
+fn version_strings(pid: u32, exe: &str) -> Option<(String, String)> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<(String, String)>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(known) = cache.lock().unwrap().get(exe) {
+        return known.clone();
+    }
+    let read = image_path(pid).and_then(|path| read_version(&path));
+    cache.lock().unwrap().insert(exe.to_string(), read.clone());
+    read
+}
+
+/// 版情報からブラウザと推定できるなら、その根拠（製品名と会社名）。
+fn version_guess(pid: u32, exe: &str) -> Option<String> {
+    let (product, company) = version_strings(pid, exe)?;
+    browser_by_version(&product, &company).then(|| format!("版情報: 製品名「{product}」・会社名「{company}」"))
+}
+
+/// 実行ファイルの版情報の、製品名と会社名（最初の言語のもの）。
+fn read_version(path: &str) -> Option<(String, String)> {
+    use windows_sys::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
+    let wide = |text: &str| text.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let file = wide(path);
+    unsafe {
+        let size = GetFileVersionInfoSizeW(file.as_ptr(), std::ptr::null_mut());
+        if size == 0 {
+            return None;
+        }
+        let mut data = vec![0u8; size as usize];
+        if GetFileVersionInfoW(file.as_ptr(), 0, size, data.as_mut_ptr() as *mut _) == 0 {
+            return None;
+        }
+        let query = |name: &str| -> Option<Vec<u16>> {
+            let mut out: *mut core::ffi::c_void = std::ptr::null_mut();
+            let mut len = 0u32;
+            let key = wide(name);
+            (VerQueryValueW(data.as_ptr() as *const _, key.as_ptr(), &mut out, &mut len) != 0 && !out.is_null())
+                .then(|| std::slice::from_raw_parts(out as *const u16, len as usize).to_vec())
+        };
+        let translation = query("\\VarFileInfo\\Translation")?;
+        let (language, codepage) = (*translation.first()?, *translation.get(1)?);
+        let text = |field: &str| {
+            query(&format!("\\StringFileInfo\\{language:04x}{codepage:04x}\\{field}"))
+                .map(|chars| {
+                    let end = chars.iter().position(|&c| c == 0).unwrap_or(chars.len());
+                    String::from_utf16_lossy(&chars[..end]).trim().to_string()
+                })
+                .unwrap_or_default()
+        };
+        Some((text("ProductName"), text("CompanyName")))
+    }
+}
+
+/// プロセスの実行ファイルのフルパス（版情報を読むためだけに使い、表示しない）。
+fn image_path(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 1024];
+        let mut size = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut size) != 0;
+        CloseHandle(handle);
+        ok.then(|| String::from_utf16_lossy(&buf[..size as usize]))
     }
 }
 
@@ -435,9 +533,12 @@ unsafe fn window(hwnd: usize, names: &mut HashMap<u32, String>) -> Option<Window
     let mut pid = 0u32;
     GetWindowThreadProcessId(handle, &mut pid);
     let exe = names.entry(pid).or_insert_with(|| process_identity(pid).0).clone();
-    if !is_target_exe(&exe) {
-        return None;
-    }
+    // 一覧にないブラウザは、版情報から推定する（窓では、子プロセスの起動の引数までは読まない）
+    let guessed_browser = if is_target_exe(&exe) || exe == kiroscribe_core::mic_sessions::UNKNOWN {
+        None
+    } else {
+        Some(version_guess(pid, &exe)?)
+    };
     let visible = IsWindowVisible(handle) != 0;
     let length = GetWindowTextLengthW(handle);
     let mut text = vec![0u16; length.max(0) as usize + 1];
@@ -464,6 +565,7 @@ unsafe fn window(hwnd: usize, names: &mut HashMap<u32, String>) -> Option<Window
         maximized: IsZoomed(handle) != 0,
         width: rect.right - rect.left,
         height: rect.bottom - rect.top,
+        guessed_browser,
     })
 }
 

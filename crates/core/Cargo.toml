@@ -37,9 +37,10 @@ wiremock = "0.6"
 tempfile = "3"
 
 # 資格情報マネージャーの中身を、keyring を通さずに Windows の API で直接確かめるテスト用。
-# ToolHelp と Wdk_System_Threading は、確認用の道具（examples/meeting_probe）がプロセスの親と種類を読むため
+# ToolHelp・Wdk_System_Threading・Storage_FileSystem は、確認用の道具（examples/meeting_probe）が
+# プロセスの親と種類、実行ファイルの版情報を読むため
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_Diagnostics_ToolHelp", "Wdk_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_Diagnostics_ToolHelp", "Wdk_System_Threading", "Win32_Storage_FileSystem"] }
 # 会議の検出の確認用の道具（examples/meeting_probe）で、音の大きさ・端点の名前・窓の中の部品（UI Automation）を読む。
 # 製品のビルドには入らない
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio_Endpoints", "Win32_Devices_FunctionDiscovery", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_Accessibility", "Win32_System_Ole"] }
