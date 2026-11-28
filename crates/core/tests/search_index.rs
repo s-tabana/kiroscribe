@@ -1089,3 +1089,83 @@ fn an_index_waiting_to_be_erased_stays_out_of_search_after_a_restart() {
     assert!(!kiroscribe_core::search::store::erase_marker(&index_path).exists());
     assert!(second.shutdown_and_wait(Duration::from_secs(5)));
 }
+
+/// 索引の行を消せずにファイルを消して作り直したときは、作り直す前から開いていた接続（消したファイルを読み続ける）からは、
+/// 前の中身を検索に出さない。作り直した中身は、開き直した接続で検索する。
+// [IDX-027][IDX-028]
+#[cfg(unix)]
+#[test]
+fn a_connection_opened_before_the_index_was_recreated_does_not_return_old_contents() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("共有資料");
+    write(&root.join("a.txt"), "経費");
+    let index_path = dir.path().join("data").join(INDEX_FILE);
+    let intervals = Intervals { purge_retry: Duration::from_millis(200), ..Intervals::default() };
+    let indexer = Indexer::spawn_with_intervals(index_path.clone(), Limits::default(), intervals, |_| {});
+    indexer.enable(vec![folder(&root)]);
+    wait_until("索引", Duration::from_secs(20), || indexer.status().files == 1);
+    let held = SearchIndex::open(&index_path).unwrap();
+    assert_eq!(held.search(&["経費".to_string()], 8).unwrap().len(), 1);
+    block_deletes(&index_path, "docs", true);
+    block_deletes(&index_path, "bindings", true);
+    overwrite_keeping_stamp(&root.join("a.txt"), "予算");
+
+    // 行を消せないので、索引のファイルを消して作り直す
+    indexer.rebuild().unwrap();
+    wait_until("作り直したあとの読み直し", Duration::from_secs(20), || readable_hit(&index_path, "予算"));
+    assert_eq!(held.stored_rows(&root).unwrap(), 1, "開いていた接続からは、消したファイルの行が見える");
+    assert!(held.search(&["経費".to_string()], 8).unwrap().is_empty(), "作り直す前に開いた接続からは、前の中身を出さない");
+    assert!(held.search(&["予算".to_string()], 8).unwrap().is_empty(), "古い接続は検索に使わない");
+    assert_eq!(search_at(&index_path, "予算"), ["a.txt"], "開き直した接続で検索する");
+    assert!(search_at(&index_path, "経費").is_empty());
+    assert!(indexer.shutdown_and_wait(Duration::from_secs(5)));
+}
+
+/// 相棒をオフにしたときに索引を空にも消しもできなければ、すぐに検索を止める（開いていた接続からも検索しない）。
+/// 消し終える前にオンに戻しても検索を止めたままにし、書き込めるようになったら索引を消してから、いまの中身を読み直す。
+// [IDX-028]
+#[cfg(unix)]
+#[test]
+fn an_index_that_could_not_be_erased_when_turned_off_is_not_searched_until_it_is_erased() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("共有資料");
+    write(&root.join("a.txt"), "経費");
+    let index_path = dir.path().join("data").join(INDEX_FILE);
+    let data = index_path.parent().unwrap().to_path_buf();
+    let intervals = Intervals { purge_retry: Duration::from_millis(200), ..Intervals::default() };
+    let indexer = Indexer::spawn_with_intervals(index_path.clone(), Limits::default(), intervals, |_| {});
+    let registered = folder(&root);
+    indexer.enable(vec![registered.clone()]);
+    wait_until("索引", Duration::from_secs(20), || indexer.status().files == 1);
+    block_deletes(&index_path, "docs", true);
+    block_deletes(&index_path, "bindings", true);
+    overwrite_keeping_stamp(&root.join("a.txt"), "予算");
+    // 読み取りだけのフォルダでも索引を開けるように、接続を開いたままにする（書き込みの途中の内容のファイルを残す）
+    let held = SearchIndex::open(&index_path).unwrap();
+    if !lock_data_folder(&data) {
+        return;
+    }
+
+    assert_eq!(indexer.disable().state, IndexState::Erasing);
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(indexer.status().state, IndexState::Erasing, "消し終えていない");
+    assert_eq!(held.stored_rows(&root).unwrap(), 1, "行を消せていない");
+    assert!(held.search(&["経費".to_string()], 8).unwrap().is_empty(), "消せなければ、開いていた接続からも検索しない");
+    assert!(search_at(&index_path, "経費").is_empty());
+
+    // 消し終える前にオンに戻しても、消し終えるまでは検索しない
+    indexer.enable(vec![registered]);
+    wait_until("索引", Duration::from_secs(20), || indexer.status().state == IndexState::Ready);
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(held.stored_rows(&root).unwrap(), 1, "行を消せていない");
+    assert!(held.search(&["経費".to_string()], 8).unwrap().is_empty());
+    assert!(search_at(&index_path, "経費").is_empty());
+
+    drop(held);
+    unlock_data_folder(&data);
+    wait_until("消し直したあとの読み直し", Duration::from_secs(20), || readable_hit(&index_path, "予算"));
+    assert_eq!(search_at(&index_path, "予算"), ["a.txt"]);
+    assert!(search_at(&index_path, "経費").is_empty(), "前の中身を残さない");
+    assert!(!kiroscribe_core::search::store::erase_marker(&index_path).exists(), "消し終えたら、消去待ちを解く");
+    assert!(indexer.shutdown_and_wait(Duration::from_secs(5)));
+}

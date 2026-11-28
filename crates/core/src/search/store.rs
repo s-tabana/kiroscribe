@@ -65,6 +65,8 @@ pub struct SearchIndex {
     conn: Connection,
     /// 索引のファイルのパス（メモリの中の索引は None）。消去待ちのあいだは検索しない（[`is_search_suspended`]）
     path: Option<PathBuf>,
+    /// 開いたときの、索引のファイルの世代（[`remove_index_files`] で進む）。世代が古い接続からは検索しない
+    epoch: u64,
 }
 
 /// 探すフォルダの行を、どの実体から読んだか: 足したときの実体（設定に保存したもの）と、読んだときに開いたフォルダの識別子。
@@ -143,8 +145,28 @@ pub fn is_search_suspended(path: &Path) -> bool {
     !matches!(std::fs::symlink_metadata(erase_marker(path)), Err(err) if err.kind() == std::io::ErrorKind::NotFound)
 }
 
+/// 索引のファイルの世代。ファイルを消すたびに進める（消す前に開いた接続は、消したファイルを読み続けるため、検索に使わない）。
+/// 同じ鍵で、接続を開くこと・検索すること（読む側）と、ファイルを消すこと（書く側）を排他する。
+static EPOCHS: std::sync::RwLock<Vec<(PathBuf, u64)>> = std::sync::RwLock::new(Vec::new());
+
+/// 世代を数える鍵（絶対パスにする）。
+fn epoch_key(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn epoch_in(epochs: &[(PathBuf, u64)], key: &Path) -> u64 {
+    epochs.iter().find(|(p, _)| p == key).map_or(0, |(_, epoch)| *epoch)
+}
+
 /// 索引のファイルをすべて消す（もともとないファイルは、消せたものとみなす）。
+/// 消す前に開いていた接続は、消せたかどうかにかかわらず、検索に使えなくする（進行中の検索は、終わるのを待ってから消す）。
 pub fn remove_index_files(path: &Path) -> std::io::Result<()> {
+    let key = epoch_key(path);
+    let mut epochs = EPOCHS.write().unwrap_or_else(|e| e.into_inner());
+    match epochs.iter_mut().find(|(p, _)| *p == key) {
+        Some((_, epoch)) => *epoch += 1,
+        None => epochs.push((key, 1)),
+    }
     let mut result = Ok(());
     for file in index_files(path) {
         match std::fs::remove_file(&file) {
@@ -171,20 +193,23 @@ impl SearchIndex {
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?, None)
+        Self::init(Connection::open_in_memory()?, None, 0)
     }
 
     fn try_open(path: &Path) -> Result<Self> {
+        // 開くあいだにファイルを消されないようにし、開いたファイルの世代を記録する
+        let epochs = EPOCHS.read().unwrap_or_else(|e| e.into_inner());
+        let epoch = epoch_in(&epochs, &epoch_key(path));
         let conn = Connection::open(path)?;
         let ok: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
         if ok != "ok" {
             return Err(crate::CoreError::Other("索引が壊れています".into()));
         }
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        Self::init(conn, Some(path.to_path_buf()))
+        Self::init(conn, Some(path.to_path_buf()), epoch)
     }
 
-    fn init(conn: Connection, path: Option<PathBuf>) -> Result<Self> {
+    fn init(conn: Connection, path: Option<PathBuf>, epoch: u64) -> Result<Self> {
         // 消した行の中身を、ファイルの空き領域に残さない
         conn.execute_batch("PRAGMA secure_delete = ON;")?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -194,7 +219,7 @@ impl SearchIndex {
             conn.execute_batch(SCHEMA)?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
-        Ok(Self { conn, path })
+        Ok(Self { conn, path, epoch })
     }
 
     /// ファイルを索引に入れる（あれば置き換える）。
@@ -342,10 +367,15 @@ impl SearchIndex {
     /// 検索語のどれかを、題名・ファイル名・中身に含む資料を、よく一致する順に `limit` 件まで返す。
     /// 並びは、一致した検索語の数、題名かファイル名に一致したか、更新日時の新しさの順。
     /// どの実体から読んだかの記録がないフォルダの行（出どころを確かめられない行）は返さない。
-    /// 消去待ちの索引（[`suspend_search`]）からは、何も返さない。
+    /// 消去待ちの索引（[`suspend_search`]）と、索引のファイルを消す前に開いた接続からは、何も返さない
+    /// （開き直した接続で検索する）。
     pub fn search(&self, terms: &[String], limit: usize) -> Result<Vec<Hit>> {
-        if self.path.as_deref().is_some_and(is_search_suspended) {
-            return Ok(Vec::new());
+        // 検索を終えるまで、索引のファイルを消させない
+        let epochs = EPOCHS.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(path) = self.path.as_deref() {
+            if epoch_in(&epochs, &epoch_key(path)) != self.epoch || is_search_suspended(path) {
+                return Ok(Vec::new());
+            }
         }
         let mut terms: Vec<String> = terms.iter().map(|t| normalize(t.trim())).filter(|t| !t.is_empty()).collect();
         terms.sort();
@@ -613,6 +643,37 @@ mod tests {
         reopened.upsert(Path::new("/r"), &entry("/r/a.txt", 1), &content(None, "経費")).unwrap();
         assert_eq!(reopened.search(&terms(&["経費"]), 8).unwrap().len(), 1, "消去待ちを解いたら検索する");
         assert_eq!(SearchIndex::open_in_memory().unwrap().path, None, "メモリの中の索引は、消去待ちにしない");
+    }
+
+    /// 索引のファイルを消す前に開いた接続は、消したファイルの中身を読み続けられても、検索に使わない
+    /// （同じパスで作り直した索引の中身は、開き直した接続で検索する）。
+    // [IDX-027][IDX-028]
+    #[test]
+    fn connections_opened_before_the_files_were_removed_are_not_searched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data").join(INDEX_FILE);
+        let held = SearchIndex::open(&path).unwrap();
+        bound(&held, "/r");
+        held.upsert(Path::new("/r"), &entry("/r/a.txt", 1), &content(None, "経費")).unwrap();
+        assert_eq!(held.search(&terms(&["経費"]), 8).unwrap().len(), 1);
+
+        // Windows では、開いている接続があるとファイルを消せないことがある。消せなくても、それまでの接続は検索に使わない
+        let removed = remove_index_files(&path);
+        #[cfg(unix)]
+        {
+            removed.as_ref().unwrap();
+            assert_eq!(held.stored_rows(Path::new("/r")).unwrap(), 1, "消したファイルの行が、開いていた接続から見える");
+        }
+        assert!(held.search(&terms(&["経費"]), 8).unwrap().is_empty(), "消す前に開いた接続からは検索しない");
+
+        let reopened = SearchIndex::open(&path).unwrap();
+        bound(&reopened, "/r");
+        reopened.upsert(Path::new("/r"), &entry("/r/b.txt", 1), &content(None, "予算")).unwrap();
+        assert_eq!(paths(&reopened.search(&terms(&["予算"]), 8).unwrap()), ["/r/b.txt"], "開き直した接続で検索する");
+        if removed.is_ok() {
+            assert!(reopened.search(&terms(&["経費"]), 8).unwrap().is_empty(), "作り直した索引に、前の中身はない");
+        }
+        assert!(held.search(&terms(&["予算"]), 8).unwrap().is_empty(), "古い接続は、作り直した索引でも検索しない");
     }
 
     // [IDX-012][DAT-001]

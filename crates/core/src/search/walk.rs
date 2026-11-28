@@ -277,7 +277,18 @@ fn encode_os(text: &OsStr) -> String {
     out
 }
 
-/// テスト用: 開いたときに実際の場所が取れなかったことにするフォルダ（OS が実際の場所を返さない場合を再現する）。
+/// 開いたフォルダの実際の場所を OS に問い合わせた結果を、場所が取れたかどうかに直す。
+/// 問い合わせが失敗したときは、フォルダを開けたままで、実際の場所が取れなかったものとする（どの OS でも同じ扱い）。
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+fn real_or_none(path: &Path, lookup: io::Result<PathBuf>) -> Option<PathBuf> {
+    #[cfg(test)]
+    let lookup = if test_hooks::hides_real(path) { Err(io::Error::other("テスト用: 実際の場所を取れない")) } else { lookup };
+    #[cfg(not(test))]
+    let _ = path;
+    lookup.ok()
+}
+
+/// テスト用: 開いたときに、実際の場所の問い合わせが失敗したことにするフォルダ（OS が実際の場所を返さない場合を再現する）。
 #[cfg(test)]
 pub(crate) mod test_hooks {
     use std::path::{Path, PathBuf};
@@ -345,8 +356,6 @@ impl Root {
     /// 探すフォルダを開く。フォルダがない・フォルダそのものがリンク・フォルダでないときはエラー。
     pub fn open(path: &Path) -> io::Result<Root> {
         let (dir, id, real) = sys::open_root(path)?;
-        #[cfg(test)]
-        let real = if test_hooks::hides_real(path) { None } else { real };
         let born = dir
             .metadata()
             .and_then(|meta| meta.created())
@@ -540,8 +549,8 @@ mod sys {
                 _ => err,
             })?;
         let id = id_of(&dir)?;
-        let real = std::fs::read_link(handle_path(&dir))?;
-        Ok((dir, id, Some(real)))
+        let real = real_or_none(path, std::fs::read_link(handle_path(&dir)));
+        Ok((dir, id, real))
     }
 
     #[cfg(test)]
@@ -737,7 +746,7 @@ mod sys {
         };
         let id = file_id(&dir)?;
         // ネットワークのフォルダなどで実際の場所を取れないときは、識別子だけで確かめる
-        let real = final_path(&dir).ok();
+        let real = real_or_none(path, final_path(&dir));
         Ok((dir, id, real))
     }
 
@@ -1428,6 +1437,25 @@ mod tests {
         assert_eq!(bytes(opened.read(&upper.join("sub").join("b.txt"), MAX_FILE_BYTES)).unwrap(), "予算".as_bytes());
         let walked = opened.walk(Limits::default());
         assert_eq!(names(&walked, &upper), ["a.txt", "Sub/b.txt", "sub/b.txt"]);
+    }
+
+    /// フォルダを開けたあとで、実際の場所の問い合わせ（Linux の `read_link`、Windows の `GetFinalPathNameByHandleW`）が
+    /// 失敗しても、開けなかったことにしない。実際の場所のないフォルダとして返し、足したときの実体とは認めない。
+    // [IDX-027]
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn a_failed_real_place_lookup_opens_the_folder_without_a_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("資料");
+        std::fs::create_dir_all(&root).unwrap();
+        let registered = Root::open(&root).unwrap().place();
+        test_hooks::hide_real(&root, true);
+        let opened = Root::open(&root);
+        test_hooks::hide_real(&root, false);
+        let opened = opened.expect("開けたフォルダは、実際の場所が取れなくてもエラーにしない");
+        assert_eq!(opened.real(), None);
+        assert!(opened.place().is_unverifiable(), "足すときは、確かめられないフォルダとして断る");
+        assert!(!registered.admits(&opened), "足したときと同じ場所かを確かめられない");
     }
 
     // [IDX-010]

@@ -530,9 +530,12 @@ impl Worker {
                 let changed = std::mem::take(&mut pending);
                 self.apply_changes(changed);
             }
-            if self.erasure == Erasure::Pending && !self.enabled() && self.last_purge.elapsed() >= self.intervals.purge_retry {
+            // オフのあいだに消せなかった索引・前回の起動から消去待ちの索引を、消し直す（消し終えて消去待ちを解くまで続ける）
+            let unerased = self.erasure == Erasure::Pending || self.suspended;
+            if unerased && !self.enabled() && self.last_purge.elapsed() >= self.intervals.purge_retry {
+                let was = self.erasure;
                 self.purge();
-                if self.erasure == Erasure::Erased {
+                if self.erasure == Erasure::Erased && was != Erasure::Erased {
                     // オンにする命令が先に出ていたら、知らせない（emit が、オンのあいだの「オフ」を捨てる）
                     let generation = self.generation();
                     self.emit(generation, IndexState::Off, (0, 0), true, None);
@@ -744,8 +747,22 @@ impl Worker {
             }
         }
         self.erasure = if removed.is_ok() || cleared { Erasure::Erased } else { Erasure::Pending };
-        if self.erasure == Erasure::Erased && self.suspended {
-            self.resume();
+        match self.erasure {
+            Erasure::Erased if self.suspended => self.resume(),
+            // 消し終えるまで検索を止める（記録のファイルで、起動し直しても、オンに戻しても続く）
+            Erasure::Pending => self.suspend(),
+            _ => {}
+        }
+    }
+
+    /// 索引ごと消去待ちにして、検索を止める。記録のファイルを作れていなければ、作り直す
+    /// （書き込めるようになったら、起動し直しても続くようにする）。
+    fn suspend(&mut self) {
+        if !self.suspended || !erase_marker(&self.index_path).exists() {
+            if let Err(err) = suspend_search(&self.index_path) {
+                eprintln!("資料の索引の消去待ちを記録できません（このあいだは検索しません）: {err}");
+            }
+            self.suspended = true;
         }
     }
 
@@ -772,13 +789,7 @@ impl Worker {
     /// 索引の行を検索から外せないとき: 索引ごと消去待ちにして検索を止め（起動し直しても続く）、索引を空にする。
     /// 空にできたら消去待ちを解き、すべてのフォルダを読み直す。空にできなければ、消し直す間隔で消し直す。
     fn invalidate_all(&mut self) {
-        // 記録のファイルを作れていなければ、作り直す（書き込めるようになったら、起動し直しても続くようにする）
-        if !self.suspended || !erase_marker(&self.index_path).exists() {
-            if let Err(err) = suspend_search(&self.index_path) {
-                eprintln!("資料の索引の消去待ちを記録できません（このあいだは検索しません）: {err}");
-            }
-            self.suspended = true;
-        }
+        self.suspend();
         if self.reset_index() {
             self.changes += 1;
             self.unverified.clear();
@@ -1426,6 +1437,73 @@ mod tests {
         test_hooks::hide_real(&root, false);
         wait_for(&indexer, "読み直し", |s| s.state == IndexState::Ready && s.files == 2 && !s.folders[0].unconfirmed);
         assert_eq!(found("予算"), 1);
+        assert!(indexer.shutdown_and_wait(Duration::from_secs(5)));
+    }
+
+    /// オフにしたときに索引を消せなければ、すぐに検索を止め、消去待ちを記録する（起動し直しても続く）。
+    /// 消し終える前にオンに戻しても、消去待ちのまま消し直し、消し終えてから検索を再開して、いまの中身を読み直す。
+    // [IDX-028]
+    #[test]
+    fn an_index_that_could_not_be_erased_when_turned_off_stays_out_of_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("資料");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "経費").unwrap();
+        let folders = vec![SearchFolder::register(&root).unwrap()];
+        // 索引のファイルの場所に、中身のあるフォルダがある（消すことも、空にすることもできない）
+        let index_path = dir.path().join("data").join(INDEX_FILE_FOR_TEST);
+        std::fs::create_dir_all(index_path.join("中")).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let state = shared(false, 1);
+        state.lock().unwrap().folders = folders.clone();
+        let mut first = worker(index_path.clone(), state.clone(), seen.clone());
+
+        first.handle(1, Command::Disable);
+        assert_eq!(first.erasure, Erasure::Pending);
+        assert!(first.suspended && is_search_suspended(&index_path), "消せなければ、すぐに検索を止める");
+        assert!(erase_marker(&index_path).exists(), "消去待ちを記録する");
+        drop(first);
+
+        // 起動し直しても、消去待ちのまま
+        let mut worker = worker(index_path.clone(), state.clone(), seen.clone());
+        assert!(worker.suspended, "記録から、消去待ちを引き継ぐ");
+
+        // 消し終える前にオンに戻しても、消去待ちのまま
+        set(&state, true, 2);
+        worker.handle(2, Command::Enable(folders.clone()));
+        assert!(worker.suspended && erase_marker(&index_path).exists(), "オンに戻しても、消し終えるまで検索しない");
+
+        // 消せるようになったら消し直し、消去待ちを解いて、いまの中身を読み直す
+        std::fs::remove_dir_all(&index_path).unwrap();
+        worker.invalidate_all();
+        assert!(!worker.suspended && !erase_marker(&index_path).exists(), "消し終えたら、消去待ちを解く");
+        assert!(worker.rescan, "すべてのフォルダを読み直す");
+        let all = folders.iter().map(|folder| PathBuf::from(&folder.path)).collect();
+        worker.apply_changes(all);
+        let hits = SearchIndex::open(&index_path).unwrap().search(&["経費".to_string()], 8).unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    /// オフのまま起動したときも、前回の起動から消去待ちの索引は、命令を待たずに消し、消去待ちを解く。
+    // [IDX-028]
+    #[test]
+    fn an_index_waiting_to_be_erased_is_erased_after_starting_while_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let index_path = dir.path().join("data").join(INDEX_FILE_FOR_TEST);
+        {
+            let index = SearchIndex::open(&index_path).unwrap();
+            index.close().unwrap();
+        }
+        std::fs::write(erase_marker(&index_path), "erase\n").unwrap();
+        let intervals =
+            Intervals { root_check: Duration::from_millis(100), poll: Duration::from_secs(3600), purge_retry: Duration::from_millis(100) };
+        let indexer = Indexer::spawn_with_intervals(index_path.clone(), Limits::default(), intervals, |_| {});
+        let start = Instant::now();
+        while erase_marker(&index_path).exists() || index_path.exists() {
+            assert!(start.elapsed() < Duration::from_secs(20), "消去待ちの索引を消していません");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(indexer.status().state, IndexState::Off);
         assert!(indexer.shutdown_and_wait(Duration::from_secs(5)));
     }
 
