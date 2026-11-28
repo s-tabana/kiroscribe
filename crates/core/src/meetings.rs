@@ -90,22 +90,32 @@ pub const BROWSERS: &[&str] = &[
     "mullvadbrowser.exe",
 ];
 
-/// 判定の対象のブラウザ。
+/// 判定の対象のブラウザ: 組み込みの一覧（[`BROWSERS`]）と、設定で足したもの（SET-021）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Browsers {
-    _private: (),
+    extra: Vec<String>,
 }
 
 impl Browsers {
-    /// 組み込みの一覧（[`BROWSERS`]）。
+    /// 組み込みの一覧だけ。
     pub fn builtin() -> Self {
-        Browsers { _private: () }
+        Browsers { extra: Vec::new() }
+    }
+
+    /// 組み込みの一覧に、設定で足したブラウザ（実行ファイルの名前）を加える。名前は設定と同じ形に整える。
+    pub fn with_extra(names: &[String]) -> Self {
+        Browsers { extra: crate::settings::normalize_browsers(names) }
+    }
+
+    /// 設定で足したブラウザ（整えた実行ファイルの名前）。
+    pub fn extra(&self) -> &[String] {
+        &self.extra
     }
 
     /// 対象のブラウザか（実行ファイルの名前。大文字小文字は区別しない）。
     pub fn contains(&self, exe: &str) -> bool {
         let exe = exe.to_lowercase();
-        BROWSERS.contains(&exe.as_str())
+        BROWSERS.contains(&exe.as_str()) || self.extra.contains(&exe)
     }
 }
 
@@ -143,6 +153,11 @@ impl MeetingDetector {
 
     pub fn browsers(&self) -> &Browsers {
         &self.browsers
+    }
+
+    /// 判定の対象のブラウザを替える（設定を保存したとき。次の回から使う）。
+    pub fn set_browsers(&mut self, browsers: Browsers) {
+        self.browsers = browsers;
     }
 
     /// 1 回分を進める。窓の中の部品は、印が立っているときと会議中は毎回、それ以外は [`IDLE_SCAN_EVERY`] 回に 1 回調べる。
@@ -204,6 +219,19 @@ mod tests {
         for exe in ["thunderbird.exe", "aquawindowsbridge.exe", "msedgewebview2.exe", "slack.exe", "kiroscribe.exe"] {
             assert!(!browsers.contains(exe), "{exe}");
         }
+    }
+
+    /// 設定で足したブラウザも、組み込みの一覧と同じく対象にする。名前は実行ファイルの名前にそろえる。
+    // [MTG-002][SET-021]
+    #[test]
+    fn browsers_added_in_settings_are_also_targets() {
+        let browsers = Browsers::with_extra(&[" MyBrowser ".into(), r"C:\Tools\Other.EXE".into(), "kiroscribe.exe".into()]);
+        assert_eq!(browsers.extra(), ["mybrowser.exe", "other.exe"]);
+        for exe in ["mybrowser.exe", "MyBrowser.exe", "other.exe", "chrome.exe"] {
+            assert!(browsers.contains(exe), "{exe}");
+        }
+        assert!(!browsers.contains("kiroscribe.exe") && !browsers.contains("thunderbird.exe"));
+        assert!(Browsers::with_extra(&[]).extra().is_empty());
     }
 
     /// 検出が調べるのは PC の中だけ: 通信・録音・文字起こし・画面の取り込みの部品を、検出の部品は使わない。

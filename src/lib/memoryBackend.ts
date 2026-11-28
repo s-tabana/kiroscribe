@@ -1,4 +1,5 @@
 import type { Backend, Unsubscribe } from "./backend";
+import { normalizeBrowsers } from "./browsers";
 import { toSummary } from "./notes";
 import {
   DEFAULT_SETTINGS,
@@ -514,6 +515,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
         claudeModel: next.claudeModel.trim() || DEFAULT_SETTINGS.claudeModel,
         myName: next.myName.trim(),
         inputDeviceId: next.inputDeviceId?.trim() || null,
+        extraBrowsers: normalizeBrowsers(next.extraBrowsers),
       };
       // 自動更新の切り替えは、すぐに効く（オフにしたら、待っている自動インストールをやめる）
       if (!settings.autoUpdate && update.ready) setUpdate({ ...update, ready: false });

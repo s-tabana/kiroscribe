@@ -64,6 +64,30 @@ describe("SettingsDialog", () => {
     expect(await screen.findByText("設定を保存しました")).toBeInTheDocument();
   });
 
+  it("[SET-021] 判定に足すブラウザを、実行ファイルの名前で入力して保存できる", async () => {
+    const user = userEvent.setup();
+    const { backend } = setup({ extraBrowsers: ["first.exe"] });
+
+    const field = await screen.findByLabelText(/判定に足すブラウザ/);
+    expect(field).toHaveValue("first.exe");
+    await user.clear(field);
+    await user.type(field, "MyBrowser, C:\\Tools\\Other.EXE、");
+    // 打っている途中の区切りは消さない
+    expect(field).toHaveValue("MyBrowser, C:\\Tools\\Other.EXE、");
+    await user.click(screen.getByRole("button", { name: "設定を保存" }));
+
+    await waitFor(async () => expect((await backend.getSettings()).extraBrowsers).toEqual(["mybrowser.exe", "other.exe"]));
+    // 保存したら、そろえた名前を表示する
+    expect(field).toHaveValue("mybrowser.exe, other.exe");
+
+    // 書きかけのまま、トレイで自動検出を切り替えても、欄の文字は消えない
+    await user.type(field, ", third");
+    await act(async () => {
+      await backend.toggleAutoRecordFromTray();
+    });
+    expect(field).toHaveValue("mybrowser.exe, other.exe, third");
+  });
+
   it("[SET-009] AI のモデルを 4 つの中から選んで保存できる", async () => {
     const user = userEvent.setup();
     const { backend } = setup();

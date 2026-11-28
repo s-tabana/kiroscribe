@@ -1,5 +1,5 @@
 //! 会議の自動検出: 確定した開始・終了を受けたときの、ノートの作成・録音・ポップアップ。
-//! 検出そのもの（マイクの使用状況とウィンドウのタイトルからの判定、開始・終了の確定）は kiroscribe-core のテストにある。
+//! 検出そのもの（判定表の当てはめと、開始・終了の確定）は kiroscribe-core のテストにある。
 
 use std::time::Duration;
 
@@ -308,4 +308,29 @@ fn a_meeting_in_another_app_is_recorded_into_a_new_note() {
     assert_eq!(h.segments(&first).len(), known, "次の会議の発話が、前の会議のノートに入っている");
     h.meeting(MeetingEvent::Ended(MeetingApp::Zoom));
     assert_eq!(h.recording_state(), "idle");
+}
+
+/// 設定で足したブラウザは、保存した時から会議の検出の対象になり、変わったことをログに書く。
+// [SET-021][MTG-002][LOG-005]
+#[test]
+fn browsers_added_in_settings_are_used_by_the_detection_right_away() {
+    use tauri::Manager;
+    let h = Harness::new();
+    let state = || h.app.state::<crate::meeting_watch::MeetingState>().browsers();
+    assert!(state().extra().is_empty(), "最初は組み込みの一覧だけ");
+
+    let saved = h.save_settings(|settings| settings.extra_browsers = vec![" NewBrowser ".into(), "kiroscribe.exe".into()]);
+    assert_eq!(saved["extraBrowsers"], json!(["newbrowser.exe"]), "実行ファイルの名前にそろえて保存する");
+    assert!(state().contains("newbrowser.exe") && state().contains("chrome.exe"));
+    let logged = h.debug_log_events("meeting.browsers_changed");
+    assert_eq!(logged.len(), 1);
+    assert_eq!(logged[0]["fields"]["extraBrowsers"], json!(["newbrowser.exe"]));
+
+    // ほかの設定だけを変えたときは、書かない
+    h.save_settings(|settings| settings.my_name = "田中".into());
+    assert_eq!(h.debug_log_events("meeting.browsers_changed").len(), 1);
+
+    h.save_settings(|settings| settings.extra_browsers.clear());
+    assert!(!state().contains("newbrowser.exe"));
+    assert_eq!(h.debug_log_events("meeting.browsers_changed").len(), 2);
 }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { errorMessage, useBackend, type Backend } from "../lib/backend";
 import { useUpdater } from "../hooks/useUpdater";
+import { formatBrowsers, parseBrowsers } from "../lib/browsers";
 import { shortDateTimeLabel } from "../lib/dates";
 import type { ApiKeyStatus, AudioDevice, HelpTab, Provider, Settings } from "../lib/types";
 import { HelpDialog } from "./HelpDialog";
@@ -49,6 +50,8 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [deviceError, setDeviceError] = useState<string | null>(null);
   const [helpTab, setHelpTab] = useState<HelpTab | null>(null);
+  /** 判定に足すブラウザの欄の文字（打っている途中の区切りを消さないよう、設定とは別に持つ） */
+  const [browsersText, setBrowsersText] = useState("");
   const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -66,6 +69,7 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
       .then(([s, k]) => {
         saved.current = s;
         setSettings(s);
+        setBrowsersText(formatBrowsers(s.extraBrowsers));
         setKeys(k);
       })
       .catch((err) => setMessage({ kind: "error", text: errorMessage(err) }));
@@ -79,11 +83,13 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
       backend.onSettingsChanged((next) => {
         const before = saved.current;
         saved.current = next;
+        const changed = (key: keyof Settings) => !before || JSON.stringify(before[key]) !== JSON.stringify(next[key]);
+        if (changed("extraBrowsers")) setBrowsersText(formatBrowsers(next.extraBrowsers));
         setSettings((shown) => {
           if (!shown || !before) return next;
           const merged = { ...shown };
           for (const key of Object.keys(next) as (keyof Settings)[]) {
-            if (before[key] !== next[key]) Object.assign(merged, { [key]: next[key] });
+            if (changed(key)) Object.assign(merged, { [key]: next[key] });
           }
           return merged;
         });
@@ -113,6 +119,7 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
       const stored = await backend.saveSettings(settings);
       saved.current = stored;
       setSettings(stored);
+      setBrowsersText(formatBrowsers(stored.extraBrowsers));
       setMessage({ kind: "ok", text: "設定を保存しました" });
     } catch (err) {
       setMessage({ kind: "error", text: errorMessage(err) });
@@ -252,6 +259,21 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
                           "会議から抜けたら停止します（抜けたことが画面から分からないときは、20 秒たってから停止します）。"}
                       </small>
                     </span>
+                  </label>
+                  <label className="field field-after-check">
+                    <span>判定に足すブラウザ</span>
+                    <input
+                      value={browsersText}
+                      placeholder="例: mybrowser.exe"
+                      onChange={(e) => {
+                        setBrowsersText(e.target.value);
+                        update("extraBrowsers", parseBrowsers(e.target.value));
+                      }}
+                    />
+                    <small className="field-hint">
+                      {"ブラウザの会議（Google Meet など）は、Chrome・Edge・Firefox・Zen・Brave などで検出します。" +
+                        "一覧にないブラウザを使うときは、その実行ファイルの名前を「,」で区切って入力します。"}
+                    </small>
                   </label>
                   <label className="check">
                     <input

@@ -6,6 +6,7 @@
   "captureSystemAudio": true,
   "myName": "",
   "autoRecordMeetings": true,
+  "extraBrowsers": [],
   "launchAtLogin": true,
   "autoUpdate": false
 }

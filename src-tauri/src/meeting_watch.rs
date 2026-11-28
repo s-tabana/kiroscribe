@@ -36,12 +36,28 @@ pub struct MeetingState {
     queue: Mutex<Option<UnboundedSender<Job>>>,
     /// 検出の記録（メモリーの中だけ。利用者が「デバッグ用のログを保存」で書き出す）
     record: Mutex<MeetingRecorder>,
+    /// 判定の対象のブラウザ（設定で足したものを含む）。設定を保存したら替え、検出のスレッドが次の回から使う
+    browsers: Mutex<Browsers>,
 }
 
 impl MeetingState {
     /// いま続いている会議（開始を確定してから、終了を確定するまで）。
     pub fn current_meeting(&self) -> Option<MeetingApp> {
         *self.current.lock().unwrap()
+    }
+
+    /// 判定の対象のブラウザ。
+    pub fn browsers(&self) -> Browsers {
+        self.browsers.lock().unwrap().clone()
+    }
+
+    /// 判定の対象のブラウザを、設定に合わせる。変わったら true。
+    fn set_browsers(&self, settings: &Settings) -> bool {
+        let next = Browsers::with_extra(&settings.extra_browsers);
+        let mut browsers = self.browsers.lock().unwrap();
+        let changed = *browsers != next;
+        *browsers = next;
+        changed
     }
 }
 
@@ -90,7 +106,12 @@ fn submit_decision(app: &AppHandle, decision: Decision) {
 }
 
 /// 設定が保存された。「会議の自動検出」がオフからオンに変わったら、いま続いている会議の録音を始める。
+/// 判定に足すブラウザ（SET-021）が変わったら、次の回から使い、ログに書く。
 pub fn settings_changed(app: &AppHandle, was_enabled: bool, settings: &Settings) {
+    let state = app.state::<MeetingState>();
+    if state.set_browsers(settings) {
+        crate::debug::info(app, "meeting.browsers_changed", json!({ "extraBrowsers": state.browsers().extra() }));
+    }
     if !was_enabled && settings.auto_record_meetings {
         enqueue(app, Job::AutoRecordEnabled);
     }
@@ -101,9 +122,13 @@ pub fn spawn(app: AppHandle) {
     let spawned = std::thread::Builder::new()
         .name("kiroscribe-meetings".into())
         .spawn(move || {
+            // 判定に足すブラウザは、保存してある設定から始める
+            if let Ok(settings) = app.state::<AppState>().db().load_settings() {
+                app.state::<MeetingState>().set_browsers(&settings);
+            }
             // 検出の道具（UI Automation の部品を含む）は、このスレッドで作り、このスレッドだけで使う
             #[allow(unused_mut)]
-            let mut detector = MeetingDetector::new(Browsers::builtin());
+            let mut detector = MeetingDetector::new(app.state::<MeetingState>().browsers());
             // 判定の様子を、変わったときと、一定の間隔ごとに書く
             let mut check_log = CheckLog::default();
             // E2E テスト用のビルドでだけ、待ち時間を縮め、実際の検出の代わりにテストが決めた状態を使う（src/e2e.rs）
@@ -119,6 +144,10 @@ pub fn spawn(app: AppHandle) {
                 let decisions = match simulated {
                     Some(meeting) => detector.judge.tick(&simulated_evaluation(meeting), now),
                     None => {
+                        let browsers = app.state::<MeetingState>().browsers();
+                        if &browsers != detector.browsers() {
+                            detector.set_browsers(browsers);
+                        }
                         let step = detector.step(now);
                         let verbose = crate::debug::verbose(&app);
                         app.state::<MeetingState>().record.lock().unwrap().record(

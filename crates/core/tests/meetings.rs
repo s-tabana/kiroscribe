@@ -2,7 +2,7 @@
 //! 開始・継続・終了が仕様どおりになることを確かめる。実機で判定が外れた場面は、ここで回帰のテストにする。
 
 use kiroscribe_core::audio_sessions::{AudioSession, AudioSessions, SessionState};
-use kiroscribe_core::meeting_facts::{ControlFact, ControlScan, ControlType, Facts, ScannedWindow, WindowFact};
+use kiroscribe_core::meeting_facts::{scan_targets, ControlFact, ControlScan, ControlType, Facts, ScannedWindow, WindowFact};
 use kiroscribe_core::meeting_rules::{evaluate, Evaluation, Rules};
 use kiroscribe_core::meetings::{Browsers, Judge, MeetingApp, MeetingEvent, Phase, Reason, ServiceState, POLL_MS};
 
@@ -90,17 +90,19 @@ impl Pc {
 /// 判定を、製品と同じ 2 秒ごとに進める。
 struct Run {
     judge: Judge,
+    browsers: Browsers,
     now: i64,
 }
 
 impl Run {
     fn new() -> Self {
-        Run { judge: Judge::new(Rules::builtin()), now: 0 }
+        Run { judge: Judge::new(Rules::builtin()), browsers: Browsers::builtin(), now: 0 }
     }
 
     /// 1 回進め、知らせる出来事を返す。
     fn tick(&mut self, pc: &Pc) -> Vec<MeetingEvent> {
-        let events = self.judge.tick(&pc.evaluation(), self.now).into_iter().map(|d| d.event).collect();
+        let evaluation = evaluate(Rules::builtin(), &pc.facts(), &self.browsers);
+        let events = self.judge.tick(&evaluation, self.now).into_iter().map(|d| d.event).collect();
         self.now += POLL_MS;
         events
     }
@@ -173,6 +175,21 @@ fn meet_is_detected_in_every_listed_browser() {
     let mut run = Run::new();
     let unknown = Pc::new().window(window(5, "newbrowser.exe", CHROME, "Meet - abc-defg-hij - New Browser"), vec![button("通話から退出")]).mic("newbrowser.exe");
     assert!(run.hold(&unknown, 10).is_empty());
+}
+
+/// 設定で足したブラウザ（SET-021）は、組み込みの一覧のブラウザと同じく判定する。
+// [MTG-002][SET-021]
+#[test]
+fn meet_is_detected_in_a_browser_added_in_settings() {
+    let pc = Pc::new().window(window(5, "newbrowser.exe", CHROME, "Meet - abc-defg-hij - New Browser"), vec![button("通話から退出")]);
+    let mut run = Run::new();
+    run.browsers = Browsers::with_extra(&["NewBrowser".into()]);
+    assert_eq!(run.tick(&pc), started(MEET));
+    assert_eq!(
+        scan_targets(Rules::builtin(), &run.browsers, &pc.facts().windows, &[]),
+        vec![5],
+        "足したブラウザの、題が Meet の窓の中を調べる"
+    );
 }
 
 /// 一覧にないアプリ（Aqua Voice・Thunderbird）のマイクと再生の音は数えない。退出したあとの Meet のタブの題が残っていても、

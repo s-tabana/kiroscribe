@@ -575,6 +575,15 @@ kbd {
   font-weight: 400;
 }
 
+.field-after-check {
+  margin-top: 14px;
+}
+
+.field-hint {
+  color: var(--ink-3);
+  line-height: 1.6;
+}
+
 .check {
   display: flex;
   align-items: flex-start;
