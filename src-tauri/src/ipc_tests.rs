@@ -125,7 +125,9 @@ fn parse_frontend(source: &str) -> Frontend {
                 direct_params,
             });
         }
-        if let Some((event, rest)) = quoted_after(line, "subscribe(") {
+        if let Some((event, rest)) = quoted_after(line, "subscribe(")
+            .or_else(|| quoted_after(line, "subscribeAsync("))
+        {
             frontend.events.push(EventBinding {
                 method: method.clone(),
                 event: event.to_string(),

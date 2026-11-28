@@ -8,6 +8,7 @@ mod e2e;
 mod meeting_watch;
 mod error;
 mod help;
+mod log_submit;
 #[cfg(test)]
 mod ipc_tests;
 mod recording;
@@ -197,6 +198,7 @@ fn register_commands(builder: tauri::Builder<Runtime>) -> tauri::Builder<Runtime
             debug::set_debug_verbose,
             debug::write_debug_log,
             debug::save_debug_bundle,
+            log_submit::submit_debug_logs,
             help::get_guide,
             help::get_release_notes,
             help::open_external,

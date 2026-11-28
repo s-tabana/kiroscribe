@@ -3,6 +3,7 @@
 
 mod ai;
 mod debug_log;
+mod log_submit;
 mod meeting;
 mod misc;
 mod recording;

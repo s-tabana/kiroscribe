@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use tauri::test::MockRuntime;
 use tauri::{Manager, WebviewWindow, WebviewWindowBuilder};
 
-use super::fixture::{events_named, exclusive, record_events, wait_until};
+use super::fixture::{events_named, exclusive, record_events, wait_until, LOG_SUBMISSION_ID};
 use super::{frontend, invoke, mock_app, read, repo_root, Frontend, Samples};
 use crate::background::POPUP_LABEL;
 use crate::state::AppState;
@@ -418,6 +418,13 @@ fn ipc_contract_matches_the_frontend() {
         .call("save_debug_bundle", json!({ "path": fixture.dir.join("ログ.json") }))
         .unwrap_err();
     assert_eq!(refused, "保存できるのは .zip ファイルだけです");
+
+    // ---- デバッグ用のログの提出（偽の入口に送る）[SET-015][SET-017] ----
+    let submission = s.ok("submit_debug_logs", json!({ "requestId": "contract" }));
+    assert_eq!(submission["id"], LOG_SUBMISSION_ID);
+    let progress = wait_until("提出の進み具合", || events_named(&events, "log-submit-progress").into_iter().last());
+    assert_eq!(progress["requestId"], "contract");
+    assert!(progress["total"].as_u64().unwrap() > 0, "{progress}");
 
     // ---- 文字起こし API がキーを拒否したら、画面に知らせる ----
     *fixture.api.transcription_status.lock().unwrap() = Some(401);

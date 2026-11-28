@@ -12,6 +12,8 @@ import {
   type DeltaEvent,
   type ExportOptions,
   type LevelEvent,
+  type LogSubmission,
+  type LogSubmitProgress,
   type Note,
   type OpenNoteRequest,
   type PopupPayload,
@@ -53,6 +55,11 @@ interface MemoryOptions {
   settings?: Partial<Settings>;
   /** 「フォルダを追加…」のダイアログで選ぶフォルダ（null なら取り消し。既定はプレビュー用のフォルダ） */
   pickFolder?: () => string | null;
+  /**
+   * デバッグ用のログの提出を差し替える（テスト用）。progress で進み具合を知らせ、提出の番号を返す。
+   * 既定は、進み具合を 4 回知らせてから、プレビュー用の番号を返す
+   */
+  submitLogs?: (progress: (value: Omit<LogSubmitProgress, "requestId">) => void) => Promise<LogSubmission>;
 }
 
 /** テストから文字起こしやエラーを発生させるための追加機能 */
@@ -303,6 +310,7 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
     searchIndexEvents.emit({ ...searchIndex });
     return { ...searchIndex, folders: searchIndex.folders.map((folder) => ({ ...folder })) };
   };
+  const logSubmitEvents = new Emitter<LogSubmitProgress>();
   const UPDATE_BYTES = 8_400_000;
   const updateStep = () =>
     new Promise((resolve) => setTimeout(resolve, options.updateStepDelayMs ?? (options.demo ? 220 : 0)));
@@ -838,6 +846,18 @@ export function createMemoryBackend(options: MemoryOptions = {}): MemoryBackend 
     get debugLog() {
       return debugLog;
     },
+    async submitDebugLogs(requestId) {
+      const report = (value: Omit<LogSubmitProgress, "requestId">) => logSubmitEvents.emit({ ...value, requestId });
+      if (options.submitLogs) return options.submitLogs(report);
+      // プレビューでは送らずに、送ったように見せる
+      const total = 4 * 1024 * 1024;
+      for (let step = 1; step <= 4; step++) {
+        await new Promise((resolve) => setTimeout(resolve, options.demo ? 300 : 0));
+        report({ sent: (total * step) / 4, total });
+      }
+      return { id: "KS-PREVIEW-0000", receivedAt: new Date(now()).toISOString() };
+    },
+    onLogSubmitProgress: async (cb) => logSubmitEvents.on(cb),
     get lastCopied() {
       return lastCopied;
     },

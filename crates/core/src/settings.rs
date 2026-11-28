@@ -245,6 +245,38 @@ mod tests {
         assert_eq!(saved.companion_model, DEFAULT_COMPANION_MODEL);
     }
 
+    /// 送り先は設定に持たない。設定に送り先を書いても使わず、ほかの値はそのまま読める
+    // [SET-004][SET-019][SEC-015]
+    #[test]
+    fn log_intake_is_not_a_setting() {
+        let json = serde_json::to_value(Settings::default()).unwrap();
+        assert!(json.get("logIntakeUrl").is_none() && json.get("logIntakeToken").is_none(), "{json}");
+
+        let db = Database::open_in_memory().unwrap();
+        db.set_value(
+            SETTINGS_KEY,
+            r#"{"myName":"田花","autoUpdate":true,"logIntakeUrl":"https://evil.example","logIntakeToken":"x"}"#,
+        )
+        .unwrap();
+        let loaded = db.load_settings().unwrap();
+        assert_eq!(loaded.my_name, "田花");
+        assert!(loaded.auto_update);
+        let saved = db.save_settings(loaded).unwrap();
+        let stored = db.get_value(SETTINGS_KEY).unwrap().unwrap();
+        assert!(!stored.contains("logIntake"), "{stored}");
+        assert_eq!(db.load_settings().unwrap(), saved);
+        // 送り先は本体に埋め込んだもの。E2E テスト用のビルドでは差し替わるため、埋め込んだ値から作って確かめる
+        #[cfg(feature = "e2e")]
+        let intake = crate::log_submit::Intake::production(
+            crate::log_submit::LOG_INTAKE_URL,
+            crate::log_submit::LOG_INTAKE_TOKEN,
+        )
+        .unwrap();
+        #[cfg(not(feature = "e2e"))]
+        let intake = crate::log_submit::intake().unwrap();
+        assert_eq!(intake.url(), "https://log-intake.seita-tabana.workers.dev/v1/logs/kiroscribe");
+    }
+
     #[test]
     fn extra_values_live_beside_settings() {
         let db = Database::open_in_memory().unwrap();
