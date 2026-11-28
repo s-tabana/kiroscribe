@@ -362,8 +362,9 @@ mod tests {
         let record = recorder.export("0.4.3", None);
         let redacted = record.redacted();
         let json = serde_json::to_string(&redacted).unwrap();
-        for secret in ["SECRETQUERY", "SECRETKEY", "山田"] {
-            assert!(!json.contains(secret), "{secret}: {json}");
+        // 失敗したときの表示には、伏せるべき値を出さず、何が残っていたかの名前だけを出す
+        for (label, secret) in [("URL のクエリ", "SECRETQUERY"), ("API キー", "SECRETKEY"), ("利用者の名前", "山田")] {
+            assert!(!json.contains(secret), "書き出す形に{label}が残っている");
         }
         // 元の記録（メモリーの中）は変えない
         assert!(serde_json::to_string(&record).unwrap().contains("SECRETQUERY"));
