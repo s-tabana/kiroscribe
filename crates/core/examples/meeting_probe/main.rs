@@ -371,8 +371,12 @@ impl UiaFeed {
             UiaFeed::Now => {
                 #[cfg(windows)]
                 {
+                    // UI Automation の部品は、COM を戻す（_com を捨てる）前に解放する
                     let _com = win::Com::init();
-                    Some(win::scan_once(&win::Uia::new()))
+                    let uia = win::Uia::new();
+                    let scan = win::scan_once(&uia);
+                    drop(uia);
+                    Some(scan)
                 }
                 #[cfg(not(windows))]
                 {
