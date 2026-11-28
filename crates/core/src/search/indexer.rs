@@ -152,8 +152,10 @@ enum Message {
     Rescan,
     /// 見張りに失敗した（見張りが止まったことがある）。見張り直して、すべてのフォルダを調べ直す
     WatchFailed,
-    /// 過去のノートの索引を、渡したノートで作り直す（None なら、ノートの索引を消す）
-    SyncNotes(Option<Vec<NoteDoc>>),
+    /// 過去のノートの索引を空にする（その世代の [`Message::SyncNote`] で入れ直す）
+    ResetNotes(u64),
+    /// 入れ直している途中の世代の、ノート 1 件（世代が古ければ入れない）
+    SyncNote(u64, NoteDoc),
     /// ノートが保存された
     UpsertNote(NoteDoc),
     /// ノートが削除された
@@ -167,6 +169,14 @@ struct Shared {
     enabled: bool,
     /// 過去のノートの索引を作るか（相棒と「Kiroscribe の過去のノート」の両方がオン）
     notes: bool,
+    /// 過去のノートの索引の世代（入れ直すたびに進める。古い世代の読み込みは反映しない）
+    notes_generation: u64,
+    /// 削除したノート（索引から消し終える前でも検索に出さず、あとから届いた古い中身も入れない）
+    removed_notes: HashSet<String>,
+    /// 録音中のノート（検索に出さない。索引には、録音が終わってから入れ直す）
+    recording_note: Option<String>,
+    /// ノートの索引を空にできず、古い行が残っているかもしれない（空にし直せるまで、ノートを探さない）
+    notes_stale: bool,
     folders: Vec<SearchFolder>,
     /// 命令を出すたびに増やす。作っている途中の処理は、これが変わったら途中でやめ、古い状態を知らせない
     generation: u64,
@@ -179,6 +189,18 @@ impl Shared {
     }
 }
 
+/// 検索用の接続（作業用のスレッドとは別の接続。索引を作っている途中でも、待たずに探せるように）。
+#[derive(Default)]
+struct Reader {
+    index: Option<SearchIndex>,
+    /// 索引を空にする・消す処理のうち、終わっていないものの数（0 になるまで、検索用の接続を開かない。
+    /// 開いたままだと、Windows では索引のファイルを消せない）
+    blocks: usize,
+}
+
+/// ノートの索引が、ノートの入れ直し以外で空になったときに呼ぶもの（アプリが、すべてのノートを入れ直す）。
+type NotesLost = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+
 struct Inner {
     tx: Sender<Message>,
     shared: Arc<Mutex<Shared>>,
@@ -186,8 +208,8 @@ struct Inner {
     order: Arc<Mutex<()>>,
     thread: Mutex<Option<JoinHandle<()>>>,
     index_path: PathBuf,
-    /// 検索に使う、作業用のスレッドとは別の接続（索引を作っている途中でも、待たずに探せるように）
-    reader: Mutex<Option<SearchIndex>>,
+    reader: Arc<Mutex<Reader>>,
+    notes_lost: NotesLost,
 }
 
 impl Drop for Inner {
@@ -237,17 +259,25 @@ impl Indexer {
             },
             enabled: false,
             notes: false,
+            notes_generation: 0,
+            removed_notes: HashSet::new(),
+            recording_note: None,
+            notes_stale: false,
             folders: Vec::new(),
             generation: 0,
         }));
         let order = Arc::new(Mutex::new(()));
-        let worker = Worker::new(index_path.clone(), limits, intervals, shared.clone(), order.clone(), Arc::new(on_status), tx.clone());
+        let reader = Arc::new(Mutex::new(Reader::default()));
+        let notes_lost: NotesLost = Arc::new(Mutex::new(None));
+        let mut worker = Worker::new(index_path.clone(), limits, intervals, shared.clone(), order.clone(), Arc::new(on_status), tx.clone());
+        worker.reader = reader.clone();
+        worker.notes_lost = notes_lost.clone();
         let thread = std::thread::Builder::new()
             .name("search-index".into())
             .spawn(move || worker.run(rx))
             .expect("索引の作業用のスレッドを起こせません");
         Self {
-            inner: Arc::new(Inner { tx, shared, order, thread: Mutex::new(Some(thread)), index_path, reader: Mutex::new(None) }),
+            inner: Arc::new(Inner { tx, shared, order, thread: Mutex::new(Some(thread)), index_path, reader, notes_lost }),
         }
     }
 }
@@ -284,10 +314,17 @@ impl Worker {
             incomplete: HashSet::new(),
             unverified: HashSet::new(),
             last_retry: Instant::now(),
+            last_note_retry: Instant::now(),
             // 前回の起動で、索引を検索から外せないまま終わっていたら、消し終えるまで検索せずに消し直す
             suspended: is_search_suspended(&index_path),
             rescan: false,
             unplaced: HashSet::new(),
+            reader: Arc::new(Mutex::new(Reader::default())),
+            notes_lost: Arc::new(Mutex::new(None)),
+            pending_removals: BTreeSet::new(),
+            notes_clear_pending: false,
+            fresh_notes: HashSet::new(),
+            fresh_generation: 0,
             index_path,
         }
     }
@@ -319,9 +356,10 @@ impl Indexer {
     /// 止めて、索引の中身を消す。消し終えるまでの状態は「消している」で、作業用のスレッドが消し終えてから「オフ」になる。
     /// 戻り値は、命令を出した直後の状態（「消している」）。
     pub fn disable(&self) -> IndexStatus {
-        // 検索用の接続を閉じてから消す（開いたままだと、Windows では索引のファイルを消せない）
+        // 検索用の接続を閉じ、消し終えるまで開かせない（開いたままだと、Windows では索引のファイルを消せない）
         let mut reader = self.inner.reader.lock().unwrap();
-        *reader = None;
+        reader.index = None;
+        reader.blocks += 1;
         self.command(|shared| {
             shared.enabled = false;
             let status = IndexStatus { state: IndexState::Erasing, done: 0, total: 0, updated_at: None, ..shared.status.clone() };
@@ -365,17 +403,21 @@ impl Indexer {
 
     /// 索引を作り直す。戻り値は、命令を出した直後の状態（「作っている」）。相棒がオフなら何もしない（None）。
     pub fn rebuild(&self) -> Option<IndexStatus> {
-        // 空にできずにファイルを消して作り直すときに備えて、検索用の接続を閉じておく
+        // 空にできずにファイルを消して作り直すときに備えて、検索用の接続を閉じ、空にし終えるまで開かせない
         let mut reader = self.inner.reader.lock().unwrap();
-        *reader = None;
-        self.command(|shared| {
+        let status = self.command(|shared| {
             if !shared.enabled {
                 return None;
             }
             let status = IndexStatus { state: IndexState::Building, done: 0, total: 0, ..shared.status.clone() };
             shared.set_status(status);
             Some(Command::Rebuild)
-        })
+        });
+        if status.is_some() {
+            reader.index = None;
+            reader.blocks += 1;
+        }
+        status
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -386,10 +428,26 @@ impl Indexer {
         self.inner.shared.lock().unwrap().status.clone()
     }
 
-    /// 過去のノートの索引を作るかを決める。作るなら `notes` のノートで作り直し、作らないなら消す。
-    pub fn set_notes(&self, notes: Option<Vec<NoteDoc>>) {
-        self.inner.shared.lock().unwrap().notes = notes.is_some();
-        let _ = self.inner.tx.send(Message::SyncNotes(notes));
+    /// 過去のノートの索引を作るかを決め、ノートの索引を空にする。戻り値は、入れ直しの世代。
+    /// 作るなら、呼び出し側が、その世代でノートを 1 件ずつ [`Indexer::sync_note`] で入れる。
+    pub fn set_notes(&self, on: bool) -> u64 {
+        let mut shared = self.inner.shared.lock().unwrap();
+        shared.notes = on;
+        shared.notes_generation += 1;
+        let generation = shared.notes_generation;
+        // 世代を進めたのと同じ鍵の中で送る（世代の順と、命令の順をそろえる）
+        let _ = self.inner.tx.send(Message::ResetNotes(generation));
+        generation
+    }
+
+    /// いまの、過去のノートの索引の世代（入れ直しを始めるたびに進む）。
+    pub fn notes_generation(&self) -> u64 {
+        self.inner.shared.lock().unwrap().notes_generation
+    }
+
+    /// 入れ直している途中のノートを 1 件入れる（あとで別の入れ直しが始まっていたら、入れない）。
+    pub fn sync_note(&self, generation: u64, note: NoteDoc) {
+        let _ = self.inner.tx.send(Message::SyncNote(generation, note));
     }
 
     /// 過去のノートの索引を作っているか。
@@ -405,31 +463,65 @@ impl Indexer {
         }
     }
 
+    /// 削除したノートを、すぐに検索から外し、索引から消す（消せなければ、消し直す間隔で消し直す）。
     pub fn note_removed(&self, note_id: &str) {
+        self.inner.shared.lock().unwrap().removed_notes.insert(note_id.to_string());
         let _ = self.inner.tx.send(Message::RemoveNote(note_id.to_string()));
+    }
+
+    /// 録音中のノートを決める（録音中のあいだ、そのノートを検索に出さない）。
+    pub fn set_recording_note(&self, note_id: Option<&str>) {
+        self.inner.shared.lock().unwrap().recording_note = note_id.map(str::to_string);
+    }
+
+    /// ノートの索引が、ノートの入れ直し以外で空になったとき（索引を検索から外せず、空にして作り直したとき）に呼ぶものを決める。
+    /// 作業用のスレッドから呼ぶので、中では待たずに、入れ直しを別のスレッドで始める。
+    pub fn on_notes_lost(&self, callback: impl Fn() + Send + Sync + 'static) {
+        *self.inner.notes_lost.lock().unwrap() = Some(Arc::new(callback));
     }
 
     /// 検索語で、指定したフォルダと過去のノートを探す（相棒がオフなら、何も見つからない）。
     /// `exclude_note` は除くノート（録音中のノート）。
     pub fn search(&self, terms: &[String], exclude_note: Option<&str>, limit: usize) -> (Vec<Hit>, Vec<NoteHit>) {
+        self.search_by(terms, exclude_note, limit, |_| ())
+    }
+
+    /// [`Indexer::search`] と同じく探し、過去のノートは `note_key` の大きい順に並べてから `limit` 件にする。
+    /// 録音中のノートと、削除したノートは、索引から消し終える前でも返さない。
+    pub fn search_by<K: Ord>(
+        &self,
+        terms: &[String],
+        exclude_note: Option<&str>,
+        limit: usize,
+        note_key: impl Fn(&NoteHit) -> K,
+    ) -> (Vec<Hit>, Vec<NoteHit>) {
         // 接続の鍵を持ってからオンかを読む（オフにする処理が接続を閉じたあとに、開き直さないように）
         let mut reader = self.inner.reader.lock().unwrap();
-        let (enabled, notes) = {
+        let (enabled, notes, exclude) = {
             let shared = self.inner.shared.lock().unwrap();
-            (shared.enabled, shared.notes)
+            let mut exclude: Vec<String> = shared.removed_notes.iter().cloned().collect();
+            exclude.extend(shared.recording_note.iter().cloned());
+            exclude.extend(exclude_note.map(str::to_string));
+            (shared.enabled, shared.notes && !shared.notes_stale, exclude)
         };
-        if !enabled || !self.inner.index_path.exists() {
+        // 索引を空にする・消す処理の途中は、接続を開かない
+        if !enabled || reader.blocks > 0 || !self.inner.index_path.exists() {
+            return (Vec::new(), Vec::new());
+        }
+        // 消去待ちの索引は、接続を持ち続けない（消すのを妨げないように）
+        if is_search_suspended(&self.inner.index_path) {
+            reader.index = None;
             return (Vec::new(), Vec::new());
         }
         // 索引のファイルが消されて作り直されていたら、開き直す
-        if !reader.as_ref().is_some_and(SearchIndex::is_current) {
-            *reader = SearchIndex::open_existing(&self.inner.index_path).ok();
+        if !reader.index.as_ref().is_some_and(SearchIndex::is_current) {
+            reader.index = SearchIndex::open_existing(&self.inner.index_path).ok();
         }
-        let Some(index) = reader.as_ref() else {
+        let Some(index) = reader.index.as_ref() else {
             return (Vec::new(), Vec::new());
         };
         let hits = index.search(terms, limit).unwrap_or_default();
-        let note_hits = if notes { index.search_notes(terms, exclude_note, limit).unwrap_or_default() } else { Vec::new() };
+        let note_hits = if notes { index.search_notes_by(terms, &exclude, limit, note_key).unwrap_or_default() } else { Vec::new() };
         (hits, note_hits)
     }
 
@@ -488,12 +580,23 @@ struct Worker {
     /// 起動し直したあとは、索引の記録から同じことが分かる）
     unverified: HashSet<PathBuf>,
     last_retry: Instant,
+    last_note_retry: Instant,
     /// 索引の資料を検索から外せず、索引ごと消去待ちにしている（消し終えるまで検索しない。記録のファイルで、起動し直しても続く）
     suspended: bool,
     /// 索引を空にしたので、すべてのフォルダを読み直す
     rescan: bool,
     /// 開いたときに実際の場所が取れず、足したときと同じ場所かを確かめられないフォルダ（中身を読まず、選び直してもらう）
     unplaced: HashSet<PathBuf>,
+    /// 検索用の接続（索引を空にする・消すあいだは閉じて、開かせない）
+    reader: Arc<Mutex<Reader>>,
+    notes_lost: NotesLost,
+    /// 索引から消せなかった、削除したノート（消し直す間隔で消し直す。そのあいだも検索には出さない）
+    pending_removals: BTreeSet<String>,
+    /// ノートの索引を空にできなかった（消し直す間隔で空にし直し、空にできたら入れ直してもらう）
+    notes_clear_pending: bool,
+    /// いまの世代で、保存の知らせから入れたノート（入れ直しで読んだ、それより古い中身で上書きしない）
+    fresh_notes: HashSet<String>,
+    fresh_generation: u64,
 }
 
 /// 探すフォルダの行を、どの実体から読むかの記録（足したときの実体と、開いたフォルダの識別子）。
@@ -555,7 +658,12 @@ impl Worker {
         let mut watch_failed = false;
         loop {
             let timeout = match pending_since {
-                None if self.erasure == Erasure::Pending || !self.unverified.is_empty() || self.suspended => {
+                None if self.erasure == Erasure::Pending
+                    || !self.unverified.is_empty()
+                    || self.suspended
+                    || !self.pending_removals.is_empty()
+                    || self.notes_clear_pending =>
+                {
                     self.intervals.root_check.min(self.intervals.poll).min(self.intervals.purge_retry)
                 }
                 None => self.intervals.root_check.min(self.intervals.poll),
@@ -579,24 +687,20 @@ impl Worker {
                     // 知らせが続いても、最初の知らせから MAX_CHANGE_DELAY たったら反映する
                     pending_since.get_or_insert_with(Instant::now).elapsed() >= MAX_CHANGE_DELAY
                 }
-                Ok(Message::SyncNotes(notes)) => {
-                    self.sync_notes(notes);
+                Ok(Message::ResetNotes(generation)) => {
+                    self.reset_notes(generation);
+                    false
+                }
+                Ok(Message::SyncNote(generation, note)) => {
+                    self.put_note(Some(generation), note);
                     false
                 }
                 Ok(Message::UpsertNote(note)) => {
-                    if self.enabled() && self.shared.lock().unwrap().notes {
-                        if let Some(index) = self.open_index() {
-                            let _ = index.upsert_note(&note);
-                        }
-                    }
+                    self.put_note(None, note);
                     false
                 }
                 Ok(Message::RemoveNote(id)) => {
-                    if self.index.is_some() || self.index_path.exists() {
-                        if let Some(index) = self.open_index() {
-                            let _ = index.remove_note(&id);
-                        }
-                    }
+                    self.remove_note(id);
                     false
                 }
                 Ok(Message::Command(generation, command)) => {
@@ -604,7 +708,12 @@ impl Worker {
                     pending.clear();
                     pending_since = None;
                     watch_failed = false;
+                    // オフにする・作り直す命令は、出したときに検索用の接続を止めている。処理を終えたら戻す
+                    let release = matches!(command, Command::Disable | Command::Rebuild);
                     self.handle(generation, command);
+                    if release {
+                        self.unblock_reader();
+                    }
                     false
                 }
                 Err(RecvTimeoutError::Timeout) => true,
@@ -632,6 +741,9 @@ impl Worker {
                 // 検索から外せなかった索引を、消し直す（消せたら、すべてのフォルダを読み直す）
                 self.last_retry = Instant::now();
                 self.invalidate_all();
+            }
+            if (!self.pending_removals.is_empty() || self.notes_clear_pending) && self.last_note_retry.elapsed() >= self.intervals.purge_retry {
+                self.retry_notes();
             }
             if self.enabled() && std::mem::take(&mut self.rescan) {
                 let all = self.folders().iter().map(|folder| PathBuf::from(&folder.path)).collect();
@@ -813,23 +925,147 @@ impl Worker {
         }
     }
 
-    /// 過去のノートの索引を空にし、相棒がオンで `notes` があれば、そのノートを入れる。
-    fn sync_notes(&mut self, notes: Option<Vec<NoteDoc>>) {
-        let enabled = self.enabled();
-        if !enabled && !self.index_path.exists() {
+    /// 検索用の接続を閉じ、開かせない（索引を空にする・消す前に呼ぶ）。
+    fn block_reader(&self) {
+        let mut reader = self.reader.lock().unwrap();
+        reader.index = None;
+        reader.blocks += 1;
+    }
+
+    /// [`Worker::block_reader`] を 1 回分戻す。
+    fn unblock_reader(&self) {
+        let mut reader = self.reader.lock().unwrap();
+        reader.blocks = reader.blocks.saturating_sub(1);
+    }
+
+    fn set_notes_stale(&self, stale: bool) {
+        self.shared.lock().unwrap().notes_stale = stale;
+    }
+
+    /// ノートの索引が、入れ直し以外で空になった。ノートの索引を作っていれば、アプリに入れ直してもらう。
+    fn notes_lost(&self) {
+        let on = {
+            let shared = self.shared.lock().unwrap();
+            shared.enabled && shared.notes
+        };
+        let callback = self.notes_lost.lock().unwrap().clone();
+        if let (true, Some(callback)) = (on, callback) {
+            callback();
+        }
+    }
+
+    /// 索引の中身がすべてなくなった（空にした・ファイルを消した）。消し残したノートの処理も済んだことになる。
+    fn notes_erased(&mut self) {
+        self.pending_removals.clear();
+        self.notes_clear_pending = false;
+        self.set_notes_stale(false);
+    }
+
+    /// ノートの索引を空にする（`generation` の入れ直しの始まり）。空にできなければ、空にし直すまでノートを探さない。
+    fn reset_notes(&mut self, generation: u64) {
+        self.fresh_notes.clear();
+        self.fresh_generation = generation;
+        if !self.enabled() && self.index.is_none() && !self.index_path.exists() {
+            self.notes_erased();
             return;
         }
-        let Some(index) = self.open_index() else { return };
-        let _ = index.clear_notes();
-        if let (true, Some(notes)) = (enabled, notes) {
-            for note in &notes {
-                let _ = index.upsert_note(note);
+        match self.open_index().map(SearchIndex::clear_notes) {
+            Some(Ok(())) => {
+                self.notes_clear_pending = false;
+                self.set_notes_stale(false);
             }
+            other => {
+                if let Some(Err(err)) = other {
+                    eprintln!("過去のノートの索引を空にできません（あとで空にし直します）: {err}");
+                }
+                self.notes_clear_pending = true;
+                self.set_notes_stale(true);
+            }
+        }
+    }
+
+    /// ノートを索引に入れる。`generation` は入れ直しの世代（保存の知らせなら None）。
+    /// 入れ直しが古い・ノートの索引を作っていない・削除した・録音中のノートは入れない。
+    fn put_note(&mut self, generation: Option<u64>, note: NoteDoc) {
+        let current = {
+            let shared = self.shared.lock().unwrap();
+            let skip = !shared.enabled
+                || !shared.notes
+                || shared.removed_notes.contains(&note.note_id)
+                || generation.is_some_and(|g| g != shared.notes_generation)
+                || (generation.is_some() && shared.recording_note.as_deref() == Some(note.note_id.as_str()));
+            if skip {
+                return;
+            }
+            shared.notes_generation
+        };
+        if self.fresh_generation != current {
+            self.fresh_notes.clear();
+            self.fresh_generation = current;
+        }
+        if generation.is_some() && self.fresh_notes.contains(&note.note_id) {
+            return;
+        }
+        if generation.is_none() {
+            self.fresh_notes.insert(note.note_id.clone());
+        }
+        if let Some(index) = self.open_index() {
+            if let Err(err) = index.upsert_note(&note) {
+                eprintln!("過去のノートを索引に入れられません: {err}");
+            }
+        }
+    }
+
+    /// 削除したノートを索引から消す。消せなければ、消し直す間隔で消し直す（そのあいだも検索には出さない）。
+    fn remove_note(&mut self, note_id: String) {
+        self.fresh_notes.remove(&note_id);
+        if self.index.is_none() && !self.index_path.exists() {
+            return;
+        }
+        let removed = self.open_index().map(|index| index.remove_note(&note_id));
+        if !matches!(removed, Some(Ok(()))) {
+            if let Some(Err(err)) = removed {
+                eprintln!("削除したノートを索引から消せません（あとで消し直します）: {err}");
+            }
+            self.pending_removals.insert(note_id);
+        }
+    }
+
+    /// 消せなかったノートと、空にできなかったノートの索引を、消し直す。
+    fn retry_notes(&mut self) {
+        self.last_note_retry = Instant::now();
+        if self.index.is_none() && !self.index_path.exists() {
+            self.notes_erased();
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_removals);
+        let clear = self.notes_clear_pending;
+        let Some(index) = self.open_index() else {
+            self.pending_removals = pending;
+            return;
+        };
+        let left: BTreeSet<String> = pending.into_iter().filter(|id| index.remove_note(id).is_err()).collect();
+        let cleared = clear && index.clear_notes().is_ok();
+        self.pending_removals = left;
+        if cleared {
+            // 空にし直すあいだに入れたノートも消えたので、入れ直してもらう
+            self.notes_clear_pending = false;
+            self.set_notes_stale(false);
+            self.notes_lost();
         }
     }
 
     /// 索引の中身を消し、ファイルも消す。消せなかったら、あとで消し直す。
     fn purge(&mut self) {
+        self.block_reader();
+        self.purge_files();
+        self.unblock_reader();
+        if self.erasure == Erasure::Erased {
+            self.notes_erased();
+        }
+    }
+
+    fn purge_files(&mut self) {
         self.last_purge = Instant::now();
         // まず中身を消す（ファイルを消せないときにも、資料の中身がファイルに残らないように）
         let mut cleared = match self.index.take() {
@@ -871,6 +1107,16 @@ impl Worker {
     /// 「索引を作り直す」: 索引を空にする。空にできなければ、ファイルを消して作り直す。
     /// 空にできた・消せたら true（どちらもできなければ、それまでの行が残っている）。
     fn reset_index(&mut self) -> bool {
+        self.block_reader();
+        let reset = self.reset_index_files();
+        self.unblock_reader();
+        if reset {
+            self.notes_erased();
+        }
+        reset
+    }
+
+    fn reset_index_files(&mut self) -> bool {
         self.erasure = Erasure::Unknown;
         let cleared = self.open_index().map(|index| index.clear());
         if matches!(cleared, Some(Ok(()))) {
@@ -897,6 +1143,8 @@ impl Worker {
             self.unverified.clear();
             self.rescan = true;
             self.resume();
+            // 過去のノートの索引も空になったので、入れ直してもらう
+            self.notes_lost();
         }
     }
 
@@ -1614,6 +1862,10 @@ mod tests {
             status: IndexStatus { state: IndexState::Erasing, done: 0, total: 0, files: 0, updated_at: None, folders: Vec::new(), revision: 0 },
             enabled,
             notes: false,
+            notes_generation: 0,
+            removed_notes: HashSet::new(),
+            recording_note: None,
+            notes_stale: false,
             folders: Vec::new(),
             generation,
         }))
@@ -1711,5 +1963,84 @@ mod tests {
         worker.handle(6, Command::SetFolders(folders));
         assert_eq!(last(&seen), IndexState::Off);
         assert!(!index_path.exists());
+    }
+
+    /// 索引を検索から外せず、空にして作り直したときは、過去のノートも入れ直してもらう（フォルダだけを読み直さない）。
+    // [IDX-017]
+    #[test]
+    fn notes_are_refilled_after_the_index_is_reset_by_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(INDEX_FILE_FOR_TEST);
+        let state = shared(true, 1);
+        state.lock().unwrap().notes = true;
+        let mut worker = worker(path.clone(), state.clone(), Arc::new(Mutex::new(Vec::new())));
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = asked.clone();
+        *worker.notes_lost.lock().unwrap() = Some(Arc::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+        worker.put_note(None, NoteDoc {
+            note_id: "a".into(),
+            title: "定例".into(),
+            created_at: 1,
+            memo: "予算".into(),
+            minutes: String::new(),
+            transcript: String::new(),
+        });
+        assert_eq!(worker.open_index().unwrap().count_notes().unwrap(), 1);
+        worker.invalidate_all();
+        assert_eq!(worker.open_index().unwrap().count_notes().unwrap(), 0);
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1, "入れ直しを求める");
+
+        // ノートの索引を作っていなければ、求めない
+        state.lock().unwrap().notes = false;
+        worker.invalidate_all();
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// 索引を空にする・消すあいだは、検索用の接続を開かない（作り直す命令を出してから、作業用のスレッドが空にし終えるまで）。
+    // [IDX-011][IDX-028]
+    #[test]
+    fn search_does_not_reopen_the_index_while_it_is_being_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(INDEX_FILE_FOR_TEST);
+        let indexer = Indexer::spawn(path.clone(), |_| {});
+        indexer.enable(Vec::new());
+        let generation = indexer.set_notes(true);
+        indexer.sync_note(generation, NoteDoc {
+            note_id: "a".into(),
+            title: "定例".into(),
+            created_at: 1,
+            memo: "予算".into(),
+            minutes: String::new(),
+            transcript: String::new(),
+        });
+        let found = || indexer.search(&["予算".to_string()], None, 8).1.len();
+        let start = Instant::now();
+        while found() != 1 {
+            assert!(start.elapsed() < Duration::from_secs(20));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // 命令を出した時点で、接続を閉じて開かせない（オフにする・作り直す命令と同じ）
+        {
+            let mut reader = indexer.inner.reader.lock().unwrap();
+            reader.index = None;
+            reader.blocks += 1;
+        }
+        assert_eq!(found(), 0, "空にし終えるまで探さない");
+        assert!(indexer.inner.reader.lock().unwrap().index.is_none(), "接続を開かない");
+        indexer.inner.reader.lock().unwrap().blocks -= 1;
+        assert_eq!(found(), 1);
+
+        indexer.rebuild().unwrap();
+        let start = Instant::now();
+        while indexer.inner.reader.lock().unwrap().blocks > 0 {
+            assert!(start.elapsed() < Duration::from_secs(20), "作り直し終えたら、検索を戻す");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(found(), 0, "作り直した索引には、入れ直すまでノートがない");
+        indexer.disable();
+        assert_eq!(found(), 0);
+        assert!(indexer.shutdown_and_wait(Duration::from_secs(5)));
     }
 }

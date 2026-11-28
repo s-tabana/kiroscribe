@@ -104,6 +104,7 @@ async fn select_is_sent_with_candidates_in_the_send_form() {
         location: "C:\\Users\\tabana\\共有資料\\経理\\経費精算.docx".into(),
         send_location: "共有資料\\経理\\経費精算.docx".into(),
         excerpt: Some("申請は月末まで。".into()),
+        sent_excerpt: None,
         part: None,
         no_content: false,
         path: None,
@@ -179,7 +180,10 @@ fn folders_and_past_notes_are_searched_together() {
         minutes: minutes.into(),
         transcript: String::new(),
     };
-    indexer.set_notes(Some(vec![note("past", "経理の定例", "## 決定事項\n- 経費精算は新システムで行う"), note("now", "録音中", "経費精算")]));
+    let generation = indexer.set_notes(true);
+    for doc in [note("past", "経理の定例", "## 決定事項\n- 経費精算は新システムで行う"), note("now", "録音中", "経費精算")] {
+        indexer.sync_note(generation, doc);
+    }
     let start = Instant::now();
     loop {
         let (hits, notes) = indexer.search(&["経費精算".to_string()], Some("now"), 8);
@@ -196,10 +200,99 @@ fn folders_and_past_notes_are_searched_together() {
     }
 
     // 過去のノートの索引をやめると、ノートは探さない
-    indexer.set_notes(None);
+    indexer.set_notes(false);
     let start = Instant::now();
     while !indexer.search(&["経費精算".to_string()], None, 8).1.is_empty() {
         assert!(start.elapsed() < Duration::from_secs(10));
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// 削除したノートと録音中のノートは、すぐに検索から外す。索引に書けずに消せなかったノートは、消し直す。
+/// 消す前に読んだ古い中身が、あとから届いても入れない。
+// [NOTE-015][IDX-016][IDX-017]
+#[test]
+fn deleted_and_recording_notes_leave_search_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(INDEX_FILE);
+    let intervals = kiroscribe_core::search::Intervals { purge_retry: Duration::from_millis(200), ..Default::default() };
+    let indexer = Indexer::spawn_with_intervals(path.clone(), kiroscribe_core::search::walk::Limits::default(), intervals, |_| {});
+    indexer.enable(Vec::new());
+    let note = |id: &str| NoteDoc { note_id: id.into(), title: "定例".into(), created_at: 1, memo: "予算".into(), minutes: String::new(), transcript: String::new() };
+    let generation = indexer.set_notes(true);
+    indexer.sync_note(generation, note("a"));
+    indexer.sync_note(generation, note("b"));
+    let found = || {
+        let mut ids: Vec<String> = indexer.search(&["予算".to_string()], None, 8).1.into_iter().map(|h| h.note_id).collect();
+        ids.sort();
+        ids
+    };
+    let start = Instant::now();
+    while found() != ["a", "b"] {
+        assert!(start.elapsed() < Duration::from_secs(20), "{:?}", found());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    indexer.set_recording_note(Some("b"));
+    assert_eq!(found(), ["a"], "録音中のノートは、呼び出し側が除かなくても出さない");
+    indexer.set_recording_note(None);
+
+    // 索引への書き込みをふさいだまま削除する
+    let blocker = rusqlite::Connection::open(&path).unwrap();
+    blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    indexer.note_removed("a");
+    assert_eq!(found(), ["b"], "索引から消し終える前に、検索から外す");
+    std::thread::sleep(Duration::from_secs(7));
+    blocker.execute_batch("ROLLBACK").unwrap();
+    let stored = || kiroscribe_core::search::SearchIndex::open_existing(&path).unwrap().note_ids().unwrap();
+    let start = Instant::now();
+    while stored().contains(&"a".to_string()) {
+        assert!(start.elapsed() < Duration::from_secs(20), "消せなかったノートを消し直す");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // 削除の前に読んだ中身が、あとから届いても入れない
+    indexer.sync_note(generation, note("a"));
+    indexer.note_saved(note("a"));
+    indexer.note_saved(NoteDoc { memo: "予算と経費".into(), ..note("b") });
+    let start = Instant::now();
+    while indexer.search(&["経費".to_string()], None, 8).1.is_empty() {
+        assert!(start.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!stored().contains(&"a".to_string()));
+    assert_eq!(found(), ["b"]);
+}
+
+/// 「前回」のノートは、一致した語の少ないノートでも、件数を絞る前に上げる（索引の検索の上限で落とさない）。
+// [IDX-018][CMP-012]
+#[test]
+fn previous_meeting_survives_the_candidate_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let indexer = Indexer::spawn(dir.path().join(INDEX_FILE), |_| {});
+    indexer.enable(Vec::new());
+    let generation = indexer.set_notes(true);
+    let note = |id: &str, title: &str, created_at: i64, memo: &str| NoteDoc {
+        note_id: id.into(),
+        title: title.into(),
+        created_at,
+        memo: memo.into(),
+        minutes: String::new(),
+        transcript: String::new(),
+    };
+    for i in 0..9 {
+        indexer.sync_note(generation, note(&format!("n{i}"), "採用面談", 1_000 + i, "予算 経費 精算"));
+    }
+    indexer.sync_note(generation, note("prev", "週次定例（11月20日）", 500, "予算"));
+    let current = CurrentNote { id: "now".into(), title: "週次定例（11月27日）".into(), created_at: 10_000 };
+    let terms = vec!["予算".to_string(), "経費".to_string(), "精算".to_string()];
+    let start = Instant::now();
+    while indexer.search(&terms, None, 20).1.len() < 10 {
+        assert!(start.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let found = candidates::search(&indexer, &terms, Some(candidates::Period::Previous), &[], Some(&current), 20_000);
+    assert_eq!(found.len(), candidates::MAX_CANDIDATES);
+    assert_eq!(found[0].note_id.as_deref(), Some("prev"), "題名の似た前回のノートが最も上");
+    assert_eq!(found[1].note_id.as_deref(), Some("n8"), "ほかは新しい順");
 }

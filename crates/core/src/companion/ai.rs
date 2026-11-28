@@ -25,7 +25,8 @@ pub const CONTEXT_UTTERANCES: usize = 6;
 pub const CONTEXT_CHARS: usize = 1_000;
 /// 探すものの名前の長さの上限。
 pub const TARGET_CHARS: usize = 20;
-/// 検索語の数の上限。
+/// 検索語の数の下限と上限（正規化して重なりを除いたあとの数）。
+pub const MIN_TERMS: usize = 3;
 pub const MAX_TERMS: usize = 8;
 /// 手がかりの数の上限。
 pub const MAX_CLUES: usize = 3;
@@ -167,7 +168,7 @@ pub fn select_user_message(utterance: &str, target: &str, candidates: &[Candidat
             super::candidates::SourceKind::Folder => "ローカルのフォルダ",
             super::candidates::SourceKind::Note => "Kiroscribe の過去のノート",
         };
-        out.push_str(&format!("[{}] 題名: {}\n探し先: {source}\n場所: {}\n", i + 1, c.title, c.send_location));
+        out.push_str(&format!("[{}] 題名: {}\n探し先: {source}\n場所: {}\n", i + 1, c.send_title(), c.send_place()));
         match c.send_excerpt() {
             Some(excerpt) => match c.part {
                 Some(part) => out.push_str(&format!("抜粋（{part}）: {excerpt}\n")),
@@ -231,14 +232,19 @@ pub fn parse_judgement(value: &Value) -> Result<Judgement> {
         return Ok(Judgement::not_requested());
     }
     let target: String = value["target"].as_str().ok_or_else(bad)?.trim().chars().take(TARGET_CHARS).collect();
+    // 正規化して同じになる語（全角と半角・大文字と小文字の違いだけの語）は、1 つに数える
     let mut terms: Vec<String> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
     for term in value["terms"].as_array().ok_or_else(bad)? {
         let term = term.as_str().ok_or_else(bad)?.trim().to_string();
-        if !term.is_empty() && !terms.contains(&term) && terms.len() < MAX_TERMS {
+        let key = normalize(&term);
+        if !key.trim().is_empty() && !seen.contains(&key) && terms.len() < MAX_TERMS {
+            seen.push(key);
             terms.push(term);
         }
     }
-    if target.is_empty() || terms.is_empty() {
+    // 検索語は 3〜8 個（CMP-006）。足りなければ、決まった形の応答ではないものとして扱う
+    if target.is_empty() || terms.len() < MIN_TERMS {
         return Err(bad());
     }
     Ok(Judgement { requested, target, terms, period: value["period"].as_str().and_then(Period::from_label) })
@@ -306,6 +312,7 @@ mod tests {
             location: format!("C:\\Users\\u\\共有資料\\{title}.docx"),
             send_location: format!("共有資料\\{title}.docx"),
             excerpt: excerpt.map(str::to_string),
+            sent_excerpt: None,
             part: None,
             no_content: false,
             path: None,
@@ -349,17 +356,34 @@ mod tests {
         assert!(parse_judgement(&json!({ "requested": true, "target": "x", "terms": [], "period": "なし" })).is_err());
     }
 
+    // [CMP-006]
+    #[test]
+    fn judgement_needs_three_to_eight_terms_after_normalizing() {
+        let judged = |terms: Value| parse_judgement(&json!({ "requested": true, "target": "VPN の設定", "terms": terms, "period": "なし" }));
+        assert!(judged(json!(["VPN", "ＶＰＮ", "vpn", " ", "設定"])).is_err(), "正規化して重なりを除くと 2 個");
+        assert!(judged(json!(["VPN", "設定"])).is_err(), "2 個");
+        assert_eq!(judged(json!(["VPN", "ＶＰＮ", "設定", "接続"])).unwrap().terms, ["VPN", "設定", "接続"], "3 個");
+        let eight: Vec<String> = (1..=8).map(|i| format!("語{i}")).collect();
+        assert_eq!(judged(json!(eight)).unwrap().terms.len(), 8, "8 個");
+        let nine: Vec<String> = (1..=9).map(|i| format!("語{i}")).collect();
+        assert_eq!(judged(json!(nine)).unwrap().terms.len(), MAX_TERMS, "9 個目からは使わない");
+    }
+
     // [CMP-013]
     #[test]
     fn select_message_has_candidates_in_the_send_form() {
         let mut secret = candidate("人事評価", Some("評価の手順 https://hr.example.com/a?token=1"));
+        let mut titled = candidate("HTTPS://Sheets.example.com/s?Key=9", Some("先頭が切れた URL"));
+        titled.sent_excerpt = Some("先頭が切れた URL".into());
         secret.no_content = true;
-        let message = select_user_message("評価の手順どこ？", "評価の手順", &[candidate("経費精算", Some("申請は https://wiki.example.com/x?id=3#top")), secret]);
+        let message = select_user_message("評価の手順どこ？", "評価の手順", &[candidate("経費精算", Some("申請は https://wiki.example.com/x?id=3#top")), secret, titled]);
         assert!(message.contains("発言: 評価の手順どこ？\n探すもの: 評価の手順"));
         assert!(message.contains("[1] 題名: 経費精算\n探し先: ローカルのフォルダ\n場所: 共有資料\\経費精算.docx\n抜粋: 申請は https://wiki.example.com/x\n"));
         assert!(message.contains("[2] 題名: 人事評価") && message.contains("抜粋: （なし）"), "「中身を送らない」のフォルダは抜粋を送らない");
         assert!(!message.contains("C:\\Users"), "フルパスは送らない");
         assert!(!message.contains("token=1"));
+        assert!(message.contains("[3] 題名: HTTPS://Sheets.example.com/s\n"), "題名の中の URL も整える: {message}");
+        assert!(!message.contains("Key=9"), "場所の中の URL も整える");
     }
 
     // [CMP-014]

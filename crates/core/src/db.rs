@@ -75,6 +75,14 @@ impl Database {
         Self::init(conn)
     }
 
+    /// 読むためだけの接続（マイグレーションは流さない）。アプリが開いている接続とは別なので、
+    /// 多くのノートを読むあいだも、ほかの読み書きを待たせない（WAL なので、書き込みの途中でも読める）。
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(Self { conn })
+    }
+
     /// テスト用のインメモリデータベース。
     pub fn open_in_memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?)
@@ -128,6 +136,19 @@ mod tests {
         // 2 回目に開いても再適用されずに成功する
         let db = Database::open(&path).unwrap();
         assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+    }
+
+    /// 読むためだけの接続では、書き込んだノートが読め、書き込めない。
+    // [IDX-008][IDX-017]
+    #[test]
+    fn read_only_connection_reads_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kiroscribe.db");
+        let db = Database::open(&path).unwrap();
+        let note = db.create_note().unwrap();
+        let reader = Database::open_read_only(&path).unwrap();
+        assert_eq!(reader.get_note(&note.id).unwrap().id, note.id);
+        assert!(reader.create_note().is_err(), "書き込めない");
     }
 
     // [DAT-010][DAT-002]

@@ -573,6 +573,59 @@ fn past_notes_are_indexed_while_both_settings_are_on() {
     wait_for("交通費", vec![]);
 }
 
+/// 録音を始めたノートは、すぐに検索から外す（索引にある前の中身も出さない）。止め終えたら、止めたノートを入れ直す。
+/// 止めた直後に別のノートの録音が始まり、止まった状態を知らせる前に録音中の状態になっても、止めたノートを入れ直す。
+// [IDX-016][IDX-017]
+#[test]
+fn recording_notes_are_hidden_and_reindexed_when_stopped() {
+    #[cfg(feature = "e2e")]
+    fixture::fixture();
+    let (app, window) = mock_app("http://127.0.0.1:9/latest.json");
+    app.manage(AppState::new(Database::open_in_memory().unwrap(), Box::new(MemorySecretStore::default())));
+    let search = |term: &str| {
+        let companion = app.state::<crate::companion::CompanionState>();
+        let mut ids: Vec<String> = companion.indexer.search(&[term.to_string()], None, 8).1.into_iter().map(|hit| hit.note_id).collect();
+        ids.sort();
+        ids
+    };
+    let wait_for = |term: &str, expected: Vec<String>| {
+        let start = std::time::Instant::now();
+        while search(term) != expected {
+            assert!(start.elapsed() < std::time::Duration::from_secs(20), "{term} の検索結果が {expected:?} になりません: {:?}", search(term));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    let note = |memo: &str| {
+        let id = invoke(&window, "create_note", json!({})).unwrap()["id"].as_str().unwrap().to_string();
+        invoke(&window, "update_note", json!({ "id": id, "patch": { "userNotes": memo } })).unwrap();
+        id
+    };
+    let a = note("予算の確認");
+    let b = note("予算の見直し");
+    let mut settings = invoke(&window, "get_settings", json!({})).unwrap();
+    settings["companion"] = json!(false);
+    invoke(&window, "save_settings", json!({ "settings": settings })).unwrap();
+    settings["companion"] = json!(true);
+    invoke(&window, "save_settings", json!({ "settings": settings })).unwrap();
+    let mut both = vec![a.clone(), b.clone()];
+    both.sort();
+    wait_for("予算", both.clone());
+
+    // A の録音を始めると、索引にある A は出さない。録音中の保存は、止めるまで入れない
+    crate::companion::recording_changed(app.handle(), Some(&a), false);
+    assert_eq!(search("予算"), vec![b.clone()]);
+    invoke(&window, "update_note", json!({ "id": a, "patch": { "userNotes": "予算と交通費" } })).unwrap();
+    assert!(search("交通費").is_empty());
+
+    // A を止めた直後に B の録音が始まり、止まった状態の知らせが B の録音中になった
+    crate::companion::recording_changed(app.handle(), Some(&b), false);
+    crate::companion::recording_stopped(app.handle(), &a);
+    wait_for("交通費", vec![a.clone()]);
+    assert_eq!(search("予算"), vec![a.clone()], "B は録音中なので出さない");
+    crate::companion::recording_changed(app.handle(), None, true);
+    wait_for("予算", both);
+}
+
 // ---- 見本の書き出し ----
 
 /// 見本の値を、実行のたびに変わらない形にする。型の確認に要る情報（キー・null かどうか・列挙の値）だけを残す:

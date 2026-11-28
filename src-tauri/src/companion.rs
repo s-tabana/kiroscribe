@@ -23,6 +23,8 @@ pub struct CompanionState {
     pub indexer: Indexer,
     /// 録音中（または仕上げ中）のノート。過去のノートの索引には、録音が終わってから入れる
     recording: Mutex<Option<String>>,
+    /// ノートのデータベースのファイル（過去のノートを入れ直すときに、読むためだけの接続を別に開く）
+    db_path: PathBuf,
 }
 
 /// 過去のノートの索引を作るか（保存した設定で、相棒と「Kiroscribe の過去のノート」の両方がオン）。
@@ -50,25 +52,59 @@ fn note_doc(db: &Database, note_id: &str) -> Option<NoteDoc> {
     })
 }
 
-/// 録音中のノートを除く、すべてのノート。
-fn all_note_docs(db: &Database, recording: Option<&str>) -> Vec<NoteDoc> {
-    db.list_notes()
-        .unwrap_or_default()
-        .iter()
-        .filter(|note| Some(note.id.as_str()) != recording)
-        .filter_map(|note| note_doc(db, &note.id))
-        .collect()
-}
-
 impl CompanionState {
     fn recording_note(&self) -> Option<String> {
         self.recording.lock().unwrap().clone()
     }
+}
 
-    /// 過去のノートの索引を、保存した設定に合わせる（作るなら入れ直し、作らないなら消す）。
-    fn sync_notes(&self, db: &Database, settings: &Settings) {
-        let notes = notes_on(settings).then(|| all_note_docs(db, self.recording_note().as_deref()));
-        self.indexer.set_notes(notes);
+/// 過去のノートの索引を、保存した設定に合わせる（作るなら空にして入れ直し、作らないなら空にする）。
+/// 入れ直しは、裏のスレッドで、読むためだけの別の接続から 1 件ずつ読んで行う（画面の操作と録音の保存を待たせない）。
+fn sync_notes(app: &AppHandle, settings: &Settings) {
+    let Some(companion) = app.try_state::<CompanionState>() else { return };
+    let on = notes_on(settings);
+    let generation = companion.indexer.set_notes(on);
+    if on {
+        refill_notes(app, generation);
+    }
+}
+
+/// `generation` の入れ直しを、裏のスレッドで始める。
+fn refill_notes(app: &AppHandle, generation: u64) {
+    let app = app.clone();
+    let spawned = std::thread::Builder::new().name("note-index-sync".into()).spawn(move || fill_notes(&app, generation));
+    if let Err(err) = spawned {
+        eprintln!("過去のノートを索引に入れ直すスレッドを起こせません: {err}");
+    }
+}
+
+/// 録音中のノートを除くすべてのノートを、1 件ずつ読んで索引に入れる。あとから別の入れ直しが始まったら、やめる。
+fn fill_notes(app: &AppHandle, generation: u64) {
+    let Some(companion) = app.try_state::<CompanionState>() else { return };
+    // 読むためだけの接続を開けないとき（データベースがファイルでないときなど）は、ノート 1 件ごとに共有の接続を借りる
+    let reader = Database::open_read_only(&companion.db_path).ok();
+    let read = |f: &dyn Fn(&Database) -> Option<NoteDoc>| -> Option<NoteDoc> {
+        match &reader {
+            Some(db) => f(db),
+            None => f(&app.try_state::<AppState>()?.db()),
+        }
+    };
+    let ids: Option<Vec<String>> = match &reader {
+        Some(db) => db.list_notes().ok(),
+        None => app.try_state::<AppState>().and_then(|state| state.db().list_notes().ok()),
+    }
+    .map(|notes| notes.into_iter().map(|note| note.id).collect());
+    for id in ids.unwrap_or_default() {
+        if companion.indexer.notes_generation() != generation {
+            return;
+        }
+        // 録音中のノートは、録音が終わってから入れる
+        if companion.recording_note().as_deref() == Some(id.as_str()) {
+            continue;
+        }
+        if let Some(doc) = read(&|db| note_doc(db, &id)) {
+            companion.indexer.sync_note(generation, doc);
+        }
     }
 }
 
@@ -90,7 +126,8 @@ pub fn note_deleted(app: &AppHandle, note_id: &str) {
     }
 }
 
-/// 録音の状態が変わるたびに呼ぶ。録音が終わったら、そのノートを索引に入れる。
+/// 録音の状態が変わるたびに呼ぶ。録音を始めたノートは、すぐに検索から外す（索引にある前の中身も出さない）。
+/// 止まった状態を知らせたときは、そのとき録音中だったノートを索引に入れ直す。
 pub fn recording_changed(app: &AppHandle, note_id: Option<&str>, idle: bool) {
     let Some(companion) = app.try_state::<CompanionState>() else { return };
     let finished = {
@@ -98,13 +135,31 @@ pub fn recording_changed(app: &AppHandle, note_id: Option<&str>, idle: bool) {
         if idle {
             recording.take()
         } else {
-            *recording = note_id.map(str::to_string);
+            if let Some(id) = note_id {
+                *recording = Some(id.to_string());
+                companion.indexer.set_recording_note(Some(id));
+            }
             None
         }
     };
     if let Some(id) = finished {
+        companion.indexer.set_recording_note(None);
         note_saved(app, &id);
     }
+}
+
+/// 録音を止め終えたら（残りの文字起こしを保存し終えたら）、止めたノート `note_id` で呼ぶ。
+/// すぐに別のノートの録音が始まっていても、止めたノートを索引に入れ直す。
+pub fn recording_stopped(app: &AppHandle, note_id: &str) {
+    let Some(companion) = app.try_state::<CompanionState>() else { return };
+    {
+        let mut recording = companion.recording.lock().unwrap();
+        if recording.as_deref() == Some(note_id) {
+            *recording = None;
+            companion.indexer.set_recording_note(None);
+        }
+    }
+    note_saved(app, note_id);
 }
 
 /// 索引の作業用のスレッドを起こし、保存した設定に合わせて索引を作り始める（オフなら中身を消す）。
@@ -119,11 +174,16 @@ pub fn setup(app: &AppHandle, data_dir: &Path, settings: &Settings, folders: Vec
         indexer.set_folders(folders);
         indexer.disable();
     }
-    let companion = CompanionState { indexer, recording: Mutex::new(None) };
-    if let Some(state) = app.try_state::<AppState>() {
-        companion.sync_notes(&state.db(), settings);
-    }
+    // 索引を検索から外せず空にしたときは、過去のノートも入れ直す（作業用のスレッドから呼ばれる）
+    let handle = app.clone();
+    indexer.on_notes_lost(move || {
+        let Some(companion) = handle.try_state::<CompanionState>() else { return };
+        let generation = companion.indexer.set_notes(true);
+        refill_notes(&handle, generation);
+    });
+    let companion = CompanionState { indexer, recording: Mutex::new(None), db_path: data_dir.join(crate::startup::DB_FILE) };
     app.manage(companion);
+    sync_notes(app, settings);
 }
 
 /// アプリを終えるときに呼ぶ。索引の作業用のスレッドを止めて、少しのあいだ終わるのを待つ
@@ -156,7 +216,7 @@ pub fn settings_changed(app: &AppHandle, before: Option<&Settings>, saved: &Sett
         }
     }
     if companion_changed || before.map(notes_on) != Some(notes_on(saved)) {
-        companion.sync_notes(&state.db(), saved);
+        sync_notes(app, saved);
     }
 }
 
@@ -269,6 +329,7 @@ pub fn set_search_folder_no_content(
 /// 「索引を作り直す」: 索引を空にしてから作り直す。相棒がオフのときは作り直さない。
 #[tauri::command]
 pub fn rebuild_search_index(
+    app: AppHandle,
     state: State<'_, AppState>,
     companion: State<'_, CompanionState>,
 ) -> CmdResult<IndexStatus> {
@@ -276,6 +337,6 @@ pub fn rebuild_search_index(
     let rebuilt = if settings.companion { companion.indexer.rebuild() } else { None };
     let status = rebuilt.ok_or_else(|| CommandError("会議の相棒がオフのときは、索引を作り直せません".into()))?;
     // 過去のノートも、両方がオンなら入れ直す
-    companion.sync_notes(&state.db(), &settings);
+    sync_notes(&app, &settings);
     Ok(status)
 }

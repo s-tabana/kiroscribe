@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::search::normalize::normalize;
 use crate::search::store::{Hit, NoteHit};
-use crate::search::SearchFolder;
+use crate::search::{Indexer, SearchFolder};
 
 /// 候補の上限。
 pub const MAX_CANDIDATES: usize = 8;
@@ -55,6 +55,8 @@ pub struct Candidate {
     pub send_location: String,
     /// 一致した部分の前後（名前だけで探した資料・題名だけに一致したノートにはない）
     pub excerpt: Option<String>,
+    /// AI に送る抜粋（本文の中で見つけた URL のクエリとフラグメントを除いてある。None なら `excerpt` から作る）
+    pub sent_excerpt: Option<String>,
     /// 過去のノートの、一致した部分の種類（「メモ」「議事録」「文字起こし」）
     pub part: Option<&'static str>,
     /// 「中身を送らない」にしたフォルダの資料（抜粋を AI に送らない）
@@ -71,7 +73,17 @@ impl Candidate {
         if self.no_content {
             return None;
         }
-        self.excerpt.as_deref().map(strip_url_queries)
+        self.sent_excerpt.as_deref().or(self.excerpt.as_deref()).map(strip_url_queries)
+    }
+
+    /// AI に送る題名（中の URL は整える）。
+    pub fn send_title(&self) -> String {
+        strip_url_queries(&self.title)
+    }
+
+    /// AI に送る場所（資料を特定できる最小の形。中の URL は整える）。
+    pub fn send_place(&self) -> String {
+        strip_url_queries(&self.send_location)
     }
 }
 
@@ -83,25 +95,10 @@ pub struct CurrentNote {
     pub created_at: i64,
 }
 
-/// URL のクエリ（「?」から後ろ）とフラグメント（「#」から後ろ）を除く。文の中の URL もすべて整える。
+/// URL のクエリ（「?」から後ろ）とフラグメント（「#」から後ろ）を除く。文の中の URL もすべて整える
+/// （英字の大文字と小文字、全角と半角は区別しない）。
 pub fn strip_url_queries(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    loop {
-        let next = ["https://", "http://"].iter().filter_map(|scheme| rest.find(scheme)).min();
-        let Some(start) = next else {
-            out.push_str(rest);
-            return out;
-        };
-        out.push_str(&rest[..start]);
-        let url_len = rest[start..]
-            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '）' | '」' | '、' | '。'))
-            .unwrap_or(rest.len() - start);
-        let url = &rest[start..start + url_len];
-        let cut = url.find(['?', '#']).unwrap_or(url.len());
-        out.push_str(&url[..cut]);
-        rest = &rest[start + url_len..];
-    }
+    crate::search::url::strip_queries(text)
 }
 
 /// AI に送るローカルのフォルダの資料の場所: 追加したフォルダの名前と、そこからの相対のパス。
@@ -210,8 +207,36 @@ fn note_tier(hit: &NoteHit, period: Option<Period>, current: Option<&CurrentNote
     }
 }
 
-/// フォルダと過去のノートの検索結果を合わせ、上位 8 件までの候補にする。
-/// 並びは、時期の手がかりで上げる段、一致した検索語の数、題名やファイル名に一致したか、新しさの順。
+/// 候補の並びの鍵（大きいほど上）: 時期の手がかりで上げる段、「前回」で上げたノートの作成日時、
+/// 一致した検索語の数、題名やファイル名に一致したか、新しさ。
+pub type RankKey = (u8, i64, usize, bool, i64);
+
+/// 過去のノートの並びの鍵。「前回」で上げたノートは、同じ段の中を新しい順にする（IDX-018）。
+pub fn note_key(hit: &NoteHit, period: Option<Period>, current: Option<&CurrentNote>, now: i64) -> RankKey {
+    let tier = note_tier(hit, period, current, now);
+    let previous = if tier > 0 && period == Some(Period::Previous) { hit.created_at } else { 0 };
+    (tier, previous, hit.matched_terms, hit.in_title, hit.created_at)
+}
+
+/// 検索語で、オンにしてある探し先を同時に探し、上位 8 件までの候補にする。
+/// 過去のノートは、時期の手がかりで並べてから件数を絞る（上げるノートを、一致した語の数で落とさないように）。
+/// `folders` は、いま保存してある探すフォルダの一覧（外したフォルダの資料は、索引に残っていても候補にしない）。
+pub fn search(
+    indexer: &Indexer,
+    terms: &[String],
+    period: Option<Period>,
+    folders: &[SearchFolder],
+    current: Option<&CurrentNote>,
+    now: i64,
+) -> Vec<Candidate> {
+    let exclude = current.map(|note| note.id.as_str());
+    let (hits, note_hits) = indexer.search_by(terms, exclude, MAX_CANDIDATES, |hit| note_key(hit, period, current, now));
+    merge(hits, note_hits, folders, period, current, now)
+}
+
+/// フォルダと過去のノートの検索結果を合わせ、上位 8 件までの候補にする（並びは [`RankKey`]）。
+/// フォルダの資料は、いまの一覧 `folders` にあるフォルダのものだけを使い、そのフォルダの「中身を送らない」に従う
+/// （外したフォルダの行が索引から消える前に探しても、候補にしない）。
 pub fn merge(
     hits: Vec<Hit>,
     note_hits: Vec<NoteHit>,
@@ -221,39 +246,46 @@ pub fn merge(
     now: i64,
 ) -> Vec<Candidate> {
     struct Ranked {
-        key: (u8, usize, bool, i64),
+        key: RankKey,
         candidate: Candidate,
     }
     let mut ranked: Vec<Ranked> = Vec::new();
     for hit in hits {
-        let no_content = folders.iter().any(|f| f.no_content && Path::new(&f.path) == hit.folder);
+        let Some(folder) = folders.iter().find(|f| Path::new(&f.path) == hit.folder) else {
+            continue;
+        };
         let location = hit.path.to_string_lossy().to_string();
         ranked.push(Ranked {
-            key: (0, hit.matched_terms, hit.named, hit.modified),
+            key: (0, 0, hit.matched_terms, hit.named, hit.modified),
             candidate: Candidate {
                 kind: SourceKind::Folder,
                 title: hit.title.clone(),
                 send_location: folder_send_location(&hit.folder, &hit.path),
                 location: location.clone(),
                 excerpt: hit.excerpt.clone(),
+                sent_excerpt: hit.send_excerpt.clone(),
                 part: None,
-                no_content,
+                no_content: folder.no_content,
                 path: Some(location),
                 note_id: None,
             },
         });
     }
     for hit in note_hits {
-        let tier = note_tier(&hit, period, current, now);
+        if current.is_some_and(|note| note.id == hit.note_id) {
+            continue;
+        }
+        let key = note_key(&hit, period, current, now);
         let location = note_location(&hit.title, hit.created_at);
         ranked.push(Ranked {
-            key: (tier, hit.matched_terms, hit.in_title, hit.created_at),
+            key,
             candidate: Candidate {
                 kind: SourceKind::Note,
                 title: if hit.title.trim().is_empty() { "無題".into() } else { hit.title.clone() },
                 send_location: location.clone(),
                 location,
                 excerpt: hit.excerpt.as_ref().map(|(_, text)| text.clone()),
+                sent_excerpt: hit.send_excerpt.clone(),
                 part: hit.excerpt.as_ref().map(|(part, _)| part.label()),
                 no_content: false,
                 path: None,
@@ -281,6 +313,7 @@ mod tests {
             title: title.into(),
             created_at,
             excerpt: Some((crate::search::store::NotePart::Minutes, format!("{title}の議事録"))),
+            send_excerpt: None,
             matched_terms: matched,
             in_title: false,
         }
@@ -293,6 +326,7 @@ mod tests {
             title: "経費精算".into(),
             file_name: "経費精算.docx".into(),
             excerpt: Some("申請は https://wiki.example.com/page?id=1&token=x#top を見る".into()),
+            send_excerpt: Some("申請は https://wiki.example.com/page を見る".into()),
             modified: 1,
             matched_terms: matched,
             named: false,
@@ -309,12 +343,12 @@ mod tests {
             format!("共有資料{sep}経理{sep}経費精算.docx")
         );
         assert_eq!(
-            strip_url_queries("見て https://a.example.com/x?y=1#z と http://b.example.com/p#frag。"),
-            "見て https://a.example.com/x と http://b.example.com/p。"
+            strip_url_queries("見て https://a.example.com/x?y=1#z と HTTP://b.example.com/p#frag。"),
+            "見て https://a.example.com/x と HTTP://b.example.com/p。"
         );
         assert_eq!(strip_url_queries("URL なし"), "URL なし");
 
-        let candidates = merge(vec![folder_hit("/home/u/共有資料/経理/経費精算.docx", 1)], vec![], &[], None, None, 0);
+        let candidates = merge(vec![folder_hit("/home/u/共有資料/経理/経費精算.docx", 1)], vec![], &listed(false), None, None, 0);
         let c = &candidates[0];
         assert!(!c.send_location.contains("/home/u"), "フルパスは送らない: {}", c.send_location);
         assert_eq!(c.location, "/home/u/共有資料/経理/経費精算.docx", "画面の表示・開くには保存した場所を使う");
@@ -322,14 +356,40 @@ mod tests {
         assert!(c.excerpt.as_ref().unwrap().contains("token=x"), "保存する抜粋はそのまま");
     }
 
+    fn listed(no_content: bool) -> Vec<SearchFolder> {
+        vec![SearchFolder { path: "/home/u/共有資料".into(), no_content, place: None }]
+    }
+
     // [CMP-013][IDX-034]
     #[test]
     fn no_content_folders_send_no_excerpt() {
-        let folders = vec![SearchFolder { path: "/home/u/共有資料".into(), no_content: true, place: None }];
-        let candidates = merge(vec![folder_hit("/home/u/共有資料/a.docx", 1)], vec![], &folders, None, None, 0);
+        let candidates = merge(vec![folder_hit("/home/u/共有資料/a.docx", 1)], vec![], &listed(true), None, None, 0);
         assert!(candidates[0].no_content);
         assert_eq!(candidates[0].send_excerpt(), None);
         assert!(candidates[0].excerpt.is_some(), "画面には抜粋を出す");
+    }
+
+    /// 外したフォルダの資料は、索引から消える前に探しても候補にしない（「中身を送らない」だったかを確かめられない）。
+    // [CMP-012][IDX-010][IDX-034]
+    #[test]
+    fn folders_no_longer_listed_are_not_candidates() {
+        let candidates = merge(vec![folder_hit("/home/u/共有資料/a.docx", 1)], vec![], &[], None, None, 0);
+        assert!(candidates.is_empty());
+        let other = vec![SearchFolder { path: "/home/u/別".into(), no_content: false, place: None }];
+        assert!(merge(vec![folder_hit("/home/u/共有資料/a.docx", 1)], vec![], &other, None, None, 0).is_empty());
+    }
+
+    /// 送るのは、抜粋の元の本文で URL を見つけて整えたもの。題名と場所の中の URL も整える。
+    // [CMP-043]
+    #[test]
+    fn every_field_to_send_drops_url_queries() {
+        let mut hit = note_hit("n", "https://Docs.example.com/d?usp=sharing の確認", 1, 1);
+        hit.excerpt = Some((crate::search::store::NotePart::Memo, "ken=abc https://x.example.com/y".into()));
+        hit.send_excerpt = Some("https://x.example.com/y".into());
+        let c = &merge(vec![], vec![hit], &[], None, None, 0)[0];
+        assert_eq!(c.send_excerpt().as_deref(), Some("https://x.example.com/y"), "切れた URL の残りも送らない");
+        assert_eq!(c.send_title(), "https://Docs.example.com/d の確認");
+        assert!(!c.send_place().contains("usp=sharing"), "{}", c.send_place());
     }
 
     // [CMP-012]
@@ -337,7 +397,7 @@ mod tests {
     fn merges_sources_into_the_top_eight() {
         let hits: Vec<Hit> = (0..6).map(|i| folder_hit(&format!("/home/u/共有資料/{i}.docx"), 1)).collect();
         let notes: Vec<NoteHit> = (0..6).map(|i| note_hit(&format!("n{i}"), "定例", i, if i == 5 { 2 } else { 1 })).collect();
-        let candidates = merge(hits, notes, &[], None, None, 0);
+        let candidates = merge(hits, notes, &listed(false), None, None, 0);
         assert_eq!(candidates.len(), MAX_CANDIDATES);
         assert_eq!(candidates[0].note_id.as_deref(), Some("n5"), "一致した検索語の多いものが上");
         assert!(candidates.iter().any(|c| c.kind == SourceKind::Folder) && candidates.iter().any(|c| c.kind == SourceKind::Note));
@@ -363,6 +423,14 @@ mod tests {
         assert_eq!(ids, ["similar", "other", "older", "later"]);
         assert!(title_similarity("週次定例（11月27日）", "週次定例（11月20日）") >= 0.5);
         assert!(title_similarity("週次定例", "採用面談") < 0.5);
+
+        // 「前回」で上げたノートは、同じ段の中を、一致した語の数ではなく新しい順にする
+        let notes = vec![note_hit("old-many", "採用面談", ms(2026, 11, 1, 10), 3), note_hit("new-few", "予算", ms(2026, 11, 26, 10), 1)];
+        let ids: Vec<String> = merge(vec![], notes, &[], Some(Period::Previous), Some(&current), ms(2026, 11, 27, 11))
+            .into_iter()
+            .map(|c| c.note_id.unwrap())
+            .collect();
+        assert_eq!(ids, ["new-few", "old-many"]);
     }
 
     // [IDX-018]

@@ -61,7 +61,7 @@ describe("会議の相棒の設定", () => {
     );
   });
 
-  it("[IDX-016] 「Kiroscribe の過去のノート」は初期値でオン。送るものを表示し、切り替えは「設定を保存」で保存する", async () => {
+  it("[IDX-016][CMP-036] 「Kiroscribe の過去のノート」は初期値でオン。送るものを表示し、切り替えは「設定を保存」で保存する", async () => {
     const user = userEvent.setup();
     const { backend } = setup();
     const area = await section();
@@ -75,6 +75,8 @@ describe("会議の相棒の設定", () => {
     expect(confirm).not.toHaveBeenCalled();
     expect((await backend.getSettings()).companionNotes).toBe(true);
     expect(within(area).getByLabelText("会議の相棒が PC の外に送るもの")).not.toHaveTextContent("過去のノート");
+    // 判定には、過去のノートをオフにしても、録音中のノートの題名を送る
+    expect(within(area).getByLabelText("会議の相棒が PC の外に送るもの")).toHaveTextContent("録音中のノートの題名");
     await user.click(screen.getByRole("button", { name: "設定を保存" }));
     await waitFor(async () => expect((await backend.getSettings()).companionNotes).toBe(false));
   });

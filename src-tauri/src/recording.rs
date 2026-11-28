@@ -632,6 +632,8 @@ pub(crate) async fn finish_stop(app: &AppHandle, taken: TakenRecording) -> Stopp
     }
 
     *recorder.finishing.lock().unwrap() = None;
+    // 止めたノートを、残りの文字起こしまで含めて過去のノートの索引に入れ直す（すぐに別の録音が始まっていても）
+    crate::companion::recording_stopped(app, &stopped.note_id);
     emit_status(app, &recorder.status().await);
     stopped
 }

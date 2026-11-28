@@ -75,7 +75,7 @@ export function CompanionSection({ settings, modelSelect, onCompanionChange, onN
         <dd>Anthropic（Claude）</dd>
         <dt>送るもの</dt>
         <dd>
-          {"資料を求めていそうな発言と、その前の発言（同じノートの 6 件まで）。" +
+          {"録音中のノートの題名と、資料を求めていそうな発言と、その前の発言（同じノートの 6 件まで）。" +
             "探すフォルダで見つかった資料の題名・場所（フォルダの名前と、そこからの相対のパス）・抜粋" +
             "（「中身を送らない」にしたフォルダは、抜粋を送りません）。" +
             (settings.companionNotes ? "過去のノートで見つかったノートの題名・作成日時と抜粋。" : "") +

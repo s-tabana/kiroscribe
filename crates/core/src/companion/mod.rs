@@ -121,6 +121,7 @@ mod tests {
             location: "/a/経費精算.docx".into(),
             send_location: "a/経費精算.docx".into(),
             excerpt: None,
+            sent_excerpt: None,
             part: None,
             no_content: false,
             path: None,

@@ -7,6 +7,7 @@ use rusqlite::{params, params_from_iter, Connection};
 
 use super::extract::Extracted;
 use super::normalize::{normalize, normalize_with_map};
+use super::url;
 use super::walk::FileEntry;
 use crate::error::Result;
 
@@ -18,6 +19,8 @@ pub const EXCERPT_CHARS: usize = 600;
 const MAX_HITS_PER_TERM: usize = 5_000;
 
 const SCHEMA_VERSION: i64 = 4;
+/// 過去のノートの表がない版（指定したフォルダの資料と、どの実体から読んだかの記録だけを持つ）。
+const SCHEMA_VERSION_WITHOUT_NOTES: i64 = 3;
 const SCHEMA: &str = r#"
 CREATE TABLE docs (
     id          INTEGER PRIMARY KEY,
@@ -41,6 +44,8 @@ CREATE TABLE bindings (
     place  TEXT NOT NULL,
     root   TEXT NOT NULL
 );
+"#;
+const SCHEMA_NOTES: &str = r#"
 CREATE TABLE notes (
     note_id          TEXT PRIMARY KEY,
     title            TEXT NOT NULL,
@@ -68,6 +73,8 @@ pub struct Hit {
     pub file_name: String,
     /// 一致した部分の前後（名前だけで探した資料には付けない）
     pub excerpt: Option<String>,
+    /// AI に送る抜粋（本文の中で URL のクエリとフラグメントを見つけてから切り出し、それを除いたもの）
+    pub send_excerpt: Option<String>,
     pub modified: i64,
     /// 一致した検索語の数
     pub matched_terms: usize,
@@ -248,11 +255,21 @@ impl SearchIndex {
         // 消した行の中身を、ファイルの空き領域に残さない
         conn.execute_batch("PRAGMA secure_delete = ON;")?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version != SCHEMA_VERSION {
+        if version == SCHEMA_VERSION_WITHOUT_NOTES {
+            // 資料とフォルダの記録は残し、ノートの表を足す（取り外したドライブなど、読み直せないフォルダの資料も残す）。
+            // 表を足すことと版を上げることは、1 つの書き込みで行う
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(SCHEMA_NOTES)?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            tx.commit()?;
+        } else if version != SCHEMA_VERSION {
             // 索引は作り直せるので、形が違えば捨てて作る
-            conn.execute_batch("DROP TABLE IF EXISTS docs; DROP TABLE IF EXISTS bindings; DROP TABLE IF EXISTS notes;")?;
-            conn.execute_batch(SCHEMA)?;
-            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("DROP TABLE IF EXISTS docs; DROP TABLE IF EXISTS bindings; DROP TABLE IF EXISTS notes;")?;
+            tx.execute_batch(SCHEMA)?;
+            tx.execute_batch(SCHEMA_NOTES)?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            tx.commit()?;
         }
         Ok(Self { conn, path, epoch })
     }
@@ -432,12 +449,14 @@ impl SearchIndex {
         let rows = stmt.query_map(params_from_iter(terms.iter()), |row| {
             let name_only: bool = row.get(5)?;
             let body: String = row.get(4)?;
+            let cut = if name_only { None } else { cut_excerpt(&body, &terms, EXCERPT_CHARS) };
             Ok(Hit {
                 path: PathBuf::from(row.get::<_, String>(0)?),
                 folder: PathBuf::from(row.get::<_, String>(1)?),
                 title: row.get(2)?,
                 file_name: row.get(3)?,
-                excerpt: if name_only { None } else { excerpt(&body, &terms, EXCERPT_CHARS) },
+                send_excerpt: cut.as_ref().map(|c| c.send.clone()),
+                excerpt: cut.map(|c| c.text),
                 modified: row.get(6)?,
                 matched_terms: row.get::<_, i64>(7)? as usize,
                 named: row.get(8)?,
@@ -484,6 +503,8 @@ pub struct NoteHit {
     pub created_at: i64,
     /// 一致した部分の前後と、その部分の種類（題名だけに一致したときは None）
     pub excerpt: Option<(NotePart, String)>,
+    /// AI に送る抜粋（[`Hit::send_excerpt`] と同じ作り方）
+    pub send_excerpt: Option<String>,
     pub matched_terms: usize,
     /// 題名に一致したか
     pub in_title: bool,
@@ -539,7 +560,19 @@ impl SearchIndex {
     /// 検索語のどれかを、題名・自分のメモ・議事録・文字起こしに含むノート（`exclude` のノートは除く）。
     /// 並びは、一致した検索語の数、題名に一致したか、作成日時の新しさの順。
     /// 資料の検索（[`SearchIndex::search`]）と同じく、消去待ちの索引と、古い世代の接続からは何も返さない。
-    pub fn search_notes(&self, terms: &[String], exclude: Option<&str>, limit: usize) -> Result<Vec<NoteHit>> {
+    pub fn search_notes(&self, terms: &[String], exclude: &[String], limit: usize) -> Result<Vec<NoteHit>> {
+        self.search_notes_by(terms, exclude, limit, |_| ())
+    }
+
+    /// [`SearchIndex::search_notes`] と同じく探し、一致したすべてのノートを `key` の大きい順に並べてから `limit` 件にする
+    /// （`key` が同じものは、[`SearchIndex::search_notes`] の並び）。抜粋は、残したノートにだけ作る。
+    pub fn search_notes_by<K: Ord>(
+        &self,
+        terms: &[String],
+        exclude: &[String],
+        limit: usize,
+        key: impl Fn(&NoteHit) -> K,
+    ) -> Result<Vec<NoteHit>> {
         // 検索を終えるまで、索引のファイルを消させない
         let epochs = EPOCHS.read().unwrap_or_else(|e| e.into_inner());
         if let Some(path) = self.path.as_deref() {
@@ -559,52 +592,87 @@ impl SearchIndex {
         };
         let matched = (1..=n).map(any).collect::<Vec<_>>().join(" + ");
         let titled = (1..=n).map(|i| format!("instr(norm_title, ?{i}) > 0")).collect::<Vec<_>>().join(" OR ");
-        let exclude_param = n + 1;
+        let excluded = if exclude.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE note_id NOT IN ({})", (n + 1..=n + exclude.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", "))
+        };
+        // 一致したノートは、本文を読まずにすべて並べる（時期の手がかりで上げるノートを、件数の上限で落とさないように）
         let sql = format!(
-            "SELECT note_id, title, created_at, memo, minutes, transcript, matched, titled FROM (
-               SELECT *, ({matched}) AS matched, ({titled}) AS titled FROM notes WHERE note_id != ?{exclude_param}
-             ) WHERE matched > 0 ORDER BY matched DESC, titled DESC, created_at DESC LIMIT {limit}"
+            "SELECT note_id, title, created_at, matched, titled FROM (
+               SELECT note_id, title, created_at, ({matched}) AS matched, ({titled}) AS titled FROM notes {excluded}
+             ) WHERE matched > 0 ORDER BY matched DESC, titled DESC, created_at DESC"
         );
-        let mut values: Vec<String> = terms.clone();
-        values.push(exclude.unwrap_or_default().to_string());
+        let values: Vec<&str> = terms.iter().map(String::as_str).chain(exclude.iter().map(String::as_str)).collect();
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
-            let parts = [
-                (NotePart::Memo, row.get::<_, String>(3)?),
-                (NotePart::Minutes, row.get::<_, String>(4)?),
-                (NotePart::Transcript, row.get::<_, String>(5)?),
-            ];
             Ok(NoteHit {
                 note_id: row.get(0)?,
                 title: row.get(1)?,
                 created_at: row.get(2)?,
-                excerpt: note_excerpt(&parts, &terms),
-                matched_terms: row.get::<_, i64>(6)? as usize,
-                in_title: row.get(7)?,
+                excerpt: None,
+                send_excerpt: None,
+                matched_terms: row.get::<_, i64>(3)? as usize,
+                in_title: row.get(4)?,
             })
         })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        let mut hits: Vec<NoteHit> = rows.collect::<std::result::Result<_, _>>()?;
+        // 並べ替えは安定なので、鍵が同じものは、一致した検索語の数などの並びのまま
+        hits.sort_by_cached_key(|hit| std::cmp::Reverse(key(hit)));
+        hits.truncate(limit);
+        let mut body = self.conn.prepare("SELECT memo, minutes, transcript FROM notes WHERE note_id = ?1")?;
+        for hit in &mut hits {
+            let parts = body.query_row([&hit.note_id], |row| {
+                Ok([
+                    (NotePart::Memo, row.get::<_, String>(0)?),
+                    (NotePart::Minutes, row.get::<_, String>(1)?),
+                    (NotePart::Transcript, row.get::<_, String>(2)?),
+                ])
+            })?;
+            if let Some((part, cut)) = note_excerpt(&parts, &terms) {
+                hit.excerpt = Some((part, cut.text));
+                hit.send_excerpt = Some(cut.send);
+            }
+        }
+        Ok(hits)
     }
 }
 
-/// 一致した検索語が最も多い部分（メモ・議事録・文字起こしの順に優先）の抜粋。
-fn note_excerpt(parts: &[(NotePart, String)], terms: &[String]) -> Option<(NotePart, String)> {
-    let count = |text: &str| {
-        let normalized = normalize(text);
-        terms.iter().filter(|t| normalized.contains(t.as_str())).count()
-    };
-    let (part, text) = parts
+/// 一致した語が最も集まっている部分（600 文字の中の一致の多さで比べる。同じならメモ・議事録・文字起こしの順に優先）の抜粋。
+fn note_excerpt(parts: &[(NotePart, String)], terms: &[String]) -> Option<(NotePart, Excerpt)> {
+    parts
         .iter()
-        .map(|(part, text)| (count(text), part, text))
-        .filter(|(n, _, _)| *n > 0)
-        .max_by_key(|(n, part, _)| (*n, std::cmp::Reverse(**part as u8)))
-        .map(|(_, part, text)| (*part, text))?;
-    excerpt(text, terms, EXCERPT_CHARS).map(|e| (part, e))
+        .filter_map(|(part, text)| {
+            let (score, cut) = scored_excerpt(text, terms, EXCERPT_CHARS)?;
+            (score.0 > 0).then_some((score, *part, cut))
+        })
+        .max_by_key(|(score, part, _)| (*score, std::cmp::Reverse(*part as u8)))
+        .map(|(_, part, cut)| (part, cut))
 }
+
+/// 切り出した抜粋: 画面に出すもの（`text`）と、AI に送るもの（`send`。URL のクエリとフラグメントを除いたもの）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Excerpt {
+    pub text: String,
+    pub send: String,
+}
+
+/// 抜粋の範囲の一致の多さ（異なる検索語の数、一致の数）。大きいほど、よく一致している。
+type Score = (usize, usize);
 
 /// 中身のうち、検索語（正規化したもの）が最も集まっている部分の前後を、`max_chars` 文字までで返す。
 /// 中身に検索語がなければ（題名やファイル名だけに一致したとき）、先頭から返す。
 pub fn excerpt(body: &str, terms: &[String], max_chars: usize) -> Option<String> {
+    cut_excerpt(body, terms, max_chars).map(|cut| cut.text)
+}
+
+/// [`excerpt`] と同じ範囲を、画面に出す形と AI に送る形の両方で返す。
+pub fn cut_excerpt(body: &str, terms: &[String], max_chars: usize) -> Option<Excerpt> {
+    scored_excerpt(body, terms, max_chars).map(|(_, cut)| cut)
+}
+
+/// 抜粋と、その範囲の一致の多さ。
+fn scored_excerpt(body: &str, terms: &[String], max_chars: usize) -> Option<(Score, Excerpt)> {
     // 空白をまとめてから切り出す（空白が続く部分で、文字数の上限を使い切らないように）
     let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
     let original: Vec<char> = body.chars().collect();
@@ -613,9 +681,9 @@ pub fn excerpt(body: &str, terms: &[String], max_chars: usize) -> Option<String>
     }
     let (normalized, map) = normalize_with_map(&body);
     let normalized: Vec<char> = normalized.chars().collect();
-    // 一致した位置（元の文字の位置。始まりと終わり）
-    let mut hits: Vec<(usize, usize)> = Vec::new();
-    for term in terms {
+    // 一致した位置（元の文字の位置。始まりと終わり）と、どの検索語か
+    let mut hits: Vec<(usize, usize, usize)> = Vec::new();
+    for (index, term) in terms.iter().enumerate() {
         let needle: Vec<char> = term.chars().collect();
         if needle.is_empty() || needle.len() > normalized.len() {
             continue;
@@ -626,7 +694,7 @@ pub fn excerpt(body: &str, terms: &[String], max_chars: usize) -> Option<String>
         while i + needle.len() <= normalized.len() && found < MAX_HITS_PER_TERM {
             if normalized[i..i + needle.len()] == needle[..] {
                 let end = map.get(i + needle.len()).copied().unwrap_or(original.len());
-                hits.push((map[i], end));
+                hits.push((map[i], end, index));
                 found += 1;
                 i += needle.len();
             } else {
@@ -635,31 +703,63 @@ pub fn excerpt(body: &str, terms: &[String], max_chars: usize) -> Option<String>
         }
     }
     hits.sort();
-    let (start, end) = if hits.is_empty() {
-        (0, original.len().min(max_chars))
-    } else {
-        // 幅 max_chars の中に入る一致の数が最も多い並びを選ぶ
-        let mut best = (0, 0, 0); // (数, 最初, 最後)
-        let mut last = 0;
-        for first in 0..hits.len() {
-            last = last.max(first);
-            while last + 1 < hits.len() && hits[last + 1].1 - hits[first].0 <= max_chars {
-                last += 1;
-            }
-            let count = last - first + 1;
-            if count > best.0 {
-                best = (count, first, last);
-            }
+    let (score, start, end) = match densest(&hits, terms.len(), max_chars) {
+        None => ((0, 0), 0, original.len().min(max_chars)),
+        Some((score, first, last)) => {
+            let (from, to) = (hits[first].0, hits[last].1.max(hits[first].1));
+            let center = (from + to) / 2;
+            let start = center.saturating_sub(max_chars / 2);
+            let end = (start + max_chars).min(original.len());
+            (score, end.saturating_sub(max_chars), end)
         }
-        let (from, to) = (hits[best.1].0, hits[best.2].1.max(hits[best.1].1));
-        let center = (from + to) / 2;
-        let start = center.saturating_sub(max_chars / 2);
-        let end = (start + max_chars).min(original.len());
-        (end.saturating_sub(max_chars), end)
     };
+    // 前後の空白を除く
+    let mut start = start;
+    let mut end = end;
+    while start < end && original[start].is_whitespace() {
+        start += 1;
+    }
+    while end > start && original[end - 1].is_whitespace() {
+        end -= 1;
+    }
+    if start == end {
+        return None;
+    }
+    // URL は本文の中で見つける（抜粋の端で URL が切れても、クエリとフラグメントを送らないように）
+    let spans = url::query_spans(&original);
     let text: String = original[start..end].iter().collect();
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_string())
+    let send = url::without_spans(&original, start, end, &spans).trim().to_string();
+    Some((score, Excerpt { text, send }))
+}
+
+/// 幅 `max_chars` の中に入る一致の並びのうち、異なる検索語の数、一致の数の順に最も多いもの（多さ、最初、最後）。
+fn densest(hits: &[(usize, usize, usize)], terms: usize, max_chars: usize) -> Option<(Score, usize, usize)> {
+    let mut best: Option<(Score, usize, usize)> = None;
+    let mut counts = vec![0usize; terms];
+    let mut distinct = 0;
+    // 窓に入っている一致は hits[first..next]
+    let mut next = 0;
+    for first in 0..hits.len() {
+        if next <= first {
+            next = first;
+        }
+        while next < hits.len() && (next == first || hits[next].1 - hits[first].0 <= max_chars) {
+            counts[hits[next].2] += 1;
+            if counts[hits[next].2] == 1 {
+                distinct += 1;
+            }
+            next += 1;
+        }
+        let score = (distinct, next - first);
+        if best.is_none_or(|(b, _, _)| score > b) {
+            best = Some((score, first, next - 1));
+        }
+        counts[hits[first].2] -= 1;
+        if counts[hits[first].2] == 0 {
+            distinct -= 1;
+        }
+    }
+    best
 }
 
 #[cfg(test)]
@@ -686,7 +786,7 @@ mod tests {
         index.upsert_note(&note("b", "週次", 200, "", "## 決定事項\n- 予算はＡ案", "")).unwrap();
         index.upsert_note(&note("c", "採用", 300, "", "", "予算の話をしました")).unwrap();
         index.upsert_note(&note("rec", "録音中", 400, "予算", "", "")).unwrap();
-        let hits = index.search_notes(&terms(&["予算"]), Some("rec"), 8).unwrap();
+        let hits = index.search_notes(&terms(&["予算"]), &["rec".to_string()], 8).unwrap();
         let ids: Vec<&str> = hits.iter().map(|h| h.note_id.as_str()).collect();
         assert_eq!(ids, ["a", "c", "b"], "題名に一致したもの、作成日時の新しいものの順。録音中のノートは除く");
         let kind = |id: &str| hits.iter().find(|h| h.note_id == id).unwrap().excerpt.as_ref().map(|(p, _)| p.label());
@@ -695,7 +795,7 @@ mod tests {
         assert_eq!(kind("c"), Some("文字起こし"));
         assert!(hits[2].excerpt.as_ref().unwrap().1.contains("予算はＡ案"));
         // 題名だけに一致したら、抜粋はない
-        assert_eq!(index.search_notes(&terms(&["定例"]), None, 8).unwrap()[0].excerpt, None);
+        assert_eq!(index.search_notes(&terms(&["定例"]), &[], 8).unwrap()[0].excerpt, None);
 
         index.remove_note("a").unwrap();
         assert_eq!(index.count_notes().unwrap(), 3);
@@ -882,17 +982,24 @@ mod tests {
         index.upsert_note(&note("a", "予算の定例", 1, "予算", "", "")).unwrap();
         let reader = SearchIndex::open_existing(&path).unwrap();
         assert!(reader.is_current());
-        assert_eq!(reader.search_notes(&terms(&["予算"]), None, 8).unwrap().len(), 1);
+        assert_eq!(reader.search_notes(&terms(&["予算"]), &[], 8).unwrap().len(), 1);
 
         suspend_search(&path).unwrap();
-        assert!(reader.search_notes(&terms(&["予算"]), None, 8).unwrap().is_empty(), "消去待ちのあいだは探さない");
+        assert!(reader.search_notes(&terms(&["予算"]), &[], 8).unwrap().is_empty(), "消去待ちのあいだは探さない");
         resume_search(&path).unwrap();
-        assert_eq!(reader.search_notes(&terms(&["予算"]), None, 8).unwrap().len(), 1);
+        assert_eq!(reader.search_notes(&terms(&["予算"]), &[], 8).unwrap().len(), 1);
 
         index.close().unwrap();
-        remove_index_files(&path).unwrap();
+        // Windows では、検索用の接続が開いているとファイルを消せないことがある。消せなくても、それまでの接続からは探さない
+        let removed = remove_index_files(&path);
+        #[cfg(unix)]
+        removed.as_ref().unwrap();
         assert!(!reader.is_current(), "ファイルを消したら、開き直す");
-        assert!(reader.search_notes(&terms(&["予算"]), None, 8).unwrap().is_empty());
+        assert!(reader.search_notes(&terms(&["予算"]), &[], 8).unwrap().is_empty());
+        // 接続を閉じれば消せる
+        reader.close().unwrap();
+        remove_index_files(&path).unwrap();
+        assert!(index_files(&path).iter().all(|file| !file.exists()));
     }
 
     /// 索引のファイルを消す前に開いた接続は、消したファイルの中身を読み続けられても、検索に使わない
@@ -988,5 +1095,91 @@ mod tests {
         let body = format!("{}経費と精算と申請", format!("また{}", "ー".repeat(30)).repeat(MAX_HITS_PER_TERM + 10));
         let text = excerpt(&body, &terms(&["また", "経費", "精算", "申請"]), 20).unwrap();
         assert!(text.contains("経費と精算と申請"), "{text}");
+    }
+
+    /// 一致したノートをすべて鍵で並べてから件数を絞る（一致した語の少ないノートでも、鍵が大きければ残す）。抜粋は残したものだけに作る。
+    // [IDX-018]
+    #[test]
+    fn notes_are_ranked_by_the_key_before_the_limit() {
+        let index = SearchIndex::open_in_memory().unwrap();
+        for i in 0..9 {
+            index.upsert_note(&note(&format!("n{i}"), "採用", i, "予算 経費", "", "")).unwrap();
+        }
+        index.upsert_note(&note("prev", "週次定例", 100, "予算", "", "")).unwrap();
+        let plain = index.search_notes(&terms(&["予算", "経費"]), &[], 8).unwrap();
+        assert!(plain.iter().all(|h| h.note_id != "prev"), "一致した語が少ないので、鍵がなければ落ちる");
+        let ranked = index.search_notes_by(&terms(&["予算", "経費"]), &[], 8, |h| h.title == "週次定例").unwrap();
+        assert_eq!(ranked.len(), 8);
+        assert_eq!(ranked[0].note_id, "prev");
+        assert!(ranked[0].excerpt.is_some());
+        assert_eq!(ranked[1].note_id, "n8", "鍵が同じものは、一致した語の数・新しさの順");
+        let excluded = index.search_notes(&terms(&["予算"]), &["prev".to_string(), "n8".to_string()], 20).unwrap();
+        assert!(excluded.iter().all(|h| h.note_id != "prev" && h.note_id != "n8"), "除くノートは返さない");
+        assert_eq!(excluded.len(), 8);
+    }
+
+    /// ノートの抜粋は、600 文字の中の一致の多さで部分を選ぶ（部分全体の語の数では選ばない）。
+    // [IDX-015][IDX-019]
+    #[test]
+    fn note_excerpt_prefers_the_part_with_the_densest_window() {
+        let parts = |memo: &str, minutes: &str| [(NotePart::Memo, memo.to_string()), (NotePart::Minutes, minutes.to_string()), (NotePart::Transcript, String::new())];
+        let t = terms(&["予算", "経費"]);
+        let (part, cut) = note_excerpt(&parts("予算の確認", "予算は据え置き。予算の内訳。予算の上限。"), &t).unwrap();
+        assert_eq!(part, NotePart::Minutes, "同じ語が多く集まっている部分");
+        assert!(cut.text.contains("予算の上限"));
+        let far = format!("予算{}経費", "あ".repeat(EXCERPT_CHARS + 10));
+        let (part, _) = note_excerpt(&parts(&far, "予算と経費"), &t).unwrap();
+        assert_eq!(part, NotePart::Minutes, "遠く離れた語は、同じ範囲に入らない");
+        let (part, _) = note_excerpt(&parts("予算", "予算"), &t).unwrap();
+        assert_eq!(part, NotePart::Memo, "同じなら、メモを優先");
+    }
+
+    /// 抜粋の端で URL が切れても、本文の中で見つけた URL のクエリとフラグメントは送らない。
+    // [CMP-043][IDX-015]
+    #[test]
+    fn excerpts_to_send_drop_url_queries_found_in_the_whole_body() {
+        let body = format!("https://wiki.example.com/page?token=SECRET&id=1 を見る。{}経費の申請", "あ".repeat(EXCERPT_CHARS - 30));
+        let cut = cut_excerpt(&body, &terms(&["経費"]), EXCERPT_CHARS).unwrap();
+        assert!(!cut.text.starts_with("https://"), "抜粋の左端が URL の途中: {}", &cut.text[..40]);
+        assert!(cut.text.contains("SECRET"), "画面に出す抜粋はそのまま");
+        assert!(!cut.send.contains("SECRET") && !cut.send.contains("id=1"), "{}", cut.send);
+        assert!(cut.send.ends_with("経費の申請"));
+
+        let index = SearchIndex::open_in_memory().unwrap();
+        bound(&index, "/r");
+        index.upsert(Path::new("/r"), &entry("/r/a.txt", 1), &content(None, "手順は HTTPS://Wiki.example.com/x?Sig=abc#top を見る")).unwrap();
+        let hit = &index.search(&terms(&["手順"]), 8).unwrap()[0];
+        assert_eq!(hit.send_excerpt.as_deref(), Some("手順は HTTPS://Wiki.example.com/x を見る"));
+        index.upsert_note(&note("a", "定例", 1, "手順 https://a.example.com/b?k=1", "", "")).unwrap();
+        let note = &index.search_notes(&terms(&["手順"]), &[], 8).unwrap()[0];
+        assert_eq!(note.send_excerpt.as_deref(), Some("手順 https://a.example.com/b"));
+    }
+
+    /// 版 3（ノートの表がない）の索引は、資料とフォルダの記録を残したまま、ノートの表を足す。
+    // [IDX-009][IDX-010][IDX-012]
+    #[test]
+    fn version_three_index_keeps_documents_and_bindings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(INDEX_FILE);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION_WITHOUT_NOTES).unwrap();
+            let index = SearchIndex { conn, path: None, epoch: 0 };
+            bound(&index, "/r");
+            index.upsert(Path::new("/r"), &entry("/r/a.txt", 1), &content(None, "経費")).unwrap();
+        }
+        let index = SearchIndex::open(&path).unwrap();
+        assert_eq!(paths(&index.search(&terms(&["経費"]), 8).unwrap()), ["/r/a.txt"], "資料を残す");
+        assert!(index.binding(Path::new("/r")).unwrap().is_some(), "フォルダの記録を残す");
+        index.upsert_note(&note("n", "定例", 1, "経費", "", "")).unwrap();
+        assert_eq!(index.search_notes(&terms(&["経費"]), &[], 8).unwrap().len(), 1, "ノートの表を足す");
+        let version: i64 = index.conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        // 知らない版は、捨てて作り直す
+        index.conn.pragma_update(None, "user_version", 2).unwrap();
+        drop(index);
+        assert_eq!(SearchIndex::open(&path).unwrap().count().unwrap(), 0);
     }
 }
