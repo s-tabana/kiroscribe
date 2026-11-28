@@ -63,6 +63,8 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
 
   /** 保存されている設定（画面の外で変わったときに、どの項目が変わったかを知るため） */
   const saved = useRef<Settings | null>(null);
+  /** 読み込みか保存の後に、この画面で書き換えた項目。画面の外の変更と保存の応答では、これらの項目を上書きしない */
+  const edited = useRef(new Set<keyof Settings>());
 
   useEffect(() => {
     Promise.all([backend.getSettings(), backend.getApiKeyStatus()])
@@ -77,19 +79,21 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
 
   // 設定画面を開いている間に、タスクトレイのメニューで設定が変わったら、変わった項目だけを表示に反映する
   // （反映しないと、古い表示のまま「設定を保存」を押したときに、トレイでの切り替えが元に戻ってしまう）。
-  // この画面で書きかけている、ほかの項目は変えない
+  // この画面で書きかけている項目は変えない
   useEffect(
     () =>
       backend.onSettingsChanged((next) => {
         const before = saved.current;
         saved.current = next;
-        const changed = (key: keyof Settings) => !before || JSON.stringify(before[key]) !== JSON.stringify(next[key]);
-        if (changed("extraBrowsers")) setBrowsersText(formatBrowsers(next.extraBrowsers));
+        const keep = new Set(edited.current);
+        const apply = (key: keyof Settings) =>
+          !keep.has(key) && (!before || JSON.stringify(before[key]) !== JSON.stringify(next[key]));
+        if (apply("extraBrowsers")) setBrowsersText(formatBrowsers(next.extraBrowsers));
         setSettings((shown) => {
           if (!shown || !before) return next;
           const merged = { ...shown };
           for (const key of Object.keys(next) as (keyof Settings)[]) {
-            if (changed(key)) Object.assign(merged, { [key]: next[key] });
+            if (apply(key)) Object.assign(merged, { [key]: next[key] });
           }
           return merged;
         });
@@ -109,19 +113,32 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, helpTab]);
 
-  const update = <K extends keyof Settings>(key: K, value: Settings[K]) =>
+  const update = <K extends keyof Settings>(key: K, value: Settings[K]) => {
+    edited.current.add(key);
     setSettings((prev) => (prev ? { ...prev, [key]: value } : prev));
+  };
 
   const save = async () => {
     if (!settings) return;
     setSaving(true);
+    // 送った後に書き換えた項目だけを、保存の応答で上書きしないために残す
+    const sent = new Set(edited.current);
+    edited.current.clear();
     try {
       const stored = await backend.saveSettings(settings);
       saved.current = stored;
-      setSettings(stored);
-      setBrowsersText(formatBrowsers(stored.extraBrowsers));
+      const keep = new Set(edited.current);
+      setSettings((shown) => {
+        if (!shown) return stored;
+        const merged = { ...stored };
+        for (const key of keep) Object.assign(merged, { [key]: shown[key] });
+        return merged;
+      });
+      if (!keep.has("extraBrowsers")) setBrowsersText(formatBrowsers(stored.extraBrowsers));
       setMessage({ kind: "ok", text: "設定を保存しました" });
     } catch (err) {
+      // 保存できなかった項目は、書きかけのままとして扱う
+      for (const key of sent) edited.current.add(key);
       setMessage({ kind: "error", text: errorMessage(err) });
     } finally {
       setSaving(false);
@@ -262,7 +279,8 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
                   </label>
                   <label className="field field-after-check">
                     <span>判定に足すブラウザ</span>
-                    <input
+                    <textarea
+                      rows={2}
                       value={browsersText}
                       placeholder="例: mybrowser.exe"
                       onChange={(e) => {
@@ -272,7 +290,7 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
                     />
                     <small className="field-hint">
                       {"ブラウザの会議（Google Meet など）は、Chrome・Edge・Firefox・Zen・Brave などで検出します。" +
-                        "一覧にないブラウザを使うときは、その実行ファイルの名前を「,」で区切って入力します。"}
+                        "一覧にないブラウザを使うときは、その実行ファイルの名前を「,」か改行で区切って入力します。"}
                     </small>
                   </label>
                   <label className="check">

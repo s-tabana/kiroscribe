@@ -545,6 +545,7 @@ kbd {
 
 .field input,
 .field select,
+.field textarea,
 .api-key-form input {
   height: 36px;
   padding: 0 10px;
@@ -558,6 +559,7 @@ kbd {
 
 .field input:focus,
 .field select:focus,
+.field textarea:focus,
 .api-key-form input:focus {
   border-color: var(--accent);
 }
@@ -577,6 +579,13 @@ kbd {
 
 .field-after-check {
   margin-top: 14px;
+}
+
+.field textarea {
+  height: auto;
+  padding: 8px 10px;
+  line-height: 1.5;
+  resize: vertical;
 }
 
 .field-hint {

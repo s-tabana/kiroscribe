@@ -154,7 +154,7 @@ Teams の印は、実機で測っていない（未測定）。実機での確�
 
 - **MTG-001** ［単体］ 会議の検出は、組み込みの判定表（「判定表」の節）で行う。判定表の印は、対象のアプリ（判定表の `apps` に書いた実行ファイルと、対象のブラウザ）の窓・窓の中の部品・オーディオのセッションだけを見る。実行ファイルの名前は、大文字小文字を区別しない。
 - **MTG-002** ［単体］ 対象のブラウザは、Chromium 系の chrome.exe・msedge.exe・brave.exe・vivaldi.exe・opera.exe・opera_gx.exe・arc.exe・thorium.exe・chromium.exe・supermium.exe・browser.exe（Yandex Browser）・whale.exe・comet.exe・dia.exe・atlas.exe・sidekick.exe・island.exe・duckduckgo.exe と、Firefox 系の firefox.exe・zen.exe・floorp.exe・librewolf.exe・waterfox.exe・mullvadbrowser.exe。設定で足したブラウザ（SET-021）も、この一覧のブラウザと同じに扱う。一覧にも設定にもないアプリは、版情報や子プロセスからブラウザと推定しない。
-- **MTG-003** ［単体］ 判定表にないアプリ（音声入力・録音のアプリ、Thunderbird など）のマイクの使用と再生の音は、会議の印にしない。ブラウザのマイクの使用と再生の音も、会議の窓か部品の印がない窓だけでは、会議の印にしない。会議アプリと一緒に入る更新・起動のためのプロセス（Slack の update.exe、Teams の ms-teamsupdate.exe・msteams_autostarter.exe）と、ほかのアプリも使う部品（msedgewebview2.exe、Zoom の SDK 用の zcscpthost.exe）も、対象にしない。
+- **MTG-003** ［単体］ 判定表にないアプリ（音声入力・録音のアプリ、Thunderbird など）のマイクの使用と再生の音は、会議の印にしない。ブラウザのマイクの使用と再生の音も、会議の窓か部品の印がない窓だけでは、会議の印にしない。会議アプリと一緒に入る更新・起動のためのプロセス（Slack の update.exe、Teams の ms-teamsupdate.exe・msteams_autostarter.exe）と、ほかのアプリも使う部品（msedgewebview2.exe、Zoom の SDK 用の zcscpthost.exe）も、対象にしない。これらは、設定で足すブラウザ（SET-021）に書いても対象にしない。
 - **MTG-004** ［単体］ 印は、同じ文脈（窓 1 つ、ブラウザでは表示中のタブ。またはデスクトップの会議アプリ 1 つ）の中だけで組み合わせる。別の窓の退出ボタンで、待機画面の窓の会議を始めない。打ち消しの印は、その印のある窓の文脈だけに効く（Edge の待機画面の参加ボタンで、Zen で続いている会議を終えない）。
 - **MTG-005** ［単体］ Kiroscribe 自身のオーディオのセッション（録音中）と窓は、判定に入れない。
 - **MTG-006** ［単体］ 部品の印は、判定表の種類（既定は Button）の部品だけで立つ。名前に除外の語を含む部品では立たない（Slack の環境設定のチェックボックス「ハドルミーティングから自動的に退出する」や、名前に「自動的に」を含むボタンでは、参加中にしない）。

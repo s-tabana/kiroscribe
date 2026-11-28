@@ -70,6 +70,12 @@ fn expected_app(name: &str) -> Option<MeetingApp> {
     }
 }
 
+/// 引数の値を取る。値がないときと、次の引数（`--` で始まるもの）しかないときは、`missing` を返す
+/// （`--browser --once` の `--once` を名前として取らない）。
+fn value(args: &mut impl Iterator<Item = String>, missing: &str) -> Result<String, String> {
+    args.next().filter(|value| !value.starts_with("--")).ok_or_else(|| missing.to_string())
+}
+
 fn options(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
     let mut options = Options {
         once: false,
@@ -88,8 +94,8 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
             "--titles" => options.titles = true,
             "--require-sessions" => options.require_sessions = true,
             "--help" | "-h" => options.help = true,
-            "--output" => options.output = Some(args.next().ok_or("--output には書き出す先を指定してください")?.into()),
-            "--browser" => options.browsers.push(args.next().ok_or("--browser にはブラウザの実行ファイルの名前を指定してください")?),
+            "--output" => options.output = Some(value(&mut args, "--output には書き出す先を指定してください")?.into()),
+            "--browser" => options.browsers.push(value(&mut args, "--browser にはブラウザの実行ファイルの名前を指定してください")?),
             "--expect" => {
                 let app = args
                     .next()
@@ -340,6 +346,11 @@ mod tests {
         let parsed = options(["--browser", "MyBrowser", "--browser", "other.exe"].map(String::from)).unwrap();
         assert_eq!(Browsers::with_extra(&parsed.browsers).extra(), ["mybrowser.exe", "other.exe"]);
         assert!(options(["--browser"].map(String::from)).is_err());
+        // 次の引数を名前として取らない
+        let error = options(["--browser", "--once"].map(String::from)).err().unwrap();
+        assert!(error.contains("--browser には"), "{error}");
+        assert!(options(["--once", "--browser", "--require-sessions"].map(String::from)).is_err());
+        assert!(options(["--output", "--once"].map(String::from)).is_err());
     }
 
     #[test]

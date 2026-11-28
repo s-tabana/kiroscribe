@@ -90,7 +90,18 @@ pub const BROWSERS: &[&str] = &[
     "mullvadbrowser.exe",
 ];
 
-/// 判定の対象のブラウザ: 組み込みの一覧（[`BROWSERS`]）と、設定で足したもの（SET-021）。
+/// ブラウザとして扱わないプロセス（実行ファイルの名前、小文字）。設定で足しても対象にしない（SET-021）。
+/// Kiroscribe 自身と、MTG-003 で対象にしない、会議アプリと一緒に入る更新・起動のためのプロセスと、ほかのアプリも使う部品。
+pub const NOT_BROWSERS: &[&str] = &[
+    "kiroscribe.exe",
+    "update.exe",
+    "ms-teamsupdate.exe",
+    "msteams_autostarter.exe",
+    "msedgewebview2.exe",
+    "zcscpthost.exe",
+];
+
+/// 判定の対象のブラウザ: 組み込みの一覧（[`BROWSERS`]）と、設定で足したもの（SET-021）。[`NOT_BROWSERS`] は含めない。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Browsers {
     extra: Vec<String>,
@@ -115,7 +126,7 @@ impl Browsers {
     /// 対象のブラウザか（実行ファイルの名前。大文字小文字は区別しない）。
     pub fn contains(&self, exe: &str) -> bool {
         let exe = exe.to_lowercase();
-        BROWSERS.contains(&exe.as_str()) || self.extra.contains(&exe)
+        !NOT_BROWSERS.contains(&exe.as_str()) && (BROWSERS.contains(&exe.as_str()) || self.extra.contains(&exe))
     }
 }
 
@@ -232,6 +243,21 @@ mod tests {
         }
         assert!(!browsers.contains("kiroscribe.exe") && !browsers.contains("thunderbird.exe"));
         assert!(Browsers::with_extra(&[]).extra().is_empty());
+    }
+
+    /// MTG-003 で対象にしないプロセスは、設定で足してもブラウザとして扱わない。
+    // [MTG-003][SET-021]
+    #[test]
+    fn processes_excluded_by_mtg_003_cannot_be_added_as_browsers() {
+        let names: Vec<String> = NOT_BROWSERS.iter().map(|exe| exe.to_uppercase()).chain(["MSEdgeWebView2".into(), "update".into()]).collect();
+        let browsers = Browsers::with_extra(&names);
+        assert!(browsers.extra().is_empty(), "{:?}", browsers.extra());
+        // 整える前の名前が混ざっても（保存の経路を通らない場合）、判定では対象にしない
+        let browsers = Browsers { extra: NOT_BROWSERS.iter().map(|exe| exe.to_string()).collect() };
+        for exe in NOT_BROWSERS {
+            assert!(!browsers.contains(exe), "{exe}");
+            assert!(!browsers.contains(&exe.to_uppercase()), "{exe}");
+        }
     }
 
     /// 検出が調べるのは PC の中だけ: 通信・録音・文字起こし・画面の取り込みの部品を、検出の部品は使わない。

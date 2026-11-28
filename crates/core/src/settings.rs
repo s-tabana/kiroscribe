@@ -81,7 +81,8 @@ pub const MAX_EXTRA_BROWSERS: usize = 20;
 pub const MAX_BROWSER_NAME_CHARS: usize = 64;
 
 /// 判定に足すブラウザの名前を整える（SET-021）: 前後の空白とフォルダの部分を除き、小文字にし、
-/// 末尾が .exe でなければ .exe を付ける。空の名前・長すぎる名前・Kiroscribe 自身・重複は除き、20 個までにする。
+/// 末尾が .exe でなければ .exe を付ける。空の名前・長すぎる名前・ブラウザとして扱わないプロセス
+/// （Kiroscribe 自身と MTG-003 で対象にしないもの。[`crate::meetings::NOT_BROWSERS`]）・重複は除き、20 個までにする。
 pub fn normalize_browsers(names: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for name in names {
@@ -91,7 +92,7 @@ pub fn normalize_browsers(names: &[String]) -> Vec<String> {
             continue;
         }
         let name = if name.ends_with(".exe") { name } else { format!("{name}.exe") };
-        if name.chars().count() > MAX_BROWSER_NAME_CHARS || name == "kiroscribe.exe" || out.contains(&name) {
+        if name.chars().count() > MAX_BROWSER_NAME_CHARS || crate::meetings::NOT_BROWSERS.contains(&name.as_str()) || out.contains(&name) {
             continue;
         }
         out.push(name);
@@ -254,6 +255,11 @@ mod tests {
             "",
             "Kiroscribe.exe",
             "D:/Tools/third.exe",
+            r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\msedgewebview2.exe",
+            "Update.exe",
+            "ms-teamsupdate",
+            "msteams_autostarter.exe",
+            "ZCSCPTHOST.EXE",
         ];
         let saved = db
             .save_settings(Settings { extra_browsers: names.iter().map(|n| n.to_string()).collect(), ..Default::default() })
