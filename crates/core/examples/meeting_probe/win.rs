@@ -34,7 +34,7 @@ use windows::Win32::UI::Accessibility::{
 };
 
 use crate::signals::{
-    control_category, is_target_exe, AudioSession, AudioSnapshot, Control, Endpoint, Flow, UiaScan, UiaWindow,
+    control_category, is_listed_window, is_target_exe, AudioSession, AudioSnapshot, Control, Endpoint, Flow, UiaScan, UiaWindow,
     WindowSnapshot,
 };
 
@@ -231,6 +231,7 @@ fn process_identity(pid: u32) -> (String, Option<String>) {
 }
 
 /// 会議アプリとブラウザの、トップレベルの窓。見えない窓は、名前のあるものだけ（名前のない裏の窓は数が多いため）。
+/// 入力方式（IME）の見えない窓は除く。
 pub fn list_windows() -> Vec<WindowSnapshot> {
     use windows_sys::Win32::UI::WindowsAndMessaging::EnumWindows;
     let mut handles: Vec<usize> = Vec::new();
@@ -283,12 +284,16 @@ unsafe fn window(hwnd: usize, names: &mut HashMap<u32, String>) -> Option<Window
     }
     let mut class = [0u16; 256];
     let class_len = GetClassNameW(handle, class.as_mut_ptr(), class.len() as i32);
+    let class = utf16(&class, class_len);
+    if !is_listed_window(&class, visible) {
+        return None;
+    }
     let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     GetWindowRect(handle, &mut rect);
     Some(WindowSnapshot {
         hwnd,
         exe,
-        class: utf16(&class, class_len),
+        class,
         title,
         visible,
         minimized: IsIconic(handle) != 0,

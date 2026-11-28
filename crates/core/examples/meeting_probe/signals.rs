@@ -4,6 +4,9 @@
 //! 表示するのは、実行ファイルの名前・状態・数値・分類だけ。窓の名前・部品の名前・端点の名前は、
 //! `--titles` のときだけ出す（チャンネル名・参加者名・機器の持ち主の名前が含まれうるため）。
 
+// Windows 以外では読み取りがないので、表示の部品の多くはテストからしか使わない
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use std::collections::HashMap;
 
 use kiroscribe_core::meetings::{desktop_app, web_meeting};
@@ -20,8 +23,15 @@ pub fn is_target_exe(exe: &str) -> bool {
     desktop_app(&exe).is_some() || BROWSERS.contains(&exe.as_str())
 }
 
+/// どのプロセスにもある、入力方式（IME）の見えない窓のクラス名（会議の手がかりにならないので出さない）。
+const IME_CLASSES: &[&str] = &["IME", "MSCTFIME UI"];
+
+/// 出す窓か: 入力方式の見えない窓は出さない。
+pub fn is_listed_window(class: &str, visible: bool) -> bool {
+    visible || !IME_CLASSES.contains(&class)
+}
+
 /// 録音か再生か。
-#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flow {
     Capture,
@@ -557,5 +567,7 @@ mod tests {
             assert!(is_target_exe(exe), "{exe}");
         }
         assert!(!is_target_exe("notepad.exe"));
+        assert!(!is_listed_window("IME", false) && !is_listed_window("MSCTFIME UI", false));
+        assert!(is_listed_window("Chrome_WidgetWin_1", false) && is_listed_window("IME", true));
     }
 }
