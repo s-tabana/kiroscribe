@@ -43,31 +43,29 @@ function killTree(child) {
   });
 }
 
-/** マイクを使うだけのプログラムを、会議アプリの実行ファイルの名前で動かす */
-function startFakeApp(ctx, exeName) {
+/** マイクを使い、会議の窓を出すだけのプログラムを、会議アプリの実行ファイルの名前で動かす */
+function startFakeApp(ctx, exeName, windowArgs) {
   assert.ok(fs.existsSync(HOLD_MIC), `${HOLD_MIC} がありません（cargo build -p kiroscribe-core --example hold_mic）`);
   const dir = path.join(ctx.work.dir, "apps", path.parse(exeName).name);
   fs.mkdirSync(dir, { recursive: true });
   const exe = path.join(dir, exeName);
   fs.copyFileSync(HOLD_MIC, exe);
   const log = fs.openSync(ctx.work.file(`${exeName}.log`), "a");
-  const child = spawn(exe, ["120"], { stdio: ["ignore", log, log], windowsHide: true });
+  const child = spawn(exe, ["120", ...windowArgs], { stdio: ["ignore", log, log], windowsHide: true });
   fs.closeSync(log);
   return child;
 }
 
-/** 検出に失敗した時点のセッション、判定、ConsentStore と、テスト用プロセスの出力。 */
+/** 検出に失敗した時点の判定・窓・部品・セッション（確認用の道具の表示）と、テスト用プロセスの出力。 */
 function detectionDiagnostics(ctx) {
-  const probe = spawnSync(MEETING_PROBE, ["--once"], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
-  const sessionLog = [probe.stdout, probe.stderr, probe.error?.message].filter(Boolean).join("\n");
-  fs.writeFileSync(ctx.work.file("meeting-probe.log"), sessionLog);
-  const key = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone";
-  const registry = spawnSync("reg", ["query", key, "/s"], { encoding: "utf8", windowsHide: true }).stdout ?? "";
+  const probe = spawnSync(MEETING_PROBE, ["--once", "--titles"], { encoding: "utf8", windowsHide: true, timeout: 20_000 });
+  const probeLog = [probe.stdout, probe.stderr, probe.error?.message].filter(Boolean).join("\n");
+  fs.writeFileSync(ctx.work.file("meeting-probe.log"), probeLog);
   const logs = fs
     .readdirSync(ctx.work.dir)
     .filter((name) => name.endsWith(".exe.log"))
     .map((name) => `--- ${name} ---\n${fs.readFileSync(ctx.work.file(name), "utf8")}`);
-  return `--- meeting_probe ---\n${sessionLog}\n--- マイクの使用状況（${key}） ---\n${registry.split("\n").slice(-60).join("\n")}\n${logs.join("\n")}`;
+  return `--- meeting_probe ---\n${probeLog}\n${logs.join("\n")}`;
 }
 
 /** 会議が始まって、ポップアップとノートができ、録音が始まるまで待つ。できたノートのタイトルを返す */
@@ -98,17 +96,17 @@ async function waitForMeetingEnd(ctx, session) {
   }
 }
 
-for (const [exeName, label] of [
-  ["Zoom.exe", "Zoom"],
-  ["Discord.exe", "Discord"],
+for (const [exeName, label, windowArgs] of [
+  ["Zoom.exe", "Zoom", ["--window", "ZPContentViewWndClass"]],
+  ["Discord.exe", "Discord", ["--window", "HoldMicDiscordWindow", "--button", "Disconnect"]],
 ]) {
-  test(`[MTG-001][MTG-020][MTG-024] デスクトップの会議アプリ（${exeName}）がマイクを使い始めると録音を始め、使い終わると止める`, options, async (ctx) => {
+  test(`[MTG-001][MTG-020][MTG-024] デスクトップの会議アプリ（${exeName}）が会議の窓を出すと録音を始め、閉じると止める`, options, async (ctx) => {
     const session = await ctx.launch();
     // メインウィンドウを閉じて（トレイに残して）おく
     ctx.work.closeWindow("main");
     await session.waitUntil(async () => !(await ctx.app.isMainVisible()), { message: "メインウィンドウが隠れる" });
 
-    const app = startFakeApp(ctx, exeName);
+    const app = startFakeApp(ctx, exeName, windowArgs);
     try {
       await waitForMeetingStart(ctx, session, label);
       // 自分自身（録音中の Kiroscribe）がマイクを使っていても、会議の判定には入れない（会議アプリが止まれば終わる）
@@ -122,10 +120,11 @@ for (const [exeName, label] of [
   });
 }
 
-test("[MTG-002][MTG-020][MTG-024] ブラウザ（Edge）で「Meet - …」のページがマイクを使うと録音を始め、閉じると止める", { ...options, skip: options.skip || (!EDGE && "Edge がない") }, async (ctx) => {
-  // マイクを使うページ（localhost は安全な場所として扱われ、マイクを使える）
+test("[MTG-002][MTG-020][MTG-024] ブラウザ（Edge）で「Meet - …」の会議のページを開くと録音を始め、閉じると止める", { ...options, skip: options.skip || (!EDGE && "Edge がない") }, async (ctx) => {
+  // 退出ボタンがあり、マイクを使うページ（localhost は安全な場所として扱われ、マイクを使える）
   const page = `<!doctype html><meta charset="utf-8"><title>Meet - abc-defg-hij</title>
 <p id="state">マイクを準備しています</p>
+<button type="button">Leave call</button>
 <script>
 navigator.mediaDevices.getUserMedia({ audio: true })
   .then((stream) => { window.stream = stream; document.getElementById("state").textContent = "マイクを使っています"; })

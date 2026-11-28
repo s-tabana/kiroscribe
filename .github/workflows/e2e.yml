@@ -194,17 +194,18 @@ jobs:
           if (-not (Test-Path msedgedriver.exe)) { throw "msedgedriver.exe を取得できませんでした" }
           "KIROSCRIBE_E2E_NATIVE_DRIVER=$((Get-Item msedgedriver.exe).FullName)" >> $env:GITHUB_ENV
 
-      # hold_mic: マイクを開いたまま待つだけのプログラム。会議アプリの名前に写して、会議の検出を確かめる
-      # meeting_probe: 会議の検出の確認用の道具（オーディオのセッションの一覧と、判定を表示する）
+      # hold_mic: マイクを開き、会議の窓を出して待つだけのプログラム。会議アプリの名前に写して、会議の検出を確かめる
+      # meeting_probe: 会議の検出の確認用の道具（製品と同じ判定表の判定と、読んだ窓・部品・セッションを表示する）
       - name: E2E テスト用のアプリと、マイクを使うだけのプログラムのビルド
         run: |
           npm run build:e2e
           cargo build -p kiroscribe-core --example hold_mic --example meeting_probe --locked
 
-      # hold_mic を Zoom.exe の名前で動かし、オーディオのセッションに Active で現れ、Zoom の会議と判定することを、
-      # 確認用の道具で確かめる（Windows のオーディオのセッションを読む部分の確認。MTG-020）。
-      # セッションが現れるまでの遅れを見込み、2 秒ごとに 5 回まで調べる。失敗したときは、最後の表示を残す
-      - name: オーディオのセッションからの会議の検出の確認
+      # hold_mic を Zoom.exe の名前で、Zoom の会議の窓のクラス（ZPContentViewWndClass）の窓を出して動かし、
+      # 録音のセッションに Active で現れ、判定表で Zoom の会議の開始を確定することを、確認用の道具で確かめる
+      # （窓・オーディオのセッションを読む部分の確認。MTG-020・MTG-027）。
+      # 窓とセッションが現れるまでの遅れを見込み、2 秒ごとに 5 回まで調べる。失敗したときは、最後の表示を残す
+      - name: 窓とオーディオのセッションからの会議の検出の確認
         shell: pwsh
         run: |
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -212,7 +213,7 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP 'probe-zoom'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           Copy-Item target/debug/examples/hold_mic.exe (Join-Path $dir 'Zoom.exe')
-          $zoom = Start-Process -FilePath (Join-Path $dir 'Zoom.exe') -ArgumentList '30' -PassThru -WindowStyle Hidden
+          $zoom = Start-Process -FilePath (Join-Path $dir 'Zoom.exe') -ArgumentList '30', '--window', 'ZPContentViewWndClass' -PassThru
           try {
             $passed = $false
             foreach ($attempt in 1..5) {
@@ -221,12 +222,12 @@ jobs:
               $code = $LASTEXITCODE
               "--- $attempt 回目（終了コード $code）"
               $output
-              if ($code -eq 0 -and $output -match '(?m)^\s*active\s+zoom\.exe\b.*Zoom') {
+              if ($code -eq 0 -and $output -match '(?m)^\s*録音 active zoom\.exe' -and $output -match 'Zoom の会議の開始を確定') {
                 $passed = $true
                 break
               }
             }
-            if (-not $passed) { throw 'オーディオのセッションの Active の zoom.exe から、Zoom の会議と判定できませんでした（最後の表示を参照）' }
+            if (-not $passed) { throw 'Zoom の会議の窓と、録音のセッションの Active の zoom.exe から、Zoom の会議と判定できませんでした（最後の表示を参照）' }
           } finally {
             Stop-Process -Id $zoom.Id -Force -ErrorAction SilentlyContinue
           }
@@ -243,7 +244,7 @@ jobs:
         run: |
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           $probe = 'target/debug/examples/meeting_probe.exe'
-          if (Test-Path $probe) { & $probe --once } else { '確認用の道具がビルドされていません' }
+          if (Test-Path $probe) { & $probe --once --titles } else { '確認用の道具がビルドされていません' }
           exit 0
 
       - name: 失敗したテストのスクリーンショットとログを保存

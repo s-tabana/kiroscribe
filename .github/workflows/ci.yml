@@ -99,8 +99,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # 会議の検出の確認用の道具（crates/core/examples/meeting_probe.rs）。オーディオのセッションの一覧と、
-      # それを会議と判定したかを数秒ごとに表示する。配布の前に、実機で会議に入って確かめるために使う
+      # 会議の検出の確認用の道具（crates/core/examples/meeting_probe）。製品と同じ判定表で、窓・窓の中の部品・
+      # オーディオのセッションから立った印と、会議の開始・終了の判定を表示する。配布の前に、実機で会議に入って確かめるために使う
       - name: 会議の検出の確認用の道具のビルド
         run: cargo build -p kiroscribe-core --release --example meeting_probe --locked
 

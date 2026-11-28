@@ -1,8 +1,8 @@
-# 会議の検出の確認用の道具（crates/core/examples/meeting_probe.rs）だけを、Windows でビルドして成果物にする。
-# 配布の前に実機で確かめるとき、テストやインストーラを含む ci.yml の全体を待たずに作り直すためのもの。
+# 会議の検出の確認用の道具（crates/core/examples/meeting_probe）だけを、Windows でビルドして成果物にする。
+# 実機で確かめるとき、テストやインストーラを含む ci.yml の全体を待たずに作り直すためのもの。
 # 手動で動かすほか、会議の検出の部品か確認用の道具を変えたプルリクエストでも動く。
-# 会議中を示しうる手がかり（音の大きさ・窓・窓の中の部品・カメラ・目印・ファイルへの書き出し）が出ることも、
-# 合成のプログラムと模擬の会議のページで確かめる（signals ジョブ）。
+# 判定表の印（窓・窓の中の部品・録音と再生のセッション）が実際に読めて、製品と同じ判定になることも、
+# 合成のプログラムと模擬の会議のページで確かめる（rules ジョブ）。
 #
 # - Secret は使わない。
 # - アクションは、タグではなくコミットのハッシュで固定している（ci.yml と同じ）。
@@ -13,8 +13,11 @@ on:
   pull_request:
     paths:
       - crates/core/src/meetings.rs
-      - crates/core/src/mic_sessions.rs
-      - crates/core/src/mic_store.rs
+      - crates/core/src/meeting_facts.rs
+      - crates/core/src/meeting_rules.rs
+      - crates/core/src/meeting_rules.toml
+      - crates/core/src/meeting_judge.rs
+      - crates/core/src/audio_sessions.rs
       - crates/core/examples/meeting_probe/**
       - crates/core/Cargo.toml
       - crates/core/examples/hold_mic.rs
@@ -60,11 +63,12 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # 録音のストリームを止めたとき・閉じたとき・プロセスが終わったときに、オーディオのセッションの状態
-  # （Active・Inactive・Expired）がどう変わるかを、仮想のオーディオケーブル（VB-CABLE。e2e.yml と同じ）で確かめて表示する。
-  # hold_mic を Zoom.exe（ストリームを止めて待つ）と Discord.exe（ストリームを閉じて待つ）の名前で動かす
-  session-states:
-    name: オーディオのセッションの状態の変わり方（Windows）
+  # 判定表の印が実際に読めて、製品と同じ判定になることを確かめる。
+  # hold_mic を Slack.exe の名前で動かし（マイクを使い、既定の再生のデバイスに小さな音を流し、「退出」のボタンのある窓を出す）、
+  # Edge で模擬の Google Meet のページ（参加中: 退出のボタン。待機画面: 参加のボタン）を開く。
+  # マイクの許可の確認は、起動の引数（--use-fake-ui-for-media-stream）で自動で通す
+  rules:
+    name: 判定表の印と判定（Windows）
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -97,194 +101,82 @@ jobs:
       - name: ビルド
         run: cargo build -p kiroscribe-core --example hold_mic --example meeting_probe --locked
 
-      - name: セッションの状態の変わり方
-        shell: pwsh
-        run: |
-          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-          $probe = 'target/debug/examples/meeting_probe.exe'
-          # 確認用の道具を 1 回動かし、一覧を取れなかったら（終了コードが 0 でなければ）失敗にする
-          function Invoke-Probe([string]$label, [switch]$RequireActive) {
-            "=== $label"
-            $output = (& $probe --once --require-sessions) -join "`n"
-            $code = $LASTEXITCODE
-            $output
-            if ($code -ne 0) { throw "meeting_probe が失敗しました（$label、$code）" }
-            if ($RequireActive -and ($output -notmatch '(?m)^\s*active\s+zoom\.exe\b.*→ 会議アプリ:' -or $output -notmatch '(?m)^\s*active\s+discord\.exe\b.*→ 会議アプリ:')) {
-              throw 'Zoom.exe と Discord.exe の Active セッションを取得できませんでした'
-            }
-          }
-          $apps = @{}
-          foreach ($name in 'Zoom', 'Discord') {
-            $dir = Join-Path $env:RUNNER_TEMP "states-$name"
-            New-Item -ItemType Directory -Force -Path $dir | Out-Null
-            Copy-Item target/debug/examples/hold_mic.exe (Join-Path $dir "$name.exe")
-            $apps[$name] = Join-Path $dir "$name.exe"
-          }
-          # Zoom.exe: 6 秒使ったあと、ストリームを止めて（閉じずに）40 秒待つ。Discord.exe: 6 秒使ったあと、閉じて 40 秒待つ
-          $zoom = Start-Process -FilePath $apps['Zoom'] -ArgumentList '6', '--pause', '40' -PassThru -WindowStyle Hidden
-          $discord = Start-Process -FilePath $apps['Discord'] -ArgumentList '6', '--drop', '40' -PassThru -WindowStyle Hidden
-          try {
-            Start-Sleep -Seconds 3
-            Invoke-Probe '3 秒後（どちらもマイクを使っている）' -RequireActive
-            Start-Sleep -Seconds 7
-            Invoke-Probe '10 秒後（Zoom.exe はストリームを止めた・Discord.exe は閉じた。どちらもプロセスは残っている）'
-            Start-Sleep -Seconds 25
-            Invoke-Probe '35 秒後（同じ）'
-          } finally {
-            Stop-Process -Id $zoom.Id, $discord.Id -Force -ErrorAction SilentlyContinue
-          }
-          Start-Sleep -Seconds 3
-          Invoke-Probe 'プロセスが終わったあと'
-
-  # 会議中を示しうる手がかりが、実際に取れて表示されることを確かめる。
-  # hold_mic を Slack.exe の名前で動かし（マイクを使い、既定の再生のデバイスに小さな音を流す）、
-  # Edge で模擬の Google Meet のページ（退出・ミュート・カメラ・画面共有のボタンがあり、マイクを使う）を開く。
-  # マイクの許可の確認は、起動の引数（--use-fake-ui-for-media-stream）で自動で通す
-  signals:
-    name: 会議中を示しうる手がかり（Windows）
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
-        with:
-          toolchain: stable
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-
-      - name: 仮想のオーディオケーブルのインストール
-        uses: LABSN/sound-ci-helpers@e9d6ba52163a3283714a68412036ddf33f78d49c # v1
-
-      - name: マイクへのアクセスを許可
-        shell: pwsh
-        run: |
-          $base = 'CapabilityAccessManager\ConsentStore\microphone'
-          $paths = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\$base",
-                   "HKCU:\Software\Microsoft\Windows\CurrentVersion\$base",
-                   "HKCU:\Software\Microsoft\Windows\CurrentVersion\$base\NonPackaged"
-          foreach ($p in $paths) {
-            if (-not (Test-Path $p)) { New-Item -Path $p -Force | Out-Null }
-            Set-ItemProperty -Path $p -Name Value -Value Allow
-          }
-
-      - name: ビルド
-        run: cargo build -p kiroscribe-core --example hold_mic --example meeting_probe --locked
-
-      - name: 手がかりの表示
+      - name: 判定表の印と判定
         shell: pwsh
         run: |
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           $probe = (Resolve-Path 'target/debug/examples/meeting_probe.exe').Path
-          $work = Join-Path $env:RUNNER_TEMP 'signals'
+          $work = Join-Path $env:RUNNER_TEMP 'rules'
           New-Item -ItemType Directory -Force -Path $work | Out-Null
           $slack = Join-Path $work 'Slack.exe'
           Copy-Item target/debug/examples/hold_mic.exe $slack
-          $page = Join-Path $work 'meet.html'
+          $joined = Join-Path $work 'meet.html'
           @'
           <!doctype html><html><head><meta charset="utf-8"><title>Meet - abc-defg-hij</title></head><body>
           <button aria-label="Leave call">x</button>
           <button aria-label="Turn on microphone">m</button>
-          <button aria-label="Turn off camera">c</button>
-          <button aria-label="Share screen">s</button>
-          <button>Reload</button>
-          <script>navigator.mediaDevices.getUserMedia({ audio: true }).then(() => { document.title += ' (mic)'; }, (e) => { document.title += ' (' + e.name + ')'; });</script>
+          <script>navigator.mediaDevices.getUserMedia({ audio: true });</script>
           </body></html>
-          '@ | Set-Content -Encoding UTF8 $page
-          $edge = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
-          $wait = Join-Path $work 'meet-wait.html'
+          '@ | Set-Content -Encoding UTF8 $joined
+          $waiting = Join-Path $work 'meet-wait.html'
           @'
           <!doctype html><html><head><meta charset="utf-8"><title>Meet - abc-defg-hij</title></head><body>
           <p>参加の準備は整いましたか?</p>
           <button aria-label="Join now">j</button>
-          <button aria-label="Turn off microphone">m</button>
           <script>navigator.mediaDevices.getUserMedia({ audio: true });</script>
           </body></html>
-          '@ | Set-Content -Encoding UTF8 $wait
-          function Start-Edge([string[]]$extra, [string]$target = $page) {
+          '@ | Set-Content -Encoding UTF8 $waiting
+          $edge = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+          function Start-Edge([string]$target) {
             $userData = Join-Path $work ("edge-" + [guid]::NewGuid())
-            $edgeArgs = @('--no-first-run', '--no-default-browser-check', '--use-fake-ui-for-media-stream', "--user-data-dir=$userData", '--new-window') + $extra + @("file:///$($target -replace '\\', '/')")
+            $edgeArgs = @('--no-first-run', '--no-default-browser-check', '--use-fake-ui-for-media-stream', "--user-data-dir=$userData", '--new-window', "file:///$($target -replace '\\', '/')")
             Start-Process -FilePath $edge -ArgumentList $edgeArgs | Out-Null
           }
-          # 確認用の道具を 1 回動かし、表示して、出力を返す
-          function Invoke-Probe([string]$label) {
+          # 確認用の道具を、決めた秒数だけ動かして、書き出したものを返す（製品と同じく、2 回以上調べたあとの判定を見る）
+          function Invoke-Probe([string]$label, [int]$seconds) {
             Write-Host "=== $label"
-            $output = (& $probe --once --titles --output (Join-Path $work 'once.txt')) -join "`n"
-            if ($LASTEXITCODE -ne 0) { throw "meeting_probe が失敗しました（$label、$LASTEXITCODE）" }
+            $file = Join-Path $work ("probe-" + [guid]::NewGuid() + ".txt")
+            $stdin = Join-Path $work 'stdin.txt'
+            "ci 目印 $label" | Set-Content -Encoding UTF8 $stdin
+            $running = Start-Process -FilePath $probe -ArgumentList '--titles', '--output', $file -RedirectStandardInput $stdin -RedirectStandardOutput (Join-Path $work 'stdout.txt') -PassThru -WindowStyle Hidden
+            Start-Sleep -Seconds $seconds
+            Stop-Process -Id $running.Id -Force -ErrorAction SilentlyContinue
+            $output = Get-Content -Raw -Encoding UTF8 $file
             Write-Host $output
             return $output
           }
-          $controls = '(?m)^\s*部品 msedge\.exe 0x[0-9a-f]+ 退出=あり'
-          # 窓の中の部品が出るまで、何回か調べる（ブラウザが部品の情報を作るまで時間がかかることがある）
-          function Wait-Controls([string]$label, [string]$pattern = $controls) {
-            for ($i = 1; $i -le 6; $i++) {
-              Start-Sleep -Seconds 3
-              $output = Invoke-Probe "$label（$i 回目）"
-              if ($output -match $pattern) { break }
-            }
-            return $output
-          }
-          $hold = Start-Process -FilePath $slack -ArgumentList '120', '--play' -PassThru -WindowStyle Hidden
-          Start-Edge @()
+          $hold = Start-Process -FilePath $slack -ArgumentList '120', '--play', '--window', 'HoldMicSlackWindow', '--button', 'ハドルから退出する' -PassThru
           $failures = @()
           try {
-            $output = Wait-Controls 'Edge（既定の起動）'
-            $plain = $output -match $controls
-            "既定の起動の Edge で、窓の中の部品を読めたか: $plain"
-            if (-not $plain) {
-              Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue
-              Start-Sleep -Seconds 2
-              Start-Edge @('--force-renderer-accessibility')
-              $output = Wait-Controls 'Edge（--force-renderer-accessibility）'
-            }
+            Start-Edge $joined
+            $output = Invoke-Probe '参加中の Meet のページと、Slack の名前のプログラム' 20
             $checks = [ordered]@{
-              '録音の端点の一覧'           = '(?m)^\s*録音の端点: \d+ 台'
-              '録音のセッション（端点ごと・ピーク）' = '(?m)^\s*録音 端点\d+ slack\.exe pid=\d+ active ピーク \d\.\d{3}'
-              '再生のセッション（音あり）'   = '(?m)^\s*再生 端点\d+ slack\.exe pid=\d+ active ピーク \d\.\d{3}（(小|中|大)）'
-              '会議のページの窓'           = '(?m)^\s*窓 msedge\.exe 0x[0-9a-f]+ クラス=Chrome_WidgetWin_1 .*会議らしい名前（製品の判定では Google Meet）「Meet - abc-defg-hij'
-              '退出のボタン'               = '(?m)^\s*部品 msedge\.exe 0x[0-9a-f]+ 退出=あり（Button）.*「Leave call」'
-              'ミュートの解除のボタン'     = 'ミュート=あり（Button・解除の名前）'
-              'カメラのボタン'             = 'カメラ=あり（Button）'
-              '画面共有のボタン'           = '画面共有=あり（Button）'
-              'カメラの使用状況'           = '(?m)^\s*カメラ（ConsentStore の webcam）: '
-              '既定の録音デバイス'         = '(?m)^\s*録音の既定のデバイス: 端点 \d+、通信用の既定: 端点 \d+'
-              'ブラウザの録音のセッション' = '(?m)^\s*録音 端点\d+ msedge\.exe pid=\d+（ブラウザ）'
-              '判定表（強い印で参加中）'   = '(?m)^\s*判定表 Google Meet: 参加中 立った: 退出ボタン（強）'
-              '判定表（弱い印 2 つで参加中）' = '(?m)^\s*判定表 Slack ハドル: 参加中（強い印なし、あと \d+ 秒で終了） 立った: Slack のマイク（弱）・Slack の再生の音（弱）'
+              '録音のセッション'                 = '(?m)^\s*録音 active slack\.exe'
+              '再生のセッション（音あり）'       = '(?m)^\s*再生 active slack\.exe 音あり（ピーク \d\.\d{3}）'
+              'ブラウザの録音のセッション'       = '(?m)^\s*録音 active msedge\.exe'
+              '会議のページの窓と印'             = '(?m)^\s*窓 msedge\.exe 0x[0-9a-f]+ クラス=Chrome_WidgetWin_1 表示 題「Meet - abc-defg-hij.*印: .*Google Meet の退出ボタン（強）'
+              '退出のボタン'                     = '(?m)^\s*窓 msedge\.exe 0x[0-9a-f]+ の部品: \d+ 個を調べた。.*Leave call（Button）'
+              'Meet の開始の確定'               = '★ 会議の開始を確定: Google Meet（強い印（msedge\.exe の窓）: 退出ボタン'
+              'Slack の退出のボタン'             = '(?m)^\s*Slack ハドル: 参加中（slack\.exe の窓） 退出ボタン（強）'
+              '2 つの会議の段階'                 = '(?m)^\s*段階: 会議中（.+）、ほかの会議: (Google Meet|Slack ハドル)'
+              '目印'                             = '(?m)^\[\d\d:\d\d:\d\d\] ◆ 目印 1: ci 目印'
             }
-            # ブラウザがマイクを子プロセス（音声サービス）で開いたか。開いたなら、親と結び付けて出ているはず（結果を表示するだけ）
-            $child = [regex]::Match($output, '(?m)^\s*録音 端点\d+ msedge\.exe pid=\d+（ブラウザ） 子プロセス=\S+ 親=msedge\.exe pid=\d+')
-            "Edge の録音のセッションが子プロセスのものか: $($child.Success) $($child.Value.Trim())"
             foreach ($name in $checks.Keys) {
               $ok = $output -match $checks[$name]
               "確認: $name → $ok"
               if (-not $ok) { $failures += $name }
             }
-            # 参加前の待機画面（題もマイクも参加中と同じ）では、参加ボタンが打ち消しの印になり、参加中と判定しない
+            # 参加前の待機画面（題もマイクも参加中と同じ）では、参加ボタンが打ち消しの印になり、Meet を始めない
             Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $hold.Id -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 2
-            Start-Edge @() $wait
-            $output = Wait-Controls 'Edge（待機画面）' '(?m)^\s*部品 msedge\.exe 0x[0-9a-f]+ 退出=なし 参加=あり'
-            $waiting = '(?m)^\s*判定表 Google Meet: 待機（打ち消しの印がある） 立った: 待機画面の参加ボタン（打ち消し）・Meet の窓の名前（中）'
-            $ok = $output -match $waiting
-            "確認: 判定表（待機画面は参加中にしない） → $ok"
-            if (-not $ok) { $failures += '判定表（待機画面）' }
-            # 続けて動かし、目印（標準入力の 1 行）とファイルへの書き出しを確かめる
-            $stdin = Join-Path $work 'stdin.txt'
-            'ci 目印' | Set-Content -Encoding UTF8 $stdin
-            $file = Join-Path $work 'probe-output.txt'
-            $running = Start-Process -FilePath $probe -ArgumentList '--output', $file -RedirectStandardInput $stdin -RedirectStandardOutput (Join-Path $work 'stdout.txt') -PassThru -WindowStyle Hidden
-            Start-Sleep -Seconds 10
-            Stop-Process -Id $running.Id -Force -ErrorAction SilentlyContinue
-            $written = Get-Content -Raw -Encoding UTF8 $file
-            "=== 書き出したファイル"
-            $written
-            if ($written -notmatch '(?m)^\[\d\d:\d\d:\d\d\] ◆ 目印 1: ci 目印') { $failures += '目印' }
-            if ($written -notmatch '(?m)^\s*-- 会議中を示しうる手がかり') { $failures += 'ファイルへの書き出し' }
+            Start-Edge $waiting
+            $output = Invoke-Probe 'Meet の待機画面' 20
+            $ok = ($output -match '(?m)^\s*Google Meet: 待機（msedge\.exe の窓） .*待機画面の参加ボタン（打ち消し）') -and ($output -notmatch '会議の開始を確定: Google Meet')
+            "確認: 待機画面は参加中にしない → $ok"
+            if (-not $ok) { $failures += '待機画面' }
           } finally {
             Stop-Process -Id $hold.Id -Force -ErrorAction SilentlyContinue
             Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue
           }
-          if ($failures.Count -gt 0) { throw "出なかった手がかり: $($failures -join '、')" }
+          if ($failures.Count -gt 0) { throw "確かめられなかったこと: $($failures -join '、')" }
