@@ -188,10 +188,16 @@ fn mask_url_queries(text: &str) -> String {
     }
 }
 
-/// ログに書く文字列を整える: API キーの形の文字列・利用者のフォルダの名前・URL のクエリを伏せ、
-/// [`MAX_TEXT_CHARS`] 文字で切る。
+/// API キーの形の文字列・URL のクエリ・利用者のフォルダの名前を伏せる（長さは変えない）。
+/// URL のクエリは、利用者のフォルダの名前より先に伏せる。名前は空白では終わらないため、
+/// パスの後ろに URL が続くと、名前と一緒に URL の `https:` まで置き換わり、クエリを URL として見つけられなくなる。
+pub fn mask_text(text: &str) -> String {
+    mask_user_folders(&mask_url_queries(&redact_api_keys(text)))
+}
+
+/// ログに書く文字列を整える: [`mask_text`] で伏せ、[`MAX_TEXT_CHARS`] 文字で切る。
 pub fn sanitize_text(text: &str) -> String {
-    let masked = mask_url_queries(&mask_user_folders(&redact_api_keys(text)));
+    let masked = mask_text(text);
     if masked.chars().count() <= MAX_TEXT_CHARS {
         return masked;
     }
@@ -780,6 +786,11 @@ mod tests {
             sanitize_text("error sending request for url (https://example.com/a.zip?X-Amz-Signature=abc&x=1): timeout"),
             "error sending request for url (https://example.com/a.zip?<query>): timeout"
         );
+        // 利用者のフォルダのパスの後ろに URL が続いても、URL のクエリを伏せる
+        let path_then_url = sanitize_text(r"save C:\Users\taro failed https://example.com/a.zip?X-Amz-Signature=abc");
+        assert!(!path_then_url.contains("X-Amz-Signature") && !path_then_url.contains("taro"), "{path_then_url}");
+        let path_then_url = sanitize_text("/home/taro url=https://example.com/a?sig=abc");
+        assert!(!path_then_url.contains("sig=abc") && !path_then_url.contains("taro"), "{path_then_url}");
         let long = "あ".repeat(MAX_TEXT_CHARS + 50);
         let cut = sanitize_text(&long);
         assert_eq!(cut.chars().count(), MAX_TEXT_CHARS + 1);

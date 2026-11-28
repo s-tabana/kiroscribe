@@ -5,6 +5,8 @@
 //! - マイクを使ったアプリは、実行ファイルの名前（利用者の名前を含むフルパスは残さない）か、ストアアプリのパッケージ名だけ
 //! - ウィンドウは、いまマイクを使っているブラウザのものだけ（検出に使うのはそれだけ）。ほかのウィンドウのタイトルは残さない
 //! - 記録はメモリーにだけ置き（新しいものから [`CAPACITY`] 件）、利用者が書き出すまでディスクには書かない
+//! - 書き出す（保存する・提出する）ときは、[`MeetingRecord::redacted`] でウィンドウのタイトルの API キーの形の文字列・
+//!   URL のクエリ・利用者のフォルダの名前を伏せる。メモリーの記録は、判定と同じタイトルのまま持つ
 //!
 //! 書き出したファイル（[`MeetingRecord`]）は、[`replay`] で製品と同じ間隔・同じ判定のまま再生できる。
 //! `expected` に起きるはずの出来事を書き足して `crates/core/tests/fixtures/meetings/` に置くと、回帰テストになる。
@@ -133,6 +135,21 @@ pub struct MeetingRecord {
     /// 回帰テストの説明（書き出したときは空）
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+}
+
+impl MeetingRecord {
+    /// 外に出す形にする: ウィンドウのタイトルを [`crate::debug_log::mask_text`] で伏せる。
+    /// 会議の判定に使う言葉（サービスの名前・ブラウザの名前・`meet.google.com` など）は残るので、再生の結果は変わらない。
+    /// 判定に使う末尾（「 | Discord」など）が欠けないよう、文字数では切らない。
+    pub fn redacted(&self) -> Self {
+        let mut record = self.clone();
+        for entry in &mut record.entries {
+            for window in &mut entry.observation.windows {
+                window.title = crate::debug_log::mask_text(&window.title);
+            }
+        }
+        record
+    }
 }
 
 /// 出来事の名前。例: `started:googleMeet`・`ended:zoom`
@@ -320,5 +337,39 @@ mod tests {
         let json = serde_json::to_string_pretty(&record).unwrap();
         let read: MeetingRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(replay(&read), vec!["started:googleMeet", "ended:googleMeet"]);
+    }
+
+    /// 書き出す形では、タイトルの秘密になりうる部分を伏せる。会議の判定に使う部分は残るので、再生の結果は変わらない。
+    // [MTG-026]
+    #[test]
+    fn a_redacted_record_hides_secrets_and_replays_the_same() {
+        let mut recorder = MeetingRecorder::default();
+        let chrome = r"C:\b\chrome.exe";
+        let quiet = observation(&[(chrome, false)], &[]);
+        let meet = observation(
+            &[(chrome, true)],
+            &[("chrome.exe", "https://meet.google.com/abc-defg-hij?authuser=SECRETQUERY - Google Chrome")],
+        );
+        let discord = observation(
+            &[(chrome, true)],
+            &[("chrome.exe", r"#雑談 | C:\Users\山田 太郎\x sk-proj-SECRETKEY123 - Discord - Google Chrome")],
+        );
+        recorder.record(0, &quiet, None);
+        recorder.record(10_000, &meet, None);
+        recorder.record(40_000, &quiet, None);
+        recorder.record(120_000, &discord, None);
+        recorder.record(150_000, &quiet, None);
+        let record = recorder.export("0.4.3", None);
+        let redacted = record.redacted();
+        let json = serde_json::to_string(&redacted).unwrap();
+        // 失敗したときの表示には、伏せるべき値を出さず、何が残っていたかの名前だけを出す
+        for (label, secret) in [("URL のクエリ", "SECRETQUERY"), ("API キー", "SECRETKEY"), ("利用者の名前", "山田")] {
+            assert!(!json.contains(secret), "書き出す形に{label}が残っている");
+        }
+        // 元の記録（メモリーの中）は変えない
+        assert!(serde_json::to_string(&record).unwrap().contains("SECRETQUERY"));
+        let expected = vec!["started:googleMeet", "ended:googleMeet", "started:discord", "ended:discord"];
+        assert_eq!(replay(&record), expected);
+        assert_eq!(replay(&redacted), expected);
     }
 }

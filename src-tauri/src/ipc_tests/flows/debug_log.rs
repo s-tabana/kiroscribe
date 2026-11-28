@@ -69,8 +69,18 @@ fn recording_transcription_and_ai_are_logged_without_secrets_or_text() {
     assert!(!failed[0]["fields"]["reason"].as_str().unwrap().is_empty());
 
     let text = h.debug_log_text();
-    for secret in [OPENAI_KEY, ANTHROPIC_KEY, TRANSCRIPT, USER_NOTES, QUESTION, "リリースは 12/5", "社外秘", "9800"] {
-        assert!(!text.contains(secret), "ログに「{secret}」が入っている:\n{text}");
+    // 失敗したときの表示には、伏せるべき値もログの中身も出さず、何が入っていたかの名前だけを出す
+    for (label, secret) in [
+        ("OpenAI の API キー", OPENAI_KEY),
+        ("Anthropic の API キー", ANTHROPIC_KEY),
+        ("文字起こし", TRANSCRIPT),
+        ("メモ", USER_NOTES),
+        ("AI チャットの質問", QUESTION),
+        ("AI が作った議事録の本文", "リリースは 12/5"),
+        ("メモの一部（社外秘）", "社外秘"),
+        ("メモの一部（金額）", "9800"),
+    ] {
+        assert!(!text.contains(secret), "ログに{label}が入っている");
     }
 }
 
@@ -202,8 +212,14 @@ fn the_saved_bundle_has_logs_record_and_environment_but_no_secrets() {
         let mut file = zip.by_index(i).unwrap();
         file.read_to_string(&mut all).unwrap();
     }
-    for secret in [OPENAI_KEY, ANTHROPIC_KEY, TRANSCRIPT, USER_NOTES, "山田"] {
-        assert!(!all.contains(secret), "zip に「{secret}」が入っている");
+    for (label, secret) in [
+        ("OpenAI の API キー", OPENAI_KEY),
+        ("Anthropic の API キー", ANTHROPIC_KEY),
+        ("文字起こし", TRANSCRIPT),
+        ("メモ", USER_NOTES),
+        ("利用者の名前", "山田"),
+    ] {
+        assert!(!all.contains(secret), "zip に{label}が入っている");
     }
     let mut env = String::new();
     zip.by_name("environment.json").unwrap().read_to_string(&mut env).unwrap();
