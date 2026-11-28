@@ -101,7 +101,9 @@ pub const NOT_BROWSERS: &[&str] = &[
     "zcscpthost.exe",
 ];
 
-/// 判定の対象のブラウザ: 組み込みの一覧（[`BROWSERS`]）と、設定で足したもの（SET-021）。[`NOT_BROWSERS`] は含めない。
+/// 判定の対象のブラウザ: 組み込みの一覧（[`BROWSERS`]）と、設定で足したもの（SET-021）。[`NOT_BROWSERS`] と、
+/// 判定表の `apps` に実行ファイルの名前を書いたデスクトップの会議アプリ（slack.exe・zoom.exe など）は含めない。
+/// 会議アプリは設定で足しても、その実行ファイルの名前の印で判定する（MTG-002）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Browsers {
     extra: Vec<String>,
@@ -113,9 +115,12 @@ impl Browsers {
         Browsers { extra: Vec::new() }
     }
 
-    /// 組み込みの一覧に、設定で足したブラウザ（実行ファイルの名前）を加える。名前は設定と同じ形に整える。
+    /// 組み込みの一覧に、設定で足したブラウザ（実行ファイルの名前）を加える。名前は設定と同じ形に整え、
+    /// デスクトップの会議アプリは除く。
     pub fn with_extra(names: &[String]) -> Self {
-        Browsers { extra: crate::settings::normalize_browsers(names) }
+        let mut extra = crate::settings::normalize_browsers(names);
+        extra.retain(|exe| !Rules::builtin().is_desktop_app(exe));
+        Browsers { extra }
     }
 
     /// 設定で足したブラウザ（整えた実行ファイルの名前）。
@@ -126,7 +131,8 @@ impl Browsers {
     /// 対象のブラウザか（実行ファイルの名前。大文字小文字は区別しない）。
     pub fn contains(&self, exe: &str) -> bool {
         let exe = exe.to_lowercase();
-        !NOT_BROWSERS.contains(&exe.as_str()) && (BROWSERS.contains(&exe.as_str()) || self.extra.contains(&exe))
+        !NOT_BROWSERS.contains(&exe.as_str())
+            && (BROWSERS.contains(&exe.as_str()) || (self.extra.contains(&exe) && !Rules::builtin().is_desktop_app(&exe)))
     }
 }
 
@@ -257,6 +263,19 @@ mod tests {
         for exe in NOT_BROWSERS {
             assert!(!browsers.contains(exe), "{exe}");
             assert!(!browsers.contains(&exe.to_uppercase()), "{exe}");
+        }
+    }
+
+    /// 判定表のデスクトップの会議アプリは、設定で足してもブラウザとして扱わない。
+    // [MTG-002][SET-021]
+    #[test]
+    fn desktop_meeting_apps_added_in_settings_are_not_browsers() {
+        let browsers = Browsers::with_extra(&["Slack.exe".into(), "zoom".into(), "cpthost.exe".into(), "mybrowser".into()]);
+        assert_eq!(browsers.extra(), ["mybrowser.exe"]);
+        // 整える前の名前が混ざっても（保存の経路を通らない場合）、判定では対象にしない
+        let browsers = Browsers { extra: vec!["slack.exe".into(), "zoom.exe".into()] };
+        for exe in ["slack.exe", "SLACK.EXE", "zoom.exe"] {
+            assert!(!browsers.contains(exe), "{exe}");
         }
     }
 

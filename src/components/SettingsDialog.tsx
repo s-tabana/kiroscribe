@@ -63,16 +63,26 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
 
   /** 保存されている設定（画面の外で変わったときに、どの項目が変わったかを知るため） */
   const saved = useRef<Settings | null>(null);
+  /** 画面に出している設定（state と同じ値。通知と保存の応答で、今の表示と比べるため） */
+  const shown = useRef<Settings | null>(null);
   /** 読み込みか保存の後に、この画面で書き換えた項目。画面の外の変更と保存の応答では、これらの項目を上書きしない */
   const edited = useRef(new Set<keyof Settings>());
+
+  const show = (next: Settings) => {
+    shown.current = next;
+    setSettings(next);
+  };
 
   useEffect(() => {
     Promise.all([backend.getSettings(), backend.getApiKeyStatus()])
       .then(([s, k]) => {
-        saved.current = s;
-        setSettings(s);
-        setBrowsersText(formatBrowsers(s.extraBrowsers));
         setKeys(k);
+        // 読み込みの応答より先に設定の通知が届いていたら、通知のほうが新しいので、応答の設定は使わない
+        // （使うと、通知の後にこの画面で書き換えた項目と、通知で反映した項目が消える）
+        if (saved.current) return;
+        saved.current = s;
+        show(s);
+        setBrowsersText(formatBrowsers(s.extraBrowsers));
       })
       .catch((err) => setMessage({ kind: "error", text: errorMessage(err) }));
   }, [backend]);
@@ -84,19 +94,25 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
     () =>
       backend.onSettingsChanged((next) => {
         const before = saved.current;
+        const current = shown.current;
         saved.current = next;
-        const keep = new Set(edited.current);
-        const apply = (key: keyof Settings) =>
-          !keep.has(key) && (!before || JSON.stringify(before[key]) !== JSON.stringify(next[key]));
-        if (apply("extraBrowsers")) setBrowsersText(formatBrowsers(next.extraBrowsers));
-        setSettings((shown) => {
-          if (!shown || !before) return next;
-          const merged = { ...shown };
-          for (const key of Object.keys(next) as (keyof Settings)[]) {
-            if (apply(key)) Object.assign(merged, { [key]: next[key] });
-          }
-          return merged;
-        });
+        if (!before || !current) {
+          edited.current.clear();
+          show(next);
+          setBrowsersText(formatBrowsers(next.extraBrowsers));
+          return;
+        }
+        const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+        const merged = { ...current };
+        for (const key of Object.keys(next) as (keyof Settings)[]) {
+          if (same(before[key], next[key])) continue;
+          // 書き換えた項目でも、表示が保存済みの値に戻っているなら書きかけではないので、画面の外の変更を反映する
+          if (edited.current.has(key) && !same(current[key], before[key])) continue;
+          edited.current.delete(key);
+          Object.assign(merged, { [key]: next[key] });
+          if (key === "extraBrowsers") setBrowsersText(formatBrowsers(next.extraBrowsers));
+        }
+        show(merged);
       }),
     [backend],
   );
@@ -114,8 +130,9 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
   }, [onClose, helpTab]);
 
   const update = <K extends keyof Settings>(key: K, value: Settings[K]) => {
+    if (!shown.current) return;
     edited.current.add(key);
-    setSettings((prev) => (prev ? { ...prev, [key]: value } : prev));
+    show({ ...shown.current, [key]: value });
   };
 
   const save = async () => {
@@ -128,12 +145,10 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
       const stored = await backend.saveSettings(settings);
       saved.current = stored;
       const keep = new Set(edited.current);
-      setSettings((shown) => {
-        if (!shown) return stored;
-        const merged = { ...stored };
-        for (const key of keep) Object.assign(merged, { [key]: shown[key] });
-        return merged;
-      });
+      const current = shown.current;
+      const merged = { ...stored };
+      if (current) for (const key of keep) Object.assign(merged, { [key]: current[key] });
+      show(merged);
       if (!keep.has("extraBrowsers")) setBrowsersText(formatBrowsers(stored.extraBrowsers));
       setMessage({ kind: "ok", text: "設定を保存しました" });
     } catch (err) {

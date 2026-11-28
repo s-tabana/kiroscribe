@@ -110,10 +110,13 @@ pub fn scan_targets(rules: &Rules, browsers: &Browsers, windows: &[WindowFact], 
         .iter()
         .filter(|window| window.visible)
         .filter(|window| {
-            if browsers.contains(&window.exe) {
+            // デスクトップの会議アプリは、設定でブラウザとして足してあっても、題によらず窓の中を調べる（MTG-002）
+            if rules.scans_desktop(&window.exe) {
+                true
+            } else if browsers.contains(&window.exe) {
                 rules.browser_title_matches(&window.title) || meeting_windows.contains(&window.hwnd)
             } else {
-                rules.scans_desktop(&window.exe)
+                false
             }
         })
         .map(|window| window.hwnd)

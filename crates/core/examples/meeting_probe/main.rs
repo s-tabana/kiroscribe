@@ -70,10 +70,15 @@ fn expected_app(name: &str) -> Option<MeetingApp> {
     }
 }
 
-/// 引数の値を取る。値がないときと、次の引数（`--` で始まるもの）しかないときは、`missing` を返す
-/// （`--browser --once` の `--once` を名前として取らない）。
+/// 短い形の引数（`-` 1 つで始まるもの）。
+const SHORT_OPTIONS: &[&str] = &["-h"];
+
+/// 引数の値を取る。値がないときと、次の引数（`--` で始まるものと、[`SHORT_OPTIONS`]）しかないときは、`missing` を返す
+/// （`--browser --once` の `--once` や、`--browser -h` の `-h` を名前として取らない）。
 fn value(args: &mut impl Iterator<Item = String>, missing: &str) -> Result<String, String> {
-    args.next().filter(|value| !value.starts_with("--")).ok_or_else(|| missing.to_string())
+    args.next()
+        .filter(|value| !value.starts_with("--") && !SHORT_OPTIONS.contains(&value.as_str()))
+        .ok_or_else(|| missing.to_string())
 }
 
 fn options(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
@@ -351,6 +356,11 @@ mod tests {
         assert!(error.contains("--browser には"), "{error}");
         assert!(options(["--once", "--browser", "--require-sessions"].map(String::from)).is_err());
         assert!(options(["--output", "--once"].map(String::from)).is_err());
+        // 短い形の引数も名前として取らず、続けて調べ始めない
+        let error = options(["--browser", "-h"].map(String::from)).err().unwrap();
+        assert!(error.contains("--browser には"), "{error}");
+        assert!(options(["--output", "-h"].map(String::from)).is_err());
+        assert!(options(["-h"].map(String::from)).unwrap().help);
     }
 
     #[test]

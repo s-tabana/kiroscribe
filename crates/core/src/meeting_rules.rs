@@ -335,7 +335,12 @@ impl Rules {
 
     /// 対象のアプリか（判定表の `apps` に書いた実行ファイルか、対象のブラウザ）。
     pub fn is_target(&self, exe: &str, browsers: &Browsers) -> bool {
-        browsers.contains(exe) || self.signals().any(|signal| signal.apps.exes.iter().any(|known| known == exe))
+        browsers.contains(exe) || self.is_desktop_app(exe)
+    }
+
+    /// 判定表の `apps` に実行ファイルの名前を書いた、デスクトップの会議アプリか（小文字の名前で比べる）。
+    pub fn is_desktop_app(&self, exe: &str) -> bool {
+        self.signals().any(|signal| signal.apps.exes.iter().any(|known| known == exe))
     }
 
     /// 部品の印のある、デスクトップのアプリか（その窓の中を調べる）。
