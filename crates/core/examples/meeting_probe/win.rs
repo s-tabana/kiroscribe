@@ -34,8 +34,8 @@ use windows::Win32::UI::Accessibility::{
 };
 
 use crate::signals::{
-    control_category, is_listed_window, is_target_exe, AudioSession, AudioSnapshot, Control, Endpoint, Flow, UiaScan, UiaWindow,
-    WindowSnapshot,
+    child_kind, control_category, is_listed_window, is_target_exe, sanitize_session_id, AudioSession, AudioSnapshot,
+    ChildProcess, Control, Endpoint, Flow, SessionProblem, UiaScan, UiaWindow, WindowSnapshot, BROWSERS,
 };
 
 /// このスレッドで COM を使えるようにし、終わったら戻す（初期化できたときだけ）。
@@ -73,10 +73,19 @@ const PEAK_SAMPLE_GAP: std::time::Duration = std::time::Duration::from_millis(30
 /// 録音か再生の、すべての有効な端点のセッションと、その音の大きさ。
 pub fn read_audio(flow: Flow, names: bool) -> AudioSnapshot {
     let _com = Com::init();
-    let mut snapshot =
-        AudioSnapshot { flow, endpoints: Vec::new(), sessions: Vec::new(), error: None, failures: 0, first_failure: None };
+    let mut snapshot = AudioSnapshot {
+        flow,
+        endpoints: Vec::new(),
+        sessions: Vec::new(),
+        error: None,
+        failures: 0,
+        first_failure: None,
+        problems: Vec::new(),
+        default_errors: Vec::new(),
+    };
     let mut meters: Vec<(usize, IAudioMeterInformation)> = Vec::new();
-    if let Err(err) = unsafe { list(flow, names, &mut snapshot, &mut meters) } {
+    let mut processes = Processes::read();
+    if let Err(err) = unsafe { list(flow, names, &mut snapshot, &mut meters, &mut processes) } {
         snapshot.error = Some(code(&err));
         return snapshot;
     }
@@ -93,6 +102,7 @@ pub fn read_audio(flow: Flow, names: bool) -> AudioSnapshot {
             }
         }
     }
+    drop(meters);
     for (session, peak) in snapshot.sessions.iter_mut().zip(peaks) {
         session.peak = peak;
     }
@@ -121,17 +131,23 @@ unsafe fn list(
     names: bool,
     snapshot: &mut AudioSnapshot,
     meters: &mut Vec<(usize, IAudioMeterInformation)>,
+    processes: &mut Processes,
 ) -> windows::core::Result<()> {
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
     let data_flow = match flow {
         Flow::Capture => eCapture,
         Flow::Render => eRender,
     };
-    let default_of = |role| enumerator.GetDefaultAudioEndpoint(data_flow, role).ok().and_then(|d| device_id(&d));
-    let console = default_of(eConsole);
-    let communications = default_of(eCommunications);
+    let mut default_of = |role, label: &str| match enumerator.GetDefaultAudioEndpoint(data_flow, role) {
+        Ok(device) => device_id(&device),
+        Err(err) => {
+            snapshot.default_errors.push(format!("{label} {}", code(&err)));
+            None
+        }
+    };
+    let console = default_of(eConsole, "既定");
+    let communications = default_of(eCommunications, "通信用");
     let devices = enumerator.EnumAudioEndpoints(data_flow, DEVICE_STATE_ACTIVE)?;
-    let mut identities = HashMap::new();
     for at in 0..devices.GetCount()? {
         let index = at as usize + 1;
         let device = match devices.Item(at) {
@@ -157,7 +173,11 @@ unsafe fn list(
             }
         };
         for session_at in 0..list.GetCount().unwrap_or(0) {
-            match list.GetSession(session_at).map_err(|err| code(&err)).and_then(|c| session(&c, index, &mut identities)) {
+            let read = match list.GetSession(session_at) {
+                Ok(control) => session(&control, index, processes),
+                Err(err) => Err(Problem { reason: code(&err), pid: None, session_id: None }),
+            };
+            match read {
                 Ok(Some((session, meter))) => {
                     if let Some(meter) = meter {
                         meters.push((snapshot.sessions.len(), meter));
@@ -165,29 +185,53 @@ unsafe fn list(
                     snapshot.sessions.push(session);
                 }
                 Ok(None) => {}
-                Err(reason) => fail(snapshot, reason),
+                Err(problem) => {
+                    fail(snapshot, problem.reason.clone());
+                    snapshot.problems.push(SessionProblem {
+                        endpoint: index,
+                        index: session_at as usize + 1,
+                        reason: problem.reason,
+                        pid: problem.pid,
+                        session_id: problem.session_id,
+                    });
+                }
             }
         }
     }
     Ok(())
 }
 
+/// 読めなかったセッションの、読めたところまで。
+struct Problem {
+    reason: String,
+    pid: Option<u32>,
+    session_id: Option<String>,
+}
+
 /// セッション 1 つと、その音の大きさのメーター。システムの音のセッションは `None`。
 unsafe fn session(
     control: &IAudioSessionControl,
     endpoint: usize,
-    identities: &mut HashMap<u32, (String, Option<String>)>,
-) -> Result<Option<(AudioSession, Option<IAudioMeterInformation>)>, String> {
-    let control2 = control.cast::<IAudioSessionControl2>().map_err(|err| code(&err))?;
+    processes: &mut Processes,
+) -> Result<Option<(AudioSession, Option<IAudioMeterInformation>)>, Problem> {
+    let problem = |reason: String, pid: Option<u32>, session_id: &Option<String>| Problem {
+        reason,
+        pid,
+        session_id: session_id.clone(),
+    };
+    let control2 =
+        control.cast::<IAudioSessionControl2>().map_err(|err| problem(code(&err), None, &None))?;
+    let session_id = control2.GetSessionIdentifier().ok().map(|id| sanitize_session_id(&take_string(id)));
     // S_OK ならシステムの音のセッション、S_FALSE ならそうでない
     let system = control2.IsSystemSoundsSession();
     if system.is_err() {
-        return Err(hresult(system.0));
+        return Err(problem(hresult(system.0), None, &session_id));
     }
     if system.0 == 0 {
         return Ok(None);
     }
-    let state = control.GetState().map_err(|err| code(&err))?;
+    let pid = control2.GetProcessId().map_err(|err| problem(format!("プロセス ID {}", code(&err)), None, &session_id))?;
+    let state = control.GetState().map_err(|err| problem(format!("状態 {}", code(&err)), Some(pid), &session_id))?;
     let state = if state == AudioSessionStateActive {
         SessionState::Active
     } else if state == AudioSessionStateExpired {
@@ -195,30 +239,150 @@ unsafe fn session(
     } else {
         SessionState::Inactive
     };
-    let pid = control2.GetProcessId().map_err(|err| code(&err))?;
-    let (exe, package) = identities.entry(pid).or_insert_with(|| process_identity(pid)).clone();
+    let identity = processes.identity(pid);
     let meter = control.cast::<IAudioMeterInformation>().ok();
-    Ok(Some((AudioSession { endpoint, pid, exe, package, state, peak: None }, meter)))
+    Ok(Some((
+        AudioSession {
+            endpoint,
+            pid,
+            exe: identity.exe,
+            package: identity.package,
+            state,
+            peak: None,
+            identity_error: identity.error,
+            exe_from_list: identity.from_list,
+            session_id,
+            child: identity.child,
+        },
+        meter,
+    )))
 }
 
-/// プロセスの実行ファイルの名前（小文字。読めなければ unknown）と、パッケージのアプリならパッケージファミリー名。
-fn process_identity(pid: u32) -> (String, Option<String>) {
-    use windows_sys::Win32::Foundation::CloseHandle;
+/// プロセス 1 つについて読めたこと。
+#[derive(Clone)]
+struct Identity {
+    exe: String,
+    package: Option<String>,
+    error: Option<String>,
+    from_list: bool,
+    child: Option<ChildProcess>,
+}
+
+/// その時点のプロセスの一覧（実行ファイルの名前と親のプロセス ID）と、読んだプロセスの情報。
+struct Processes {
+    table: HashMap<u32, (String, u32)>,
+    identities: HashMap<u32, Identity>,
+}
+
+impl Processes {
+    fn read() -> Self {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+        };
+        let mut table = HashMap::new();
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snapshot != INVALID_HANDLE_VALUE {
+                let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+                let mut ok = Process32FirstW(snapshot, &mut entry) != 0;
+                while ok {
+                    let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+                    let exe = String::from_utf16_lossy(&entry.szExeFile[..len]).to_lowercase();
+                    table.insert(entry.th32ProcessID, (exe, entry.th32ParentProcessID));
+                    ok = Process32NextW(snapshot, &mut entry) != 0;
+                }
+                CloseHandle(snapshot);
+            }
+        }
+        Processes { table, identities: HashMap::new() }
+    }
+
+    fn identity(&mut self, pid: u32) -> Identity {
+        if let Some(known) = self.identities.get(&pid) {
+            return known.clone();
+        }
+        let (mut exe, package, error) = process_identity(pid);
+        let listed = self.table.get(&pid).cloned();
+        let mut from_list = false;
+        if exe == kiroscribe_core::mic_sessions::UNKNOWN {
+            if let Some((name, _)) = &listed {
+                exe = name.clone();
+                from_list = true;
+            }
+        }
+        // ブラウザの子プロセスなら、親と種類を結び付ける（種類はコマンドラインの --type などだけを読む）
+        let child = listed.and_then(|(_, parent)| {
+            let (parent_exe, _) = self.table.get(&parent)?;
+            (BROWSERS.contains(&parent_exe.as_str()) && BROWSERS.contains(&exe.as_str())).then(|| ChildProcess {
+                kind: command_line(pid).and_then(|line| child_kind(&line)),
+                parent_pid: parent,
+                parent_exe: parent_exe.clone(),
+            })
+        });
+        let identity = Identity { exe, package, error, from_list, child };
+        self.identities.insert(pid, identity.clone());
+        identity
+    }
+}
+
+/// プロセスのコマンドライン（種類を取り出すためだけに読み、ほかには使わない）。
+fn command_line(pid: u32) -> Option<String> {
+    use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandLineInformation};
+    use windows_sys::Win32::Foundation::{CloseHandle, UNICODE_STRING};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        // UNICODE_STRING の後ろに文字列が続く。8 の倍数に揃えるため u64 で確保する
+        let mut buffer = vec![0u64; 8 * 1024];
+        let size = (buffer.len() * 8) as u32;
+        let mut written = 0u32;
+        let status = NtQueryInformationProcess(
+            handle,
+            ProcessCommandLineInformation,
+            buffer.as_mut_ptr() as *mut _,
+            size,
+            &mut written,
+        );
+        CloseHandle(handle);
+        if status < 0 {
+            return None;
+        }
+        let text = &*(buffer.as_ptr() as *const UNICODE_STRING);
+        if text.Buffer.is_null() {
+            return None;
+        }
+        let chars = std::slice::from_raw_parts(text.Buffer, text.Length as usize / 2);
+        Some(String::from_utf16_lossy(chars))
+    }
+}
+
+/// プロセスの実行ファイルの名前（小文字。読めなければ unknown）と、パッケージのアプリならパッケージファミリー名、
+/// 読めなかった理由。
+fn process_identity(pid: u32) -> (String, Option<String>, Option<String>) {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
     use windows_sys::Win32::Storage::Packaging::Appx::GetPackageFamilyName;
     use windows_sys::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     };
+    let unknown = || kiroscribe_core::mic_sessions::UNKNOWN.to_string();
+    if pid == 0 {
+        return (unknown(), None, Some("pid=0".into()));
+    }
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
-            return (kiroscribe_core::mic_sessions::UNKNOWN.into(), None);
+            return (unknown(), None, Some(format!("開けない（Win32 エラー {}）", GetLastError())));
         }
         let mut buf = [0u16; 1024];
         let mut size = buf.len() as u32;
-        let exe = if QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut size) != 0 {
-            exe_name(&String::from_utf16_lossy(&buf[..size as usize]))
+        let (exe, error) = if QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut size) != 0 {
+            (exe_name(&String::from_utf16_lossy(&buf[..size as usize])), None)
         } else {
-            kiroscribe_core::mic_sessions::UNKNOWN.into()
+            (unknown(), Some(format!("パスを読めない（Win32 エラー {}）", GetLastError())))
         };
         let mut name = [0u16; 256];
         let mut len = name.len() as u32;
@@ -226,7 +390,7 @@ fn process_identity(pid: u32) -> (String, Option<String>) {
             .then(|| package_name(&name[..(len as usize).min(name.len())]))
             .flatten();
         CloseHandle(handle);
-        (exe, package)
+        (exe, package, error)
     }
 }
 

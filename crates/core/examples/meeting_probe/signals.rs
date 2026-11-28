@@ -88,6 +88,34 @@ pub struct AudioSession {
     pub state: SessionState,
     /// 音の大きさ（IAudioMeterInformation のピーク。0.0〜1.0）。読めなければ `None`
     pub peak: Option<f32>,
+    /// プロセスを開けなかった・実行ファイルのパスを読めなかった理由
+    pub identity_error: Option<String>,
+    /// 実行ファイルの名前を、プロセスを開かずにプロセスの一覧から読んだか
+    pub exe_from_list: bool,
+    /// セッションの識別子（フルパスは実行ファイルの名前に縮めたもの。[`sanitize_session_id`]）
+    pub session_id: Option<String>,
+    /// ブラウザの子プロセスなら、その種類と親
+    pub child: Option<ChildProcess>,
+}
+
+/// ブラウザの子プロセス（Chromium の `--type=utility` の音声サービスなど）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildProcess {
+    /// 子プロセスの種類（[`child_kind`]。読めなければ `None`）
+    pub kind: Option<String>,
+    pub parent_pid: u32,
+    pub parent_exe: String,
+}
+
+/// 情報を読めなかったセッション 1 つ（捨てずに出す）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionProblem {
+    pub endpoint: usize,
+    /// 端点の中での順番（1 から）
+    pub index: usize,
+    pub reason: String,
+    pub pid: Option<u32>,
+    pub session_id: Option<String>,
 }
 
 /// 録音か再生の、端点ごとのセッションの一覧。
@@ -101,6 +129,10 @@ pub struct AudioSnapshot {
     /// 一部を読めなかったときの件数と最初の理由
     pub failures: usize,
     pub first_failure: Option<String>,
+    /// 情報を読めなかったセッション
+    pub problems: Vec<SessionProblem>,
+    /// 既定のデバイス（コンソール・通信）を読めなかった理由（有効なデバイスがないときなど）
+    pub default_errors: Vec<String>,
 }
 
 /// トップレベルの窓 1 つ。
@@ -145,6 +177,49 @@ pub struct UiaScan {
     pub elapsed_ms: u128,
     /// UI Automation そのものを使えなかった理由
     pub error: Option<String>,
+}
+
+/// 子プロセスのコマンドラインから、種類だけを取り出す（パスなどほかの部分は返さない）。
+/// - Chromium 系: `--type=utility --utility-sub-type=audio.mojom.AudioService` なら `utility（audio.mojom.AudioService）`
+/// - Firefox 系: `-contentproc ... tab` なら `contentproc（tab）`
+pub fn child_kind(command_line: &str) -> Option<String> {
+    let safe = |value: &str| {
+        let value = value.trim_matches('"');
+        (!value.is_empty() && value.len() <= 80 && value.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)))
+            .then(|| value.to_string())
+    };
+    let tokens: Vec<&str> = command_line.split_whitespace().collect();
+    let flag = |name: &str| tokens.iter().find_map(|t| t.trim_matches('"').strip_prefix(name)).and_then(safe);
+    if let Some(kind) = flag("--type=") {
+        return Some(match flag("--utility-sub-type=") {
+            Some(sub) => format!("{kind}（{sub}）"),
+            None => kind,
+        });
+    }
+    if tokens.iter().any(|t| t.trim_matches('"') == "-contentproc") {
+        let last = tokens.last().and_then(|t| safe(t)).filter(|t| t.chars().all(|c| c.is_ascii_alphabetic()));
+        return Some(match last {
+            Some(kind) => format!("contentproc（{kind}）"),
+            None => "contentproc".into(),
+        });
+    }
+    None
+}
+
+/// セッションの識別子に含まれるフルパスを、実行ファイルの名前（小文字）に縮める。
+/// 識別子は `{デバイス}|\Device\HarddiskVolume3\...\chrome.exe%b{...}` のような形で、パスに利用者の名前が入りうる。
+pub fn sanitize_session_id(id: &str) -> String {
+    id.split('|')
+        .map(|part| {
+            let (head, tail) = match part.find("%b") {
+                Some(at) => part.split_at(at),
+                None => (part, ""),
+            };
+            let head = if head.contains(['\\', '/']) { kiroscribe_core::meetings::exe_name(head) } else { head.to_string() };
+            format!("{head}{tail}")
+        })
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 /// 音の大きさの区分（ピークの数値の変化で行を出しすぎないよう、区分が変わったときだけ出し直す）。
@@ -271,6 +346,23 @@ pub fn audio_lines(snapshot: &AudioSnapshot) -> Vec<Line> {
         format!("{flow}の端点"),
         format!("  {flow}の端点: {} 台、セッション {} 件{failures}", snapshot.endpoints.len(), snapshot.sessions.len()),
     )];
+    let default_of = |pick: fn(&Endpoint) -> bool| {
+        snapshot.endpoints.iter().find(|e| pick(e)).map(|e| format!("端点 {}", e.index)).unwrap_or_else(|| "なし".into())
+    };
+    let errors = if snapshot.default_errors.is_empty() {
+        String::new()
+    } else {
+        format!("（読めない: {}）", snapshot.default_errors.join("・"))
+    };
+    lines.push(Line::new(
+        format!("{flow}/既定"),
+        format!("{flow}の既定のデバイス"),
+        format!(
+            "  {flow}の既定のデバイス: {}、通信用の既定: {}{errors}",
+            default_of(|e| e.default_console),
+            default_of(|e| e.default_communications)
+        ),
+    ));
     for endpoint in &snapshot.endpoints {
         let mut marks = Vec::new();
         if endpoint.default_console {
@@ -298,11 +390,37 @@ pub fn audio_lines(snapshot: &AudioSnapshot) -> Vec<Line> {
             None => ("ピーク 読めない".to_string(), "読めない"),
         };
         let browser = if BROWSERS.contains(&session.exe.as_str()) { "（ブラウザ）" } else { "" };
-        let text = format!("  {label}{browser}{package} {} {peak}", session.state.name());
+        let mut extra = String::new();
+        if session.exe_from_list {
+            extra.push_str(" 名前はプロセスの一覧から");
+        }
+        if let Some(child) = &session.child {
+            let kind = child.kind.as_deref().unwrap_or("種類は読めない");
+            extra.push_str(&format!(" 子プロセス={kind} 親={} pid={}", child.parent_exe, child.parent_pid));
+        }
+        if let Some(error) = &session.identity_error {
+            extra.push_str(&format!(" プロセスを読めない理由={error}"));
+        }
+        if session.identity_error.is_some() || session.exe == kiroscribe_core::mic_sessions::UNKNOWN {
+            if let Some(id) = &session.session_id {
+                extra.push_str(&format!(" 識別子={id}"));
+            }
+        }
+        let text = format!("  {label}{browser}{package}{extra} {} {peak}", session.state.name());
         lines.push(
             Line::new(format!("{flow}/セッション/{}/{}/{}/{ordinal}", session.endpoint, session.pid, session.exe), label, text)
-                .compared_by(format!("{} {level}", session.state.name())),
+                .compared_by(format!("{} {level}{extra}", session.state.name())),
         );
+    }
+    for problem in &snapshot.problems {
+        let label = format!("{flow} 端点{} の {} 番目のセッション", problem.endpoint, problem.index);
+        let pid = problem.pid.map(|pid| format!(" pid={pid}")).unwrap_or_default();
+        let id = problem.session_id.as_deref().map(|id| format!(" 識別子={id}")).unwrap_or_default();
+        lines.push(Line::new(
+            format!("{flow}/読めない/{}/{}", problem.endpoint, problem.index),
+            label.clone(),
+            format!("  {label}: 読めない（{}）{pid}{id}", problem.reason),
+        ));
     }
     lines
 }
@@ -440,7 +558,18 @@ mod tests {
     use kiroscribe_core::mic_store::MicEntry;
 
     fn session(endpoint: usize, pid: u32, exe: &str, state: SessionState, peak: Option<f32>) -> AudioSession {
-        AudioSession { endpoint, pid, exe: exe.into(), package: None, state, peak }
+        AudioSession {
+            endpoint,
+            pid,
+            exe: exe.into(),
+            package: None,
+            state,
+            peak,
+            identity_error: None,
+            exe_from_list: false,
+            session_id: None,
+            child: None,
+        }
     }
 
     fn capture(sessions: Vec<AudioSession>) -> AudioSnapshot {
@@ -451,6 +580,8 @@ mod tests {
             error: None,
             failures: 0,
             first_failure: None,
+            problems: Vec::new(),
+            default_errors: Vec::new(),
         }
     }
 
@@ -489,6 +620,42 @@ mod tests {
         assert!(texts.iter().any(|t| t.contains("pid=10 #2（ブラウザ） inactive")), "{texts:?}");
         let keys: std::collections::HashSet<&str> = lines.iter().map(|l| l.key.as_str()).collect();
         assert_eq!(keys.len(), lines.len(), "行の key は重ならない");
+    }
+
+    #[test]
+    fn unidentified_sessions_and_browser_children_are_kept() {
+        let mut child = session(1, 40, "chrome.exe", SessionState::Active, Some(0.0));
+        child.child = Some(ChildProcess {
+            kind: Some("utility（audio.mojom.AudioService）".into()),
+            parent_pid: 30,
+            parent_exe: "chrome.exe".into(),
+        });
+        let mut unknown = session(1, 50, "unknown", SessionState::Inactive, None);
+        unknown.identity_error = Some("0x80070005".into());
+        unknown.session_id = Some(sanitize_session_id(r"{0.0.1.00000000}.{abc}|\Device\HarddiskVolume3\Users\山田\app\Rec.exe%b{1}"));
+        let mut listed = session(1, 60, "zen.exe", SessionState::Active, Some(0.0));
+        listed.exe_from_list = true;
+        let mut snapshot = capture(vec![child, unknown, listed]);
+        snapshot.problems.push(SessionProblem { endpoint: 1, index: 4, reason: "0x88890004".into(), pid: Some(70), session_id: None });
+        let texts: Vec<String> = audio_lines(&snapshot).into_iter().map(|l| l.text).collect();
+        let all = texts.join("\n");
+        assert!(all.contains("録音の既定のデバイス: 端点 1、通信用の既定: 端点 1"), "{all}");
+        assert!(all.contains("chrome.exe pid=40（ブラウザ） 子プロセス=utility（audio.mojom.AudioService） 親=chrome.exe pid=30 active"), "{all}");
+        assert!(all.contains("unknown pid=50 プロセスを読めない理由=0x80070005 識別子={0.0.1.00000000}.{abc}|rec.exe%b{1} inactive"), "{all}");
+        assert!(!all.contains("山田"), "フルパスは出さない");
+        assert!(all.contains("zen.exe pid=60（ブラウザ） 名前はプロセスの一覧から active"), "{all}");
+        assert!(all.contains("録音 端点1 の 4 番目のセッション: 読めない（0x88890004） pid=70"), "{all}");
+    }
+
+    #[test]
+    fn only_the_kind_of_a_child_process_is_read_from_its_command_line() {
+        let chrome = r#""C:\Users\山田\AppData\Local\Google\Chrome\Application\chrome.exe" --type=utility --utility-sub-type=audio.mojom.AudioService --lang=ja --service-sandbox-type=audio --user-data-dir="C:\Users\山田\AppData""#;
+        assert_eq!(child_kind(chrome).as_deref(), Some("utility（audio.mojom.AudioService）"));
+        assert_eq!(child_kind("chrome.exe --type=renderer --enable-features=x").as_deref(), Some("renderer"));
+        let firefox = r#""C:\Program Files\Zen Browser\zen.exe" -contentproc --channel=1 -isForBrowser -prefsLen 3 -parentBuildID 2 {guid} 1234 tab"#;
+        assert_eq!(child_kind(firefox).as_deref(), Some("contentproc（tab）"));
+        assert_eq!(child_kind(r#""C:\Program Files\Google\Chrome\Application\chrome.exe""#), None, "親のブラウザ");
+        assert_eq!(child_kind(r#"x.exe --type=C:\Users\山田"#), None, "パスのような値は返さない");
     }
 
     #[test]
