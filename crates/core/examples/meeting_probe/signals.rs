@@ -21,6 +21,7 @@ pub fn is_target_exe(exe: &str) -> bool {
 }
 
 /// 録音か再生か。
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flow {
     Capture,
@@ -485,11 +486,13 @@ mod tests {
     #[test]
     fn titles_are_classified_without_matching_parts_of_words() {
         assert_eq!(title_kind(""), "名前なし");
-        assert_eq!(title_kind("Huddle with Sato - Slack"), "会議らしい名前");
-        assert_eq!(title_kind("ハドル: #general - Slack"), "会議らしい名前");
+        assert_eq!(title_kind("Huddle with Sato - Slack"), "会議らしい名前（製品の判定では Slack ハドル）");
+        assert_eq!(title_kind("ハドル: #general"), "会議らしい名前");
+        assert_eq!(title_kind("Meeting with Sato | Contoso"), "会議らしい名前");
         assert_eq!(title_kind("Zoom Meeting"), "会議らしい名前（製品の判定では Zoom）");
         assert_eq!(title_kind("Recall notes - Google Chrome"), "その他", "call を語の一部として当てない");
-        assert_eq!(title_kind("#general | 開発 - Discord"), "その他");
+        assert_eq!(title_kind("Discord"), "その他");
+        assert_eq!(title_kind("#general | 開発 - Discord"), "会議らしい名前（製品の判定では Discord）");
     }
 
     #[test]
