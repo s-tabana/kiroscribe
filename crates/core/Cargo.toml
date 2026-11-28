@@ -39,3 +39,12 @@ tempfile = "3"
 # 資格情報マネージャーの中身を、keyring を通さずに Windows の API で直接確かめるテスト用
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
+# 会議の検出の確認用の道具（examples/meeting_probe）で、音の大きさ・端点の名前・窓の中の部品（UI Automation）を読む。
+# 製品のビルドには入らない
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio_Endpoints", "Win32_Devices_FunctionDiscovery", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_Accessibility", "Win32_System_Ole"] }
+
+# 確認用の道具の、OS によらない部分の単体テストを cargo test で動かす
+[[example]]
+name = "meeting_probe"
+path = "examples/meeting_probe/main.rs"
+test = true
