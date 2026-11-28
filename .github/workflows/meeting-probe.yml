@@ -138,7 +138,8 @@ jobs:
 
   # 会議中を示しうる手がかりが、実際に取れて表示されることを確かめる。
   # hold_mic を Slack.exe の名前で動かし（マイクを使い、既定の再生のデバイスに小さな音を流す）、
-  # Edge で模擬の Google Meet のページ（退出・ミュート・カメラ・画面共有のボタンがある）を開く
+  # Edge で模擬の Google Meet のページ（退出・ミュート・カメラ・画面共有のボタンがあり、マイクを使う）を開く。
+  # マイクの許可の確認は、起動の引数（--use-fake-ui-for-media-stream）で自動で通す
   signals:
     name: 会議中を示しうる手がかり（Windows）
     runs-on: windows-latest
@@ -189,12 +190,13 @@ jobs:
           <button aria-label="Turn off camera">c</button>
           <button aria-label="Share screen">s</button>
           <button>Reload</button>
+          <script>navigator.mediaDevices.getUserMedia({ audio: true }).then(() => { document.title += ' (mic)'; }, (e) => { document.title += ' (' + e.name + ')'; });</script>
           </body></html>
           '@ | Set-Content -Encoding UTF8 $page
           $edge = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
           function Start-Edge([string[]]$extra) {
             $userData = Join-Path $work ("edge-" + [guid]::NewGuid())
-            $edgeArgs = @('--no-first-run', '--no-default-browser-check', "--user-data-dir=$userData", '--new-window') + $extra + @("file:///$($page -replace '\\', '/')")
+            $edgeArgs = @('--no-first-run', '--no-default-browser-check', '--use-fake-ui-for-media-stream', "--user-data-dir=$userData", '--new-window') + $extra + @("file:///$($page -replace '\\', '/')")
             Start-Process -FilePath $edge -ArgumentList $edgeArgs | Out-Null
           }
           # 確認用の道具を 1 回動かし、表示して、出力を返す
@@ -238,7 +240,12 @@ jobs:
               'カメラのボタン'             = 'カメラ=あり（Button）'
               '画面共有のボタン'           = '画面共有=あり（Button）'
               'カメラの使用状況'           = '(?m)^\s*カメラ（ConsentStore の webcam）: '
+              '既定の録音デバイス'         = '(?m)^\s*録音の既定のデバイス: 端点 \d+、通信用の既定: 端点 \d+'
+              'ブラウザの録音のセッション' = '(?m)^\s*録音 端点\d+ msedge\.exe pid=\d+（ブラウザ）'
             }
+            # ブラウザがマイクを子プロセス（音声サービス）で開いたか。開いたなら、親と結び付けて出ているはず（結果を表示するだけ）
+            $child = [regex]::Match($output, '(?m)^\s*録音 端点\d+ msedge\.exe pid=\d+（ブラウザ） 子プロセス=\S+ 親=msedge\.exe pid=\d+')
+            "Edge の録音のセッションが子プロセスのものか: $($child.Success) $($child.Value.Trim())"
             foreach ($name in $checks.Keys) {
               $ok = $output -match $checks[$name]
               "確認: $name → $ok"
